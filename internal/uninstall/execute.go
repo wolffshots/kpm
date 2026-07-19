@@ -1,0 +1,205 @@
+package uninstall
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"kpm/internal/device"
+	"kpm/internal/version"
+)
+
+// FailedPath records a deletion that errored.
+type FailedPath struct {
+	Path string
+	Err  error
+}
+
+// Result is the outcome of applying a Plan.
+type Result struct {
+	Deleted     []string // software artifacts removed
+	Purged      []string // user-data paths removed (--purge)
+	Removed     []string // empty directories rmdir'd
+	AlreadyGone []string // targets that were already absent (not an error)
+	Kept        []string // paths preserved by keep_paths inside a recursive delete (C1)
+	Skipped     []Skipped // execution-time skips (e.g. symlinked parent, C7)
+	Failed      []FailedPath
+	Marker      string // marker file created, "" if none
+}
+
+// OK reports whether the plan applied with no deletion failures.
+func (r Result) OK() bool { return len(r.Failed) == 0 }
+
+// Execute applies plan's marker creation, file deletions, and empty-directory
+// cleanup through the device layer's HostPath mapping. run_before/run_after are
+// NOT run here (the CLI runs them, honoring --force). Missing files are fine.
+func Execute(p device.Paths, plan Plan) Result {
+	var r Result
+
+	if plan.Marker != "" {
+		host := p.HostPath(plan.Marker)
+		if info, err := os.Lstat(host); err == nil {
+			// Idempotent: an existing marker is left untouched (never truncated),
+			// but a directory in its place is an error (C3).
+			if info.IsDir() {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
+			} else {
+				r.Marker = plan.Marker // already present
+			}
+		} else if !os.IsNotExist(err) {
+			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+		} else if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
+			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+		} else {
+			content := fmt.Sprintf("uninstall requested by kpm %s %s\n",
+				version.Version, time.Now().UTC().Format(time.RFC3339))
+			if err := os.WriteFile(host, []byte(content), 0o644); err != nil {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+			} else {
+				r.Marker = plan.Marker
+			}
+		}
+	}
+
+	kept := func(dev string) bool { return isKept(dev, plan.keeps) }
+
+	for _, d := range plan.Deletes {
+		// Never delete through a symlinked parent directory (C7).
+		if bad, ok := symlinkedParent(p, d.Path, plan.allowExtra); ok {
+			r.Skipped = append(r.Skipped, Skipped{d.Path, "symlinked parent " + bad})
+			continue
+		}
+		host := p.HostPath(d.Path)
+		info, err := os.Lstat(host)
+		if err != nil {
+			if os.IsNotExist(err) {
+				r.AlreadyGone = append(r.AlreadyGone, d.Path)
+				continue
+			}
+			r.Failed = append(r.Failed, FailedPath{d.Path, err})
+			continue
+		}
+		if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			if d.Recursive {
+				if _, err := removeTree(host, d.Path, kept, &r); err != nil {
+					r.Failed = append(r.Failed, FailedPath{d.Path, err})
+					continue
+				}
+			} else {
+				// A plain (non-recursive) directory target is left to the
+				// rmdir-if-empty pass so shared dirs survive.
+				continue
+			}
+		} else {
+			// Regular file or symlink: remove the entry itself (never follow).
+			if err := os.Remove(host); err != nil {
+				r.Failed = append(r.Failed, FailedPath{d.Path, err})
+				continue
+			}
+		}
+		if d.Purge {
+			r.Purged = append(r.Purged, d.Path)
+		} else {
+			r.Deleted = append(r.Deleted, d.Path)
+		}
+	}
+
+	// Deepest-first empty-directory cleanup.
+	for _, dir := range plan.Rmdirs {
+		host := p.HostPath(dir)
+		info, err := os.Lstat(host)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if err := os.Remove(host); err == nil {
+			r.Removed = append(r.Removed, dir)
+		}
+	}
+
+	return r
+}
+
+// removeTree deletes root and everything under it using lstat at every step so
+// it never follows a symlink out of the subtree: a symlink (even to a dir) is
+// unlinked, not descended into. A node matching keep_paths is preserved and
+// recorded (C1); returned survived=true so ancestors are not rmdir'd. dev is the
+// device path parallel to the host path root.
+func removeTree(host, dev string, kept func(string) bool, r *Result) (survived bool, err error) {
+	info, err := os.Lstat(host)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if kept(dev) {
+		r.Kept = append(r.Kept, dev)
+		return true, nil
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, os.Remove(host) // unlink the symlink itself
+	}
+	if info.IsDir() {
+		entries, err := os.ReadDir(host)
+		if err != nil {
+			return false, err
+		}
+		anyKept := false
+		for _, e := range entries {
+			s, err := removeTree(filepath.Join(host, e.Name()), dev+"/"+e.Name(), kept, r)
+			if err != nil {
+				return false, err
+			}
+			if s {
+				anyKept = true
+			}
+		}
+		if anyKept {
+			return true, nil // survivors remain; don't remove this dir
+		}
+		return false, os.Remove(host)
+	}
+	return false, os.Remove(host)
+}
+
+// symlinkedParent reports the deepest intermediate directory (under the
+// allowlisted prefix, excluding the leaf) that is a symlink, if any (C7).
+func symlinkedParent(p device.Paths, dev string, allowExtra []string) (string, bool) {
+	prefix := longestAllowPrefix(dev, allowExtra)
+	if prefix == "" {
+		return "", false
+	}
+	rel := strings.Trim(dev[len(prefix):], "/")
+	if rel == "" {
+		return "", false
+	}
+	segs := strings.Split(rel, "/")
+	cur := prefix
+	for i := 0; i < len(segs)-1; i++ { // parents only, not the leaf
+		cur = cur + "/" + segs[i]
+		if info, err := os.Lstat(p.HostPath(cur)); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return cur, true
+		}
+	}
+	return "", false
+}
+
+// longestAllowPrefix returns the longest allowlist prefix (built-in or
+// per-package) that dev is under, or "" if none.
+func longestAllowPrefix(dev string, allowExtra []string) string {
+	best := ""
+	consider := func(a string) {
+		if under(dev, a) && len(a) > len(best) {
+			best = a
+		}
+	}
+	for _, a := range allowPrefixes {
+		consider(a)
+	}
+	for _, a := range allowExtra {
+		consider(a)
+	}
+	return best
+}
