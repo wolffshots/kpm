@@ -8,8 +8,6 @@ install slot, pins versions, keeps a human-readable log, and updates itself the
 same way. It is driven from NickelMenu on-device and works as a normal CLI over
 telnet/SSH.
 
-See `PLAN.md` for the full design.
-
 > Firmware 4.x only. No signature verification of assets — installing a package
 > trusts its author, exactly like a manual `KoboRoot.tgz` install. Assets are
 > fetched over TLS with an embedded Mozilla CA bundle.
@@ -148,7 +146,7 @@ kpm install nickelmenu --yes        # writes packages.d/nickelmenu.toml, stamped
 kpm check && kpm update nickelmenu  # then it behaves exactly like a hand-added package
 ```
 
-Key behaviors (see REGISTRY.md for the full spec):
+Key behaviors:
 
 - **Network only in `registry refresh`** (plus an optional one-time
   forge-detection probe during `registry add`, skipped with `--forge`).
