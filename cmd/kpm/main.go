@@ -331,22 +331,46 @@ func (a *App) refreshLock() {
 	_ = os.Chtimes(a.paths.LockFile(), now, now)
 }
 
-// seedSelf records kpm's own installed_version from the compiled-in version
-// string on first run, if kpm.toml is registered and no version is recorded
-// yet (§9). This never uses --installed.
+// seedSelf records and reconciles kpm's own installed_version from the
+// compiled-in version string (internal/version.Version — what "kpm version"
+// prints), the authoritative source for kpm's own id. It runs only when
+// kpm.toml is registered and only on mutating commands, after a.reconcile()
+// has promoted any just-installed staged self-update (SELF-VERSION §1). This
+// never uses --installed.
+//
+//   - Empty record: seed it, exactly as before (any binary, including "dev").
+//   - Stale record: overwrite from the running binary, refresh InstalledAt,
+//     save, and log INFO — so an out-of-band update (USB sideload, manual
+//     KoboRoot.tgz) self-heals on the next mutating command. A normalized-equal
+//     record (tagsEqual, e.g. "v0.4.1" vs "0.4.1") is left untouched: no write,
+//     no log.
+//   - A "dev" binary never reconciles an existing record, so host sandboxes /
+//     `go run` against a copied device tree cannot pollute state.
 func (a *App) seedSelf() error {
 	if _, err := os.Stat(a.paths.PackageFile(selfID)); err != nil {
 		return nil // kpm not registered (e.g. tests)
 	}
 	ps := a.state.Get(selfID)
-	if ps.InstalledVersion != "" {
+	if ps.InstalledVersion == "" {
+		ps.InstalledVersion = version.Version
+		ps.InstalledAt = time.Now().UTC().Format(state.TimeFormat)
+		if err := a.state.Save(); err != nil {
+			return fmt.Errorf("seed self version: %w", err)
+		}
 		return nil
 	}
+	// Existing record: a "dev" binary never overwrites it (§1.5), and a
+	// normalized-equal record is a no-op (no churn, no log).
+	if version.Version == "dev" || tagsEqual(ps.InstalledVersion, version.Version) {
+		return nil
+	}
+	old := ps.InstalledVersion
 	ps.InstalledVersion = version.Version
 	ps.InstalledAt = time.Now().UTC().Format(state.TimeFormat)
-	if err := a.state.Save(); err != nil {
-		return fmt.Errorf("seed self version: %w", err)
+	if err := a.state.Save(); err != nil { // save before logging (B5)
+		return fmt.Errorf("reconcile self version: %w", err)
 	}
+	a.paths.Log("INFO", fmt.Sprintf("%s  self version reconciled %s -> %s (running binary is authoritative)", selfID, old, version.Version))
 	return nil
 }
 

@@ -65,6 +65,9 @@ as `self-update not configured` — never an error. Once kpm's release repo
 exists, set `source = "host/owner/kpm"` in that file (or `kpm add` it) and kpm
 maintains itself like any other package.
 
+kpm's own recorded version self-heals from the running binary, so a
+USB-sideloaded kpm corrects its `installed_version` on the next mutating command.
+
 ## Registering packages
 
 `kpm add <url>` writes a `packages.d/<id>.toml`. It accepts a repo URL, with an
