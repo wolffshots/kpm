@@ -37,7 +37,9 @@ func ParseAddURL(raw string) (*AddSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid url: %w", err)
 	}
-	host := u.Host
+	// Hostnames are case-insensitive; normalize so "GitHub.com" auto-detects as
+	// GitHub and the stored source is canonical.
+	host := strings.ToLower(u.Host)
 	if host == "" {
 		return nil, fmt.Errorf("url has no host: %q", raw)
 	}

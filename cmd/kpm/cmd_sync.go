@@ -7,6 +7,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/registry"
+	"kpm/internal/version"
 )
 
 // cmdSync re-copies registry defs for registry-managed packages, propagating
@@ -144,6 +145,14 @@ func (a *App) syncOne(cfg *registry.Config, p *config.Package, overwrite bool) (
 	synced := ps.SyncedDefSHA256
 
 	apply := func() (syncOutcome, bool) {
+		// Don't apply a registry def that now requires a newer kpm than we run:
+		// its asset/uninstall changes may assume features this kpm lacks. Leave
+		// the local def intact and tell the user to update kpm first (§9.8).
+		if !registry.MinKpmSatisfied(version.Version, remoteDef.MinKpm) && version.Version != "dev" {
+			a.paths.Log("WARN", fmt.Sprintf("%s  registry def requires kpm >= %s (running %s) — skipped", p.ID, remoteDef.MinKpm, version.Version))
+			fmt.Printf("%s: registry def requires kpm >= %s (running %s) — skipped; update kpm first\n", p.ID, remoteDef.MinKpm, version.Version)
+			return syncSkipped, false
+		}
 		diffs := registry.FieldDiffs(localDef, remoteDef)
 		newPkg := remoteDef.ToPackage(p.ID, p.Registry, p.Pin)
 		if err := config.SaveReplace(a.paths.PackageFile(p.ID), newPkg); err != nil {

@@ -19,18 +19,23 @@ type FailedPath struct {
 
 // Result is the outcome of applying a Plan.
 type Result struct {
-	Deleted     []string // software artifacts removed
-	Purged      []string // user-data paths removed (--purge)
-	Removed     []string // empty directories rmdir'd
-	AlreadyGone []string // targets that were already absent (not an error)
-	Kept        []string // paths preserved by keep_paths inside a recursive delete (C1)
+	Deleted     []string  // software artifacts removed
+	Purged      []string  // user-data paths removed (--purge)
+	Removed     []string  // empty directories rmdir'd
+	AlreadyGone []string  // targets that were already absent (not an error)
+	Kept        []string  // paths preserved by keep_paths inside a recursive delete (C1)
 	Skipped     []Skipped // execution-time skips (e.g. symlinked parent, C7)
 	Failed      []FailedPath
 	Marker      string // marker file created, "" if none
 }
 
-// OK reports whether the plan applied with no deletion failures.
-func (r Result) OK() bool { return len(r.Failed) == 0 }
+// OK reports whether the plan applied cleanly: no deletion failures AND no
+// execution-time safety skips. An execution-time skip (the symlinked-parent
+// case, C7) leaves a real file on disk with no other way to reach it, so it must
+// block clean unregistration just like a failure. Plan-time policy skips
+// (denylist / not-allowlisted) are the user's accepted policy and live on the
+// Plan, not the Result — they do not affect OK().
+func (r Result) OK() bool { return len(r.Failed) == 0 && len(r.Skipped) == 0 }
 
 // Execute applies plan's marker creation, file deletions, and empty-directory
 // cleanup through the device layer's HostPath mapping. run_before/run_after are

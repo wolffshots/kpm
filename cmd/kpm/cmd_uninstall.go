@@ -44,11 +44,19 @@ func (a *App) cmdUninstall(args []string) int {
 		return exitError
 	}
 
-	// Off-device safety: deletions resolve against KPM_SYSROOT; refuse to run
-	// them against a real "/" on a non-Linux host (G5).
-	if runtime.GOOS != "linux" && os.Getenv("KPM_SYSROOT") == "" {
-		fmt.Fprintln(os.Stderr, "kpm uninstall: set KPM_SYSROOT when running off-device")
-		return exitError
+	// Off-device safety: deletions resolve against KPM_SYSROOT. If KPM_ROOT is
+	// overridden (a dev/CI sandbox) but KPM_SYSROOT is not, HostPath would map
+	// deletions onto the real "/", so refuse — even on Linux, where the non-Linux
+	// guard below wouldn't catch it. On a real device both are unset (G5).
+	if os.Getenv("KPM_SYSROOT") == "" {
+		if os.Getenv("KPM_ROOT") != "" {
+			fmt.Fprintln(os.Stderr, "kpm uninstall: KPM_ROOT is set but KPM_SYSROOT is not — refusing to delete against the real rootfs; set KPM_SYSROOT")
+			return exitError
+		}
+		if runtime.GOOS != "linux" {
+			fmt.Fprintln(os.Stderr, "kpm uninstall: set KPM_SYSROOT when running off-device")
+			return exitError
+		}
 	}
 
 	pkg, err := a.loadPackage(id)
@@ -110,11 +118,18 @@ func (a *App) cmdUninstall(args []string) int {
 	a.logUninstall(id, plan, res)
 
 	if !res.OK() {
-		// Partial failure: keep the registration and state so it can be retried.
+		// Partial: a deletion failed, or an execution-time safety skip left a
+		// file on disk (symlinked parent, C7). Keep the registration AND state so
+		// the leftover is not orphaned and the uninstall can be retried. Plan-time
+		// policy skips do NOT reach here — they are the accepted policy.
 		_ = a.state.Save()
-		msg := fmt.Sprintf("kpm: uninstall %s partial — %d path(s) failed, see kpm.log", id, len(res.Failed))
+		msg := fmt.Sprintf("kpm: uninstall %s partial — %d failed, %d skipped for safety, see kpm.log",
+			id, len(res.Failed), len(res.Skipped))
 		a.paths.WriteStatus(msg)
 		fmt.Fprintln(os.Stderr, msg)
+		for _, s := range res.Skipped {
+			fmt.Fprintf(os.Stderr, "  skipped %s (%s)\n", s.Path, s.Reason)
+		}
 		n.toast(msg)
 		return exitPartial
 	}

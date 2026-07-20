@@ -77,6 +77,15 @@ func (a *App) cmdInstall(args []string) int {
 
 	// Guard an existing local def (§9.6).
 	existing, existsErr := a.loadPackage(id)
+	if existsErr != nil {
+		// A present-but-unparseable def must not be silently overwritten: a
+		// malformed TOML looks "absent" to loadPackage but still holds the
+		// user's config. Refuse unless --adopt is explicit.
+		if _, statErr := os.Stat(a.paths.PackageFile(id)); statErr == nil && !*adopt {
+			fmt.Fprintf(os.Stderr, "kpm install: %q already exists but its def is unreadable — fix it, \"kpm remove %s\", or use --adopt to replace it\n", id, id)
+			return exitError
+		}
+	}
 	if existsErr == nil {
 		switch {
 		case existing.Registry != "" && !*adopt:
@@ -110,6 +119,12 @@ func (a *App) cmdInstall(args []string) int {
 		return exitConfirm
 	}
 
+	// kpm's own pin lives in state.json (so a self-update that overwrites
+	// kpm.toml can't drop it, §10); never persist it into the TOML, where
+	// effectivePin would ignore it anyway.
+	if id == selfID {
+		pkg.Pin = ""
+	}
 	if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm install:", err)
 		return exitError
@@ -123,6 +138,9 @@ func (a *App) cmdInstall(args []string) int {
 	}
 	ps := a.state.Get(id)
 	ps.SyncedDefSHA256 = hash
+	if id == selfID && pinVal != "" {
+		ps.Pin = pinVal // kpm's pin belongs in state.json (§10), read by effectivePin
+	}
 	if *installed != "" {
 		ps.InstalledVersion = *installed
 		ps.InstalledAt = time.Now().UTC().Format(state.TimeFormat)

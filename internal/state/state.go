@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"kpm/internal/device"
 )
 
 // TimeFormat is the RFC3339 timestamp used throughout state.json.
@@ -56,6 +58,13 @@ type State struct {
 	// state presence (B4). Cleared on promotion/unstage.
 	StagedSHA256 string `json:"staged_sha256,omitempty"`
 	StagedSize   int64  `json:"staged_size,omitempty"`
+	// StagedCommitted records that the staged tgz was actually moved into the
+	// live boot slot. The per-package staged fields are saved BEFORE the tgz
+	// goes live (so a crash can't leave installed files unrecorded), then this
+	// is set true once the move succeeds. Reconcile promotes staged->installed
+	// only when a committed tgz has since disappeared; an uncommitted staging
+	// that vanished is rolled back, never promoted (B6).
+	StagedCommitted bool `json:"staged_committed,omitempty"`
 
 	path string // where it was loaded from, for Save
 	// CorruptBackup is set (not serialized) when Load recovered from an
@@ -82,6 +91,15 @@ func Load(path string) (*State, error) {
 		fresh := &State{Packages: map[string]*PackageState{}, path: path}
 		if rerr := os.Rename(path, backup); rerr == nil {
 			fresh.CorruptBackup = backup
+		} else if werr := os.WriteFile(backup, b, 0o644); werr == nil {
+			// Couldn't rename aside (e.g. cross-link); copy the bytes so the
+			// forensic backup survives the fresh state's next Save.
+			fresh.CorruptBackup = backup
+		} else {
+			// Could neither move nor copy the corrupt file. Starting fresh would
+			// let the next Save overwrite the only copy, so fail instead of
+			// destroying it — the user can inspect/remove state.json by hand.
+			return nil, fmt.Errorf("state.json is corrupt and could not be backed up (%v); inspect %s", err, path)
 		}
 		return fresh, nil
 	}
@@ -145,5 +163,10 @@ func (s *State) Save() error {
 		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, s.path)
+	if err := os.Rename(tmpName, s.path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	device.FsyncDir(dir) // durable directory entry on FAT32 (B3)
+	return nil
 }

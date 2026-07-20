@@ -74,9 +74,12 @@ func copyEntries(src string, tw *tar.Writer) ([]string, error) {
 		return nil, fmt.Errorf("gzip: %w", err)
 	}
 	defer gr.Close()
-	tr := tar.NewReader(gr)
+	// Cap total decompressed bytes to guard against gzip bombs.
+	limited := &io.LimitedReader{R: gr, N: maxDecompressedBytes + 1}
+	tr := tar.NewReader(limited)
 
 	var names []string
+	entries := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -88,20 +91,38 @@ func copyEntries(src string, tw *tar.Writer) ([]string, error) {
 		if hdr.Typeflag == tar.TypeXGlobalHeader {
 			continue // pax global header: not a member, skip entirely (F4)
 		}
+		entries++
+		if entries > maxEntries {
+			return nil, fmt.Errorf("archive exceeds entry-count cap of %d", maxEntries)
+		}
+		// Normalize and type-check BEFORE writing so a corrupted or foreign
+		// source (the cache lives on a USB-mountable FAT partition) cannot
+		// smuggle an absolute/".." path or a dangerous entry type through.
+		name, err := normalize(hdr.Name)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" {
+			continue // bare "./"
+		}
+		if err := checkEntryType(hdr, name); err != nil {
+			return nil, err
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return nil, err
 		}
 		if _, err := io.Copy(tw, tr); err != nil {
 			return nil, err
 		}
+		if limited.N <= 0 {
+			return nil, fmt.Errorf("archive exceeds decompressed-size cap of %d bytes", maxDecompressedBytes)
+		}
 		// Directory entries legitimately repeat across packages sharing a
 		// parent; they must not count as duplicate paths (F5).
 		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
-		if n, nerr := normalize(hdr.Name); nerr == nil && n != "" {
-			names = append(names, n)
-		}
+		names = append(names, name)
 	}
 	return names, nil
 }

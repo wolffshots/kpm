@@ -16,8 +16,10 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 	"kpm/internal/tgz"
+	"kpm/internal/version"
 )
 
 // checkFreshness is the window within which a prior check is trusted (§7.1).
@@ -117,13 +119,13 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitOK
 	}
 
-	// 3. Merge & stage.
+	// 3. Merge into a not-yet-live part file (hashed before it goes live).
 	if err := a.guardExistingTgz(); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm update:", err)
 		a.paths.WriteStatus("kpm: refusing to stage — " + err.Error())
 		return exitError
 	}
-	dups, err := a.stage(targets)
+	part, sum, size, dups, err := a.mergeStaged(targets)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
 		a.paths.Log("ERROR", "stage: "+err.Error())
@@ -133,22 +135,41 @@ func (a *App) cmdUpdate(args []string) int {
 		a.paths.Log("WARN", "duplicate path across packages (last wins): "+d)
 	}
 
-	// 4. Record.
+	// 4. Record the staged intent BEFORE the tgz goes live: StagedCommitted
+	// stays false until the move succeeds, so a crash between here and the live
+	// move never leaves installed files unrecorded or falsely promotes an
+	// uninstalled version — reconcile rolls an uncommitted staging back (B6).
 	now := time.Now().UTC().Format(state.TimeFormat)
 	for _, r := range targets {
 		ps := a.state.Get(r.pkg.ID)
 		ps.StagedVersion = r.tag
 		ps.StagedAt = now
 		// Record the pending manifest separately; Manifest (installed) is only
-		// updated by Reconcile after the reboot install actually happens (B2).
+		// updated by reconcile after the reboot install actually happens (B2).
 		ps.StagedManifest = r.manifest
+	}
+	a.state.StagedSHA256 = sum
+	a.state.StagedSize = size
+	a.state.StagedCommitted = false
+	if err := a.state.Save(); err != nil {
+		os.Remove(part)
+		fmt.Fprintln(os.Stderr, "kpm update: state:", err)
+		a.paths.Log("ERROR", "state: "+err.Error())
+		return exitError
+	}
+
+	// 5. Commit: move the tgz into the live boot slot, then mark committed.
+	if err := a.commitStaged(part); err != nil {
+		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
+		a.paths.Log("ERROR", "stage: "+err.Error())
+		a.paths.WriteStatus("kpm: staging failed — reboot to install any pending update, or 'kpm unstage'")
+		return exitError
+	}
+	for _, r := range targets {
+		ps := a.state.Get(r.pkg.ID)
 		a.paths.Log("STAGE", fmt.Sprintf("%s  %s -> %s",
 			r.pkg.ID, dash(ps.InstalledVersion), r.tag))
 		os.Remove(r.cache) // clear merged cache file
-	}
-	if err := a.state.Save(); err != nil {
-		fmt.Fprintln(os.Stderr, "kpm update: state:", err)
-		return exitError
 	}
 	status := a.buildStatus(pkgs)
 	a.paths.WriteStatus(status)
@@ -226,6 +247,14 @@ func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	if !p.Configured() {
 		return resolved{}, true, nil
 	}
+	// Honor the def's min_kpm: an old kpm skips a package that needs a newer one
+	// (with a note) rather than staging it blindly (§9.8). install/sync gate too,
+	// but a hand-edited def can still carry a min_kpm the running kpm can't meet.
+	if !registry.MinKpmSatisfied(version.Version, p.MinKpm) && version.Version != "dev" {
+		fmt.Printf("%s: requires kpm >= %s (running %s) — skipped; update kpm first\n", p.ID, p.MinKpm, version.Version)
+		a.paths.Log("WARN", fmt.Sprintf("%s  requires kpm >= %s — skipped", p.ID, p.MinKpm))
+		return resolved{}, true, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	rel, err := a.resolveRelease(ctx, p)
 	cancel()
@@ -257,7 +286,32 @@ func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	if err != nil {
 		return resolved{}, false, err
 	}
+	// No package other than kpm itself may write kpm's reserved paths (its
+	// install tree or NickelMenu drop-in). This makes the "kpm merged last"
+	// invariant robust regardless of merge order: a package's tgz can never
+	// carry a member that would clobber the kpm binary/state/registrations
+	// (§7.3, A1).
+	if p.ID != selfID {
+		if hit := firstReservedPath(manifest); hit != "" {
+			os.Remove(cachePath)
+			return resolved{}, false, fmt.Errorf("refusing %s: its archive writes to kpm's reserved path %q", p.ID, hit)
+		}
+	}
 	return resolved{pkg: p, tag: rel.Tag, asset: asset, cache: cachePath, manifest: manifest}, false, nil
+}
+
+// firstReservedPath returns the first manifest member that lands in a path only
+// kpm's own package may write, or "" if none. Comparison is case-insensitive
+// because the onboard partition (where these live) is FAT32.
+func firstReservedPath(manifest []string) string {
+	for _, m := range manifest {
+		lm := strings.ToLower(m)
+		if lm == "mnt/onboard/.adds/kpm" || strings.HasPrefix(lm, "mnt/onboard/.adds/kpm/") ||
+			lm == "mnt/onboard/.adds/nm/kpm" {
+			return m
+		}
+	}
+	return ""
 }
 
 // resolveRelease returns the target Release, honoring pins and the 5-minute
@@ -358,13 +412,15 @@ func (a *App) stagedTgzIsOurs() bool {
 	return size == a.state.StagedSize && fi.Size() == size && sum == a.state.StagedSHA256
 }
 
-// stage merges all target tgzs into the staged KoboRoot.tgz. If a kpm-staged
-// tgz already exists it is re-merged FIRST so previously staged packages keep
-// their payload; the run's new targets follow (alphabetical by id, kpm last so
-// it cannot be clobbered — §7.3, A1). Dup warnings that involve the re-merged
-// source are suppressed (expected re-stage collisions). Records the merged
-// archive's hash/size for the guard (B4). Writes to .kpm-part then renames.
-func (a *App) stage(targets []resolved) ([]string, error) {
+// mergeStaged merges all target tgzs into a NOT-yet-live .kpm-part file and
+// returns its path plus content hash/size. If a kpm-staged tgz already exists it
+// is re-merged FIRST so previously staged packages keep their payload; the run's
+// new targets follow (alphabetical by id, kpm last so it cannot be clobbered —
+// §7.3, A1). Dup warnings that involve the re-merged source are suppressed
+// (expected re-stage collisions). The part is hashed BEFORE it goes live so a
+// hashing failure can never leave a live tgz with a stale/empty recorded hash
+// (which would wedge the guard). commitStaged moves it live afterwards (B6).
+func (a *App) mergeStaged(targets []resolved) (part, sum string, size int64, dups []string, err error) {
 	ordered := append([]resolved(nil), targets...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if (ordered[i].pkg.ID == selfID) != (ordered[j].pkg.ID == selfID) {
@@ -376,33 +432,34 @@ func (a *App) stage(targets []resolved) ([]string, error) {
 	var sources []string
 	suppress := map[string]bool{}
 	if a.stagedTgzIsOurs() {
-		if res, verr := tgz.Verify(a.paths.StagedTgz()); verr == nil {
-			for _, n := range res.Manifest {
-				suppress[n] = true
-			}
-			sources = append(sources, a.paths.StagedTgz())
+		res, verr := tgz.Verify(a.paths.StagedTgz())
+		if verr != nil {
+			// Our previously-staged tgz is corrupt. Silently dropping it would
+			// re-merge without its packages while state still marks them staged,
+			// so after reboot they'd promote to installed with a payload that
+			// never shipped. Abort instead so the user can unstage and retry.
+			return "", "", 0, nil, fmt.Errorf("existing staged tgz failed verification (%v); run 'kpm unstage' and retry", verr)
 		}
+		for _, n := range res.Manifest {
+			suppress[n] = true
+		}
+		sources = append(sources, a.paths.StagedTgz())
 	}
 	for _, r := range ordered {
 		sources = append(sources, r.cache)
 	}
 
-	part := a.paths.StagedTgz() + ".kpm-part"
-	dups, err := tgz.Merge(sources, part)
+	part = a.paths.StagedTgz() + ".kpm-part"
+	dups, err = tgz.Merge(sources, part)
 	if err != nil {
 		os.Remove(part)
-		return nil, err
+		return "", "", 0, nil, err
 	}
-	if err := os.Rename(part, a.paths.StagedTgz()); err != nil {
-		os.Remove(part)
-		return nil, err
-	}
-	sum, size, err := sha256AndSize(a.paths.StagedTgz())
+	sum, size, err = sha256AndSize(part)
 	if err != nil {
-		return nil, err
+		os.Remove(part)
+		return "", "", 0, nil, err
 	}
-	a.state.StagedSHA256 = sum
-	a.state.StagedSize = size
 
 	var filtered []string
 	for _, d := range dups {
@@ -411,7 +468,22 @@ func (a *App) stage(targets []resolved) ([]string, error) {
 		}
 		filtered = append(filtered, d)
 	}
-	return filtered, nil
+	return part, sum, size, filtered, nil
+}
+
+// commitStaged moves the merged .kpm-part into the live boot slot, makes the
+// directory entry durable, and marks the staging committed. It is called only
+// after the per-package staged fields (and the tgz hash/size) have already been
+// saved with StagedCommitted=false, so a crash before this leaves no installed
+// files unrecorded, and a crash during it is reconciled safely (B6).
+func (a *App) commitStaged(part string) error {
+	if err := os.Rename(part, a.paths.StagedTgz()); err != nil {
+		os.Remove(part)
+		return err
+	}
+	device.FsyncDir(filepath.Dir(a.paths.StagedTgz()))
+	a.state.StagedCommitted = true
+	return a.state.Save()
 }
 
 // sha256AndSize returns the hex SHA-256 and byte size of the file at path.
@@ -487,6 +559,7 @@ func (a *App) cmdUnstage(args []string) int {
 	}
 	a.state.StagedSHA256 = ""
 	a.state.StagedSize = 0
+	a.state.StagedCommitted = false
 	if err := a.state.Save(); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm unstage: state:", err)
 		return exitError

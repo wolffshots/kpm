@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -50,7 +52,26 @@ func NewClient() *Client {
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
-	return &Client{hc: &http.Client{Transport: tr}}
+	return &Client{hc: &http.Client{Transport: tr, CheckRedirect: checkRedirect}}
+}
+
+// maxRedirects caps a single request's redirect chain. TLS is kpm's only
+// integrity boundary (there is no signature check), so checkRedirect also
+// refuses any hop whose target is not https — a MITM must not be able to
+// downgrade a redirect and substitute the root-installed payload (B1).
+const maxRedirects = 10
+
+// checkRedirect is the http.Client redirect policy: refuse a non-https target
+// and cap the chain length. Applies to every request the client makes
+// (getJSON, FetchRaw, Download).
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-https URL (scheme %q)", req.URL.Scheme)
+	}
+	return nil
 }
 
 // buildCertPool assembles the CA pool from the system pool (if any) plus the
@@ -79,6 +100,10 @@ func NewClientWithHTTP(hc *http.Client) *Client { return &Client{hc: hc} }
 // maxManifestBytes caps a fetched registry manifest so a hostile or misbehaving
 // server cannot exhaust memory (B3).
 const maxManifestBytes = 4 << 20 // 4 MiB
+
+// maxAPIBytes caps a forge API (JSON) response body. The device has ~256 MB of
+// RAM; an unbounded read of a hostile/huge response would OOM it (B4).
+const maxAPIBytes = 8 << 20 // 8 MiB
 
 // userAgent identifies kpm to forges (GitHub requires a UA).
 func userAgent() string { return "kpm/" + version.Version }
@@ -132,17 +157,23 @@ func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error
 			lastErr = err
 			continue // network error: retry
 		}
-		body, rerr := io.ReadAll(resp.Body)
+		// Bound the read: one byte past the cap tells us it overflowed (B4).
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes+1))
 		resp.Body.Close()
 		cancel()
 		if rerr != nil {
 			lastErr = rerr
 			continue
 		}
+		if len(body) > maxAPIBytes {
+			return nil, fmt.Errorf("API response from %s exceeds %d bytes", url, maxAPIBytes)
+		}
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, errNotFound
 		}
-		if resp.StatusCode == http.StatusForbidden && mentionsRateLimit(body) {
+		// 403 with a rate-limit body, or a bare 429, is throttling (B5).
+		if (resp.StatusCode == http.StatusForbidden && mentionsRateLimit(body)) ||
+			resp.StatusCode == http.StatusTooManyRequests {
 			return nil, errRateLimited
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -228,11 +259,39 @@ func mentionsRateLimit(body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "rate limit")
 }
 
+// maxDownloadBytes caps a single asset download so a hostile or misbehaving
+// server cannot stream until the device flash fills (B4). Kobo KoboRoot.tgz
+// payloads are megabytes, not hundreds of megabytes; this leaves generous
+// headroom while bounding the worst case.
+const maxDownloadBytes = 512 << 20 // 512 MiB
+
+// requireHTTPS rejects a download URL that is not absolute-https before we
+// dial. The asset URL comes from forge JSON (browser_download_url) and a
+// misconfigured Forgejo can hand back an http:// URL; TLS is kpm's only
+// integrity boundary, so a plaintext fetch of the root-installed payload is a
+// compromise (B2).
+func requireHTTPS(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL %q: %w", rawURL, err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("refusing non-https download URL %q (scheme %q); TLS is the only integrity check", rawURL, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("refusing download URL with no host: %q", rawURL)
+	}
+	return nil
+}
+
 // Download streams url into dst (a *os.File). An inactivity watchdog aborts if
 // no bytes arrive for 60s; there is no overall timeout so large assets on slow
 // links still complete. Only transport/network/read errors retry; an HTTP >=400
 // status or a local write error (ENOSPC etc.) is permanent — no retry (D4).
 func (c *Client) Download(ctx context.Context, url string, dst *os.File) (int64, error) {
+	if err := requireHTTPS(url); err != nil {
+		return 0, err
+	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -288,12 +347,20 @@ func (c *Client) downloadOnce(ctx context.Context, url string, dst *os.File) (n 
 	}
 	go w.run()
 	ew := &writeErrTracker{w: dst}
-	n, err = io.Copy(ew, w)
+	// Cap total bytes written: read one past the cap so an exactly-cap asset is
+	// still accepted but anything larger is caught (B4). Reads flow through the
+	// watchdog, so the inactivity timer still resets on progress.
+	n, err = io.Copy(ew, io.LimitReader(w, maxDownloadBytes+1))
 	w.stop()
 	if err != nil {
 		// A write failure (disk full etc.) is permanent; a read/transport
 		// failure is retryable (D4).
 		return n, ew.err != nil, err
+	}
+	if n > maxDownloadBytes {
+		// The server exceeded the cap; retrying the same URL would only do it
+		// again, so this is permanent.
+		return n, true, fmt.Errorf("download from %s exceeds %d byte cap", url, maxDownloadBytes)
 	}
 	return n, false, nil
 }
@@ -354,9 +421,19 @@ func (w *watchdogReader) stop() {
 	close(w.done)
 }
 
+// snippet builds a short, safe excerpt of a server body for embedding in an
+// error string. It caps the length, coerces to valid UTF-8, and strips control
+// characters so a hostile server cannot inject ANSI escapes or other control
+// bytes into the terminal or logs (B7).
 func snippet(b []byte) string {
 	if len(b) > 200 {
-		return string(b[:200])
+		b = b[:200]
 	}
-	return string(b)
+	b = bytes.ToValidUTF8(b, []byte("�"))
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1 // drop control characters
+		}
+		return r
+	}, string(b))
 }

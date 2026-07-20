@@ -70,6 +70,29 @@ func newTestApp(t *testing.T) *App {
 	return &App{paths: p, state: st}
 }
 
+// stageForTest merges the targets, records their staged fields, and commits the
+// tgz into the live slot — mirroring cmdUpdate's staging sequence (B6) so tests
+// exercise the real merge/commit path.
+func (a *App) stageForTest(t *testing.T, targets []resolved) []string {
+	t.Helper()
+	part, sum, size, dups, err := a.mergeStaged(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range targets {
+		ps := a.state.Get(r.pkg.ID)
+		ps.StagedVersion = r.tag
+		ps.StagedManifest = r.manifest
+	}
+	a.state.StagedSHA256 = sum
+	a.state.StagedSize = size
+	a.state.StagedCommitted = false
+	if err := a.commitStaged(part); err != nil {
+		t.Fatal(err)
+	}
+	return dups
+}
+
 func TestStageMergesKpmLast(t *testing.T) {
 	a := newTestApp(t)
 	cacheA := filepath.Join(a.paths.CacheDir(), "nh-v1.tgz")
@@ -81,10 +104,7 @@ func TestStageMergesKpmLast(t *testing.T) {
 		{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cacheA},
 		{pkg: &config.Package{ID: selfID}, tag: "v1", cache: cacheK},
 	}
-	dups, err := a.stage(targets)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dups := a.stageForTest(t, targets)
 	if len(dups) != 1 || dups[0] != "usr/shared" {
 		t.Errorf("dups = %v", dups)
 	}

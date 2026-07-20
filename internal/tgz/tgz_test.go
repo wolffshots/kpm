@@ -248,6 +248,125 @@ func writeTestTgzTyped(t *testing.T, path string, entries []typedEntry) {
 	f.Close()
 }
 
+// writeTestTgzHeaders builds a gzip'd tar from fully-specified headers, giving
+// tests control over Typeflag, Linkname, and Mode (for symlink/device/setuid).
+func writeTestTgzHeaders(t *testing.T, path string, hdrs []*tar.Header) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	for _, h := range hdrs {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Size > 0 {
+			// Only regular files carry data in these tests.
+			tw.Write(make([]byte, h.Size))
+		}
+	}
+	tw.Close()
+	gw.Close()
+	f.Close()
+}
+
+func TestVerifyRejectsAbsoluteSymlink(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sym.tgz")
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		{Name: "usr/local/App/x", Typeflag: tar.TypeSymlink, Linkname: "/etc", Mode: 0o777},
+	})
+	if _, err := Verify(p); err == nil {
+		t.Error("expected rejection of absolute symlink target")
+	}
+}
+
+func TestVerifyRejectsEscapingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sym.tgz")
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		{Name: "usr/local/App/x", Typeflag: tar.TypeSymlink, Linkname: "../../../../etc", Mode: 0o777},
+	})
+	if _, err := Verify(p); err == nil {
+		t.Error("expected rejection of escaping symlink target")
+	}
+}
+
+func TestVerifyAllowsBenignSymlink(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sym.tgz")
+	// A shared-lib version symlink pointing to a sibling in the same dir.
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		{Name: "usr/lib/libfoo.so.1", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1},
+		{Name: "usr/lib/libfoo.so", Typeflag: tar.TypeSymlink, Linkname: "libfoo.so.1", Mode: 0o777},
+	})
+	if _, err := Verify(p); err != nil {
+		t.Errorf("benign same-dir symlink should pass: %v", err)
+	}
+}
+
+func TestVerifyRejectsHardlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "hard.tgz")
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		{Name: "usr/local/App/x", Typeflag: tar.TypeLink, Linkname: "/etc/passwd", Mode: 0o644},
+	})
+	if _, err := Verify(p); err == nil {
+		t.Error("expected rejection of absolute hardlink target")
+	}
+}
+
+func TestVerifyRejectsDeviceAndFifo(t *testing.T) {
+	for _, typ := range []byte{tar.TypeChar, tar.TypeBlock, tar.TypeFifo} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "dev.tgz")
+		writeTestTgzHeaders(t, p, []*tar.Header{
+			{Name: "usr/local/App/dev", Typeflag: typ, Mode: 0o644},
+		})
+		if _, err := Verify(p); err == nil {
+			t.Errorf("expected rejection of entry type %d", typ)
+		}
+	}
+}
+
+func TestVerifyRejectsSetuid(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "suid.tgz")
+	// Mode 0o4755 => setuid bit set.
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		{Name: "usr/local/App/bin/app", Typeflag: tar.TypeReg, Mode: 0o4755, Size: 1},
+	})
+	if _, err := Verify(p); err == nil {
+		t.Error("expected rejection of setuid file")
+	}
+}
+
+func TestMergeFailsClosedOnTraversal(t *testing.T) {
+	for _, bad := range []string{"../evil", "/etc/x"} {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "src.tgz")
+		writeTestTgz(t, src, []entry{{bad, "x"}})
+		out := filepath.Join(dir, "m.tgz")
+		if _, err := Merge([]string{src}, out); err == nil {
+			t.Errorf("Merge must fail closed on %q", bad)
+		}
+	}
+}
+
+func TestMergeFailsClosedOnBadType(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.tgz")
+	writeTestTgzHeaders(t, src, []*tar.Header{
+		{Name: "usr/local/App/x", Typeflag: tar.TypeSymlink, Linkname: "/etc", Mode: 0o777},
+	})
+	out := filepath.Join(dir, "m.tgz")
+	if _, err := Merge([]string{src}, out); err == nil {
+		t.Error("Merge must fail closed on escaping symlink")
+	}
+}
+
 func TestMergeKpmLastOrdering(t *testing.T) {
 	// This mirrors the caller's ordering guarantee: sources are passed in the
 	// order the caller decides; Merge preserves it. Here we assert Merge writes

@@ -3,8 +3,10 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -213,14 +215,44 @@ func SaveReplace(path string, p *Package) error {
 	return encodeTOMLFile(path, m)
 }
 
-// encodeTOMLFile writes m to path as TOML (create/truncate).
+// encodeTOMLFile writes m to path as TOML atomically (encode to a buffer, then
+// temp file + fsync + rename + directory fsync). A power loss mid-write on the
+// Kobo's FAT32 partition can no longer leave a truncated <id>.toml that LoadAll
+// would skip (making the package silently vanish).
 func encodeTOMLFile(path string, m map[string]any) error {
-	f, err := os.Create(path)
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(m); err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".kpm-toml-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return toml.NewEncoder(f).Encode(m)
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if d, derr := os.Open(dir); derr == nil { // best-effort directory fsync
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 // setOptional writes key=val when val is non-empty, else removes it, so

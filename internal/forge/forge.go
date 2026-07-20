@@ -39,7 +39,13 @@ func (r Release) MatchAsset(pattern string) (Asset, error) {
 	}
 	var matches []Asset
 	for _, a := range r.Assets {
-		if ok, _ := path.Match(pattern, a.Name); ok {
+		ok, err := path.Match(pattern, a.Name)
+		if err != nil {
+			// path.ErrBadPattern: a malformed user glob (e.g. "KoboRoot[.tgz")
+			// must surface as an invalid-pattern error, not a silent no-match.
+			return Asset{}, fmt.Errorf("invalid asset pattern %q: %w", pattern, err)
+		}
+		if ok {
 			matches = append(matches, a)
 		}
 	}

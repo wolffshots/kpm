@@ -113,12 +113,15 @@ func (a *App) searchStatus(id string, e *registry.Entry, manByName map[string]*r
 // disagree with sync; it falls back to the winning entry only when provenance is
 // absent or that registry's cached def is unavailable (C6).
 func (a *App) defUpdateAvailable(id string, local *config.Package, e *registry.Entry, manByName map[string]*registry.Manifest) bool {
+	// A hand-added or detached def (no provenance registry) cannot be synced, so
+	// never report a def update for it — "kpm sync" would refuse it anyway.
+	if local.Registry == "" {
+		return false
+	}
 	ref := e.Def // fallback: the winner
-	if local.Registry != "" {
-		if m := manByName[local.Registry]; m != nil {
-			if d, ok := m.Packages[id]; ok {
-				ref = d
-			}
+	if m := manByName[local.Registry]; m != nil {
+		if d, ok := m.Packages[id]; ok {
+			ref = d
 		}
 	}
 	h, err := registry.HashDef(ref)

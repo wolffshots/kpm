@@ -10,7 +10,11 @@ telnet/SSH.
 
 > Firmware 4.x only. No signature verification of assets — installing a package
 > trusts its author, exactly like a manual `KoboRoot.tgz` install. Assets are
-> fetched over TLS with an embedded Mozilla CA bundle.
+> fetched over TLS (HTTPS only; a redirect that downgrades to plain HTTP is
+> refused) with an embedded Mozilla CA bundle. Archives are walked before
+> staging: absolute/`..` paths, symlink/hardlink entries whose target escapes the
+> archive, device/FIFO entries, and setuid/setgid files are rejected, and no
+> package but kpm itself may write kpm's own install tree.
 
 ## How it works
 
@@ -268,11 +272,17 @@ afterwards; some packages need a reboot to finish (see the marker method).
 `extra_paths`, or `purge_paths` — is checked against a policy:
 
 - A **hard denylist** is always refused, even via `allow_paths`: `/bin`, `/sbin`,
-  `/lib`, `/etc/init.d`, `/etc/inittab`, `/drivers`, all of `/usr/local/Kobo`
-  **except** `/usr/local/Kobo/imageformats` (where NickelHook mods like `libnm.so`
-  live), plus kpm's own `bin`, `state.json`, and `kpm.log`.
+  `/lib`, `/drivers`, `/dev`, `/proc`, `/sys`, `/root`, `/var`; all of `/etc`
+  **except** `/etc/udev/rules.d` and `/etc/dbus-1` (so `/etc/passwd`, `/etc/shadow`,
+  `/etc/inittab`, `/etc/init.d`, `/etc/fstab`, … can never be deleted); all of
+  `/usr/local/Kobo` **except** `/usr/local/Kobo/imageformats` (where NickelHook
+  mods like `libnm.so` live); everything at/under `/mnt/onboard` **except**
+  `/mnt/onboard/.adds` and `/mnt/onboard/.kobo` (so the book library is protected);
+  plus kpm's own `bin`, `state.json`, and `kpm.log`.
 - An **allowlist** is deletable: `/mnt/onboard/.adds`, `/mnt/onboard/.kobo`,
   `/usr/local`, `/usr/bin`, `/usr/lib`, `/opt`, `/etc/udev/rules.d`, `/etc/dbus-1`.
+  Because the denylist is checked first, `allow_paths` can extend the allowlist to
+  new locations (e.g. `/srv/...`) but never re-enable any denied path above.
 - Per-package `allow_paths` extends the allowlist but can never override the
   denylist.
 - Anything else is **skipped with a WARN** and the rest of the removal continues.
@@ -391,7 +401,9 @@ kpm              0.3.0        self-update not configured
 2026-07-19 10:31:02  STAGE      nickelhardcover  - -> v0.5.1
 
 # reboot                     # firmware installs the staged tgz on boot
-# kpm status                 # after reboot: promotes staged -> installed
+# kpm check                  # after reboot, the next mutating command promotes
+                             #   staged -> installed (status is read-only and shows
+                             #   the result; it does not itself promote)
 ```
 
 Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
@@ -404,8 +416,12 @@ Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
   will still promote the packages it thought it staged), so prefer `unstage`.
 - **Corrupt `state.json`.** If the state file ever becomes unreadable, kpm
   renames it to `state.json.corrupt-<timestamp>`, logs a `WARN`, and starts from
-  empty state rather than failing every command. Re-seed installed versions with
-  `kpm add <url> --installed <ver>`; kpm's own version re-seeds automatically.
+  empty state rather than failing every command. (If it can neither rename nor
+  copy the corrupt file aside, it errors instead of overwriting the only copy.)
+  Re-seed installed versions with `kpm add <url> --installed <ver>`; kpm's own
+  version re-seeds automatically. If an update was staged but not yet installed
+  when the corruption happened, its `.kobo/KoboRoot.tgz` becomes "foreign"
+  afterward — reboot to install it, or delete that file by hand.
 - **The log.** `kpm.log` rotates to `kpm.log.1` once it passes 256 KiB (a single
   older file is kept). `kpm log` only reads the current file; open `kpm.log.1`
   over USB for older history.

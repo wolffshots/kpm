@@ -41,18 +41,12 @@ func TestStageRemergesPreviousStaging(t *testing.T) {
 	a := newTestApp(t)
 	cacheA := filepath.Join(a.paths.CacheDir(), "nh-v1.tgz")
 	tinyTgz(t, cacheA, "./usr/local/A/file", "A1")
-	if _, err := a.stage([]resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cacheA}}); err != nil {
-		t.Fatal(err)
-	}
-	a.state.Get("nh").StagedVersion = "v1"
-	a.state.Get("nh").StagedManifest = []string{"usr/local/A/file"}
+	a.stageForTest(t, []resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cacheA, manifest: []string{"usr/local/A/file"}}})
 
 	// Second run stages B; A must be re-merged from the existing staged tgz.
 	cacheB := filepath.Join(a.paths.CacheDir(), "bee-v1.tgz")
 	tinyTgz(t, cacheB, "./usr/local/B/file", "B1")
-	if _, err := a.stage([]resolved{{pkg: &config.Package{ID: "bee"}, tag: "v1", cache: cacheB}}); err != nil {
-		t.Fatal(err)
-	}
+	a.stageForTest(t, []resolved{{pkg: &config.Package{ID: "bee"}, tag: "v1", cache: cacheB, manifest: []string{"usr/local/B/file"}}})
 	members := tgzMembers(t, a.paths.StagedTgz())
 	if members["./usr/local/A/file"] != "A1" {
 		t.Errorf("A payload lost from merged tgz: %v", members)
@@ -61,12 +55,14 @@ func TestStageRemergesPreviousStaging(t *testing.T) {
 		t.Errorf("B payload missing from merged tgz: %v", members)
 	}
 
-	// Both promote after a simulated reboot (tgz removed).
-	a.state.Get("bee").StagedVersion = "v1"
+	// Both promote after a simulated reboot (committed tgz removed).
 	os.Remove(a.paths.StagedTgz())
-	promos := a.state.Reconcile(false)
-	if len(promos) != 2 {
-		t.Errorf("both packages should promote: %+v", promos)
+	if err := a.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if a.state.Get("nh").InstalledVersion != "v1" || a.state.Get("bee").InstalledVersion != "v1" {
+		t.Errorf("both packages should promote: nh=%q bee=%q",
+			a.state.Get("nh").InstalledVersion, a.state.Get("bee").InstalledVersion)
 	}
 }
 
@@ -75,22 +71,74 @@ func TestStageRemergeNewerTagNoFalseDup(t *testing.T) {
 	a := newTestApp(t)
 	cacheV1 := filepath.Join(a.paths.CacheDir(), "nh-v1.tgz")
 	tinyTgz(t, cacheV1, "./usr/local/A/file", "old")
-	if _, err := a.stage([]resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cacheV1}}); err != nil {
-		t.Fatal(err)
-	}
-	a.state.Get("nh").StagedVersion = "v1"
+	a.stageForTest(t, []resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cacheV1}})
 
 	cacheV2 := filepath.Join(a.paths.CacheDir(), "nh-v2.tgz")
 	tinyTgz(t, cacheV2, "./usr/local/A/file", "new")
-	dups, err := a.stage([]resolved{{pkg: &config.Package{ID: "nh"}, tag: "v2", cache: cacheV2}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	dups := a.stageForTest(t, []resolved{{pkg: &config.Package{ID: "nh"}, tag: "v2", cache: cacheV2}})
 	if len(dups) != 0 {
 		t.Errorf("re-stage collision against the re-merged source must be suppressed, got %v", dups)
 	}
 	if m := tgzMembers(t, a.paths.StagedTgz()); m["./usr/local/A/file"] != "new" {
 		t.Errorf("newer payload should win: %q", m["./usr/local/A/file"])
+	}
+}
+
+// B6: a foreign tgz occupying the slot means our committed staging was consumed
+// by the boot installer, so promotion proceeds (no more foreign-tgz freeze).
+func TestReconcilePromotesOnForeignTgz(t *testing.T) {
+	a := newTestApp(t)
+	ps := a.state.Get("nh")
+	ps.StagedVersion = "v2"
+	ps.StagedManifest = []string{"usr/x"}
+	a.state.StagedSHA256 = "hash-of-our-staged-tgz"
+	a.state.StagedSize = 999
+	a.state.StagedCommitted = true
+	// A different (foreign) tgz now sits in the slot — hash won't match ours.
+	if err := os.WriteFile(a.paths.StagedTgz(), []byte("a foreign manual tgz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if a.state.Get("nh").InstalledVersion != "v2" {
+		t.Errorf("foreign tgz must not freeze promotion; installed = %q", a.state.Get("nh").InstalledVersion)
+	}
+}
+
+// B6: an uncommitted staging (a crash before the tgz went live) that has since
+// vanished is rolled back, never promoted — nothing was actually installed.
+func TestReconcileRollsBackUncommitted(t *testing.T) {
+	a := newTestApp(t)
+	ps := a.state.Get("nh")
+	ps.InstalledVersion = "v1"
+	ps.StagedVersion = "v2"
+	ps.StagedManifest = []string{"usr/x"}
+	a.state.StagedSHA256 = "hash"
+	a.state.StagedSize = 10
+	a.state.StagedCommitted = false // never committed live
+	// No tgz on disk (crash between recording intent and the live move).
+	if err := a.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.state.Get("nh").InstalledVersion; got != "v1" {
+		t.Errorf("uncommitted staging must not promote; installed = %q", got)
+	}
+	if a.state.Get("nh").StagedVersion != "" {
+		t.Errorf("uncommitted staged fields should be rolled back: %+v", a.state.Get("nh"))
+	}
+}
+
+// A1/§7.3: a non-kpm package whose archive writes kpm's reserved paths is caught.
+func TestFirstReservedPath(t *testing.T) {
+	if firstReservedPath([]string{"usr/local/x", "mnt/onboard/.adds/kpm/bin/kpm"}) == "" {
+		t.Error("kpm's install tree must be reserved")
+	}
+	if firstReservedPath([]string{"mnt/onboard/.adds/NM/kpm"}) == "" {
+		t.Error("kpm's NickelMenu drop-in must be reserved (case-insensitively)")
+	}
+	if hit := firstReservedPath([]string{"mnt/onboard/.adds/nickelhardcover/x", "usr/lib/y"}); hit != "" {
+		t.Errorf("a normal package path must not be reserved, got %q", hit)
 	}
 }
 
@@ -150,12 +198,8 @@ func TestUnstageClearsFields(t *testing.T) {
 	a := newTestApp(t)
 	cache := filepath.Join(a.paths.CacheDir(), "nh-v1.tgz")
 	tinyTgz(t, cache, "./usr/local/A/file", "A")
-	if _, err := a.stage([]resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cache}}); err != nil {
-		t.Fatal(err)
-	}
+	a.stageForTest(t, []resolved{{pkg: &config.Package{ID: "nh"}, tag: "v1", cache: cache, manifest: []string{"usr/local/A/file"}}})
 	ps := a.state.Get("nh")
-	ps.StagedVersion = "v1"
-	ps.StagedManifest = []string{"usr/local/A/file"}
 
 	if code := a.cmdUnstage(nil); code != exitOK {
 		t.Fatalf("unstage exit %d, want 0", code)

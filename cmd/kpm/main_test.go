@@ -8,9 +8,9 @@ import (
 func TestSplitArgs(t *testing.T) {
 	vf := map[string]bool{"asset": true, "name": true, "installed": true, "forge": true}
 	cases := []struct {
-		args     []string
-		flags    []string
-		posts    []string
+		args  []string
+		flags []string
+		posts []string
 	}{
 		{
 			args:  []string{"https://x/o/r", "--installed", "v1"},

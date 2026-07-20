@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-func TestReconcilePromotesWhenTgzGone(t *testing.T) {
+func TestPromoteStagedWhenTgzGone(t *testing.T) {
 	s := &State{Packages: map[string]*PackageState{
 		"nh": {InstalledVersion: "v0.5.0", StagedVersion: "v0.5.1", StagedAt: "t", Manifest: []string{"usr/x"}},
 	}}
-	promos := s.Reconcile(false) // tgz gone -> installed
+	promos := s.PromoteStaged() // committed tgz gone -> installed
 	if len(promos) != 1 || promos[0].ID != "nh" || promos[0].Version != "v0.5.1" {
 		t.Fatalf("promotions = %+v", promos)
 	}
@@ -27,29 +27,32 @@ func TestReconcilePromotesWhenTgzGone(t *testing.T) {
 	}
 }
 
-func TestReconcileNoopWhenTgzPresent(t *testing.T) {
+// B6: RollbackStaged discards an uncommitted staging without promoting it.
+func TestRollbackStagedDoesNotPromote(t *testing.T) {
 	s := &State{Packages: map[string]*PackageState{
-		"nh": {InstalledVersion: "v0.5.0", StagedVersion: "v0.5.1"},
+		"nh": {InstalledVersion: "v0.5.0", StagedVersion: "v0.5.1", StagedManifest: []string{"usr/new"}},
 	}}
-	if promos := s.Reconcile(true); promos != nil {
-		t.Errorf("expected no promotions while tgz present, got %+v", promos)
+	s.RollbackStaged()
+	ps := s.Packages["nh"]
+	if ps.InstalledVersion != "v0.5.0" {
+		t.Errorf("rollback must not promote: installed = %q", ps.InstalledVersion)
 	}
-	if s.Packages["nh"].StagedVersion != "v0.5.1" {
-		t.Error("staged version must be preserved while tgz present")
+	if ps.StagedVersion != "" || ps.StagedManifest != nil {
+		t.Errorf("staged fields should be cleared: %+v", ps)
 	}
 }
 
-func TestReconcileIgnoresUnstaged(t *testing.T) {
+func TestPromoteStagedIgnoresUnstaged(t *testing.T) {
 	s := &State{Packages: map[string]*PackageState{
 		"nh": {InstalledVersion: "v0.5.0"},
 	}}
-	if promos := s.Reconcile(false); promos != nil {
+	if promos := s.PromoteStaged(); promos != nil {
 		t.Errorf("no staged version -> no promotions, got %+v", promos)
 	}
 }
 
-// B2: staging records StagedManifest; Reconcile promotes it to Manifest.
-func TestReconcilePromotesStagedManifest(t *testing.T) {
+// B2: staging records StagedManifest; PromoteStaged promotes it to Manifest.
+func TestPromoteStagedManifest(t *testing.T) {
 	s := &State{Packages: map[string]*PackageState{
 		"nh": {
 			InstalledVersion: "v1",
@@ -58,7 +61,7 @@ func TestReconcilePromotesStagedManifest(t *testing.T) {
 			StagedManifest:   []string{"usr/new"},
 		},
 	}}
-	promos := s.Reconcile(false)
+	promos := s.PromoteStaged()
 	if len(promos) != 1 {
 		t.Fatalf("promotions = %+v", promos)
 	}
@@ -71,16 +74,17 @@ func TestReconcilePromotesStagedManifest(t *testing.T) {
 	}
 }
 
-// B4: Reconcile clears the staged tgz identity when the tgz is gone.
-func TestReconcileClearsStagedHash(t *testing.T) {
+// B4/B6: promotion clears the staged tgz identity and commit flag.
+func TestPromoteStagedClearsIdentity(t *testing.T) {
 	s := &State{
-		Packages:     map[string]*PackageState{"nh": {StagedVersion: "v2"}},
-		StagedSHA256: "abc",
-		StagedSize:   123,
+		Packages:        map[string]*PackageState{"nh": {StagedVersion: "v2"}},
+		StagedSHA256:    "abc",
+		StagedSize:      123,
+		StagedCommitted: true,
 	}
-	s.Reconcile(false)
-	if s.StagedSHA256 != "" || s.StagedSize != 0 {
-		t.Errorf("staged hash/size should be cleared after promotion: %q/%d", s.StagedSHA256, s.StagedSize)
+	s.PromoteStaged()
+	if s.StagedSHA256 != "" || s.StagedSize != 0 || s.StagedCommitted {
+		t.Errorf("staged identity should be cleared after promotion: %q/%d/%v", s.StagedSHA256, s.StagedSize, s.StagedCommitted)
 	}
 }
 

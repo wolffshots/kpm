@@ -4,35 +4,35 @@ import "testing"
 
 func TestParseAddURL(t *testing.T) {
 	cases := []struct {
-		in                        string
-		wantHost, wantOwner, repo string
+		in                         string
+		wantHost, wantOwner, repo  string
 		wantPin, wantForge, wantID string
-		wantErr                   bool
+		wantErr                    bool
 	}{
 		{
 			in: "https://github.com/owner/Repo", wantHost: "github.com",
 			wantOwner: "owner", repo: "Repo", wantForge: "github", wantID: "repo",
 		},
 		{
-			in: "https://codeberg.org/StrayRose/NickelHardcover",
+			in:       "https://codeberg.org/StrayRose/NickelHardcover",
 			wantHost: "codeberg.org", wantOwner: "StrayRose", repo: "NickelHardcover",
 			wantForge: "", wantID: "nickelhardcover",
 		},
 		{
-			in: "codeberg.org/StrayRose/NickelHardcover/releases",
+			in:       "codeberg.org/StrayRose/NickelHardcover/releases",
 			wantHost: "codeberg.org", wantOwner: "StrayRose", repo: "NickelHardcover",
 			wantID: "nickelhardcover",
 		},
 		{
-			in: "https://codeberg.org/o/r/releases/latest",
+			in:       "https://codeberg.org/o/r/releases/latest",
 			wantHost: "codeberg.org", wantOwner: "o", repo: "r", wantID: "r",
 		},
 		{
-			in: "https://codeberg.org/o/r/releases/tag/v0.5.0",
+			in:       "https://codeberg.org/o/r/releases/tag/v0.5.0",
 			wantHost: "codeberg.org", wantOwner: "o", repo: "r", wantPin: "v0.5.0", wantID: "r",
 		},
 		{
-			in: "https://github.com/owner/repo/releases/tag/v1.2.3-rc1",
+			in:       "https://github.com/owner/repo/releases/tag/v1.2.3-rc1",
 			wantHost: "github.com", wantOwner: "owner", repo: "repo",
 			wantPin: "v1.2.3-rc1", wantForge: "github", wantID: "repo",
 		},

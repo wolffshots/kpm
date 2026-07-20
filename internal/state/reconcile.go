@@ -8,14 +8,11 @@ type Promotion struct {
 	Version string
 }
 
-// Reconcile promotes staged versions to installed when the staged
-// KoboRoot.tgz is gone (rcS extracted and deleted it). If it still exists,
-// staging is pending and nothing changes. Returns the promotions made; the
-// caller is responsible for logging INSTALLED and saving.
-func (s *State) Reconcile(stagedTgzExists bool) []Promotion {
-	if stagedTgzExists {
-		return nil // reboot hasn't happened yet
-	}
+// PromoteStaged promotes every package's staged version to installed: the boot
+// installer consumed the committed staged tgz. Returns the promotions made; the
+// caller logs INSTALLED and saves. Callers must only invoke this once the staged
+// tgz was committed live (StagedCommitted) and has since disappeared (B6).
+func (s *State) PromoteStaged() []Promotion {
 	var promos []Promotion
 	now := time.Now().UTC().Format(TimeFormat)
 	for id, ps := range s.Packages {
@@ -34,8 +31,25 @@ func (s *State) Reconcile(stagedTgzExists bool) []Promotion {
 		ps.StagedManifest = nil
 		promos = append(promos, Promotion{ID: id, Version: ps.InstalledVersion})
 	}
-	// The staged tgz is gone; its content identity no longer applies (B4).
+	s.clearStagedIdentity()
+	return promos
+}
+
+// RollbackStaged clears staged fields WITHOUT promoting: a staging was prepared
+// (per-package staged fields recorded) but its tgz never went live before it
+// vanished, so nothing was installed and the intent must be discarded (B6).
+func (s *State) RollbackStaged() {
+	for _, ps := range s.Packages {
+		ps.StagedVersion = ""
+		ps.StagedAt = ""
+		ps.StagedManifest = nil
+	}
+	s.clearStagedIdentity()
+}
+
+// clearStagedIdentity forgets the staged tgz's content identity and commit flag.
+func (s *State) clearStagedIdentity() {
 	s.StagedSHA256 = ""
 	s.StagedSize = 0
-	return promos
+	s.StagedCommitted = false
 }

@@ -39,33 +39,14 @@ func (p Paths) WriteStatus(s string) error {
 	if !strings.HasSuffix(s, "\n") {
 		s += "\n"
 	}
-	dir := filepath.Dir(p.StatusFile())
-	tmp, err := os.CreateTemp(dir, ".status-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.WriteString(s); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, p.StatusFile())
+	return WriteFileAtomic(p.StatusFile(), []byte(s))
 }
 
 // WriteFileAtomic writes data to path atomically (temp file in the same dir +
-// fsync + rename), so a reader never sees a half-written file and a failed write
-// never clobbers the previous good copy (B3/G2). Used for config.toml and the
-// registry.toml caches.
+// fsync + rename + directory fsync), so a reader never sees a half-written file,
+// a failed write never clobbers the previous good copy, and a power loss right
+// after the rename cannot lose it on a non-journaled filesystem like the Kobo's
+// FAT32 onboard partition (B3/G2).
 func WriteFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -90,7 +71,25 @@ func WriteFileAtomic(path string, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	FsyncDir(dir)
+	return nil
+}
+
+// FsyncDir flushes a directory entry so a rename into it survives power loss on
+// filesystems (like FAT32) that don't otherwise guarantee the directory update
+// is durable. Best-effort: some platforms reject opening/syncing a directory,
+// which is not fatal (the data file itself was already fsync'd).
+func FsyncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	d.Close()
 }
 
 // ReadStatus returns status.txt contents (empty string if it does not exist).

@@ -51,6 +51,7 @@ func (a *App) cmdCheck(args []string) int {
 
 	now := time.Now().UTC().Format(state.TimeFormat)
 	failed := 0
+	okCount := 0
 	available := 0
 	for _, p := range pkgs {
 		// Unconfigured (e.g. self-update with empty source): skip silently (F7).
@@ -66,6 +67,7 @@ func (a *App) cmdCheck(args []string) int {
 			a.paths.Log("CHECK", fmt.Sprintf("%s  error: %v", p.ID, err))
 			continue
 		}
+		okCount++
 		// Only record latest_seen for unpinned packages so a pin can't poison
 		// the meaning of "latest" (F1).
 		if a.effectivePin(p) == "" {
@@ -103,6 +105,12 @@ func (a *App) cmdCheck(args []string) int {
 	}
 
 	if failed > 0 {
+		// Exit 2 is "partial" — only when at least one check also succeeded.
+		// If every check failed, that is a plain error (exit 1), matching the
+		// documented rule for update.
+		if okCount == 0 {
+			return exitError
+		}
 		return exitPartial
 	}
 	return exitOK

@@ -184,9 +184,10 @@ type App struct {
 	state  *state.State
 	client *forge.Client
 
-	readOnly   bool     // read-only command: no lock, no state/status writes (B1)
-	locked     bool     // holds the single-instance lock (mutating commands)
-	unreadable []string // package defs skipped this run (E2), for the status line
+	readOnly   bool          // read-only command: no lock, no state/status writes (B1)
+	locked     bool          // holds the single-instance lock (mutating commands)
+	lockStop   chan struct{} // closed by releaseLock to stop the heartbeat
+	unreadable []string      // package defs skipped this run (E2), for the status line
 }
 
 // newApp resolves paths, ensures directories, loads state, and — for mutating
@@ -224,6 +225,7 @@ func newApp(mutating bool) (*App, error) {
 		return nil, errors.New("another kpm instance is running")
 	}
 	a.locked = true
+	a.startLockHeartbeat()
 
 	if err := a.reconcile(); err != nil {
 		a.releaseLock()
@@ -236,31 +238,64 @@ func newApp(mutating bool) (*App, error) {
 	return a, nil
 }
 
-// releaseLock removes the lock file (best-effort) if this invocation holds it.
+// releaseLock stops the heartbeat and removes the lock file (best-effort) if
+// this invocation holds it.
 func (a *App) releaseLock() {
 	if a != nil && a.locked {
+		if a.lockStop != nil {
+			close(a.lockStop)
+			a.lockStop = nil
+		}
 		os.Remove(a.paths.LockFile())
 		a.locked = false
 	}
 }
 
-// Lock timing constants (B1). A device kpm run never holds the lock longer than
-// a single download, so a lock older than staleLockAge is presumed abandoned.
+// startLockHeartbeat refreshes the lock's mtime every lockRefresh while the
+// command runs, so an operation legitimately longer than staleLockAge (a large
+// download on slow Wi-Fi) is not mistaken for an abandoned lock and broken by a
+// concurrent instance.
+func (a *App) startLockHeartbeat() {
+	a.lockStop = make(chan struct{})
+	stop := a.lockStop
+	go func() {
+		t := time.NewTicker(lockRefresh)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				a.refreshLock()
+			}
+		}
+	}()
+}
+
+// Lock timing constants (B1). A live run refreshes the lock every lockRefresh;
+// a lock not refreshed within staleLockAge is presumed abandoned and broken.
 const (
 	lockWait     = 5 * time.Second
 	lockRetry    = 250 * time.Millisecond
+	lockRefresh  = 2 * time.Minute
 	staleLockAge = 10 * time.Minute
 )
 
 // acquireLock takes an exclusive lock file, retrying for up to lockWait and
 // breaking a lock older than staleLockAge. Returns (false, nil) if the lock is
 // held by a live instance within the wait window (B1).
+//
+// A stale lock is broken by RENAME-then-claim, not remove-then-create: the
+// staler renames it to a private name and only proceeds if that rename
+// succeeded, so two racing processes can't both delete each other's fresh lock
+// and both "win" (the old remove-by-path TOCTOU).
 func acquireLock(path string) (bool, error) {
 	deadline := time.Now().Add(lockWait)
 	for {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+			f.Sync()
 			f.Close()
 			return true, nil
 		}
@@ -269,7 +304,14 @@ func acquireLock(path string) (bool, error) {
 		}
 		// Held: break it if stale, otherwise wait and retry.
 		if info, e := os.Stat(path); e == nil && time.Since(info.ModTime()) > staleLockAge {
-			os.Remove(path)
+			// Claim the stale lock by renaming it aside. Only the process whose
+			// rename succeeds gets to remove it and loop back to re-create; a
+			// loser's rename fails (the file is already gone) and it just
+			// retries against whatever lock now exists.
+			aside := fmt.Sprintf("%s.stale-%d", path, os.Getpid())
+			if rerr := os.Rename(path, aside); rerr == nil {
+				os.Remove(aside)
+			}
 			continue
 		}
 		if time.Now().After(deadline) {
@@ -277,6 +319,16 @@ func acquireLock(path string) (bool, error) {
 		}
 		time.Sleep(lockRetry)
 	}
+}
+
+// refreshLock bumps the lock file's mtime so a legitimately long operation (a
+// large download on slow Wi-Fi) is not mistaken for a stale lock and broken by a
+// concurrent instance. Best-effort: a failure just means the staleness clock
+// isn't reset this tick. Called only from the heartbeat goroutine, which runs
+// only between lock acquisition and release.
+func (a *App) refreshLock() {
+	now := time.Now()
+	_ = os.Chtimes(a.paths.LockFile(), now, now)
 }
 
 // seedSelf records kpm's own installed_version from the compiled-in version
@@ -301,11 +353,38 @@ func (a *App) seedSelf() error {
 // reconcile promotes staged versions once the boot installer has run. It saves
 // state before logging INSTALLED so a save failure fails the command and does
 // not emit duplicate INSTALLED lines on retry (B5).
+//
+// A staged tgz is still pending only when it is present AND provably the one we
+// staged (content hash). If it is gone — or a foreign tgz now occupies the slot
+// — our committed staging was consumed, so we promote (B6, fixes the foreign-tgz
+// freeze). A transient stat/hash error is surfaced, not treated as "gone", so a
+// filesystem hiccup can never falsely promote. An uncommitted staging that
+// vanished (a crash before the tgz went live) is rolled back, never promoted.
 func (a *App) reconcile() error {
-	_, err := os.Stat(a.paths.StagedTgz())
-	promos := a.state.Reconcile(err == nil)
-	if len(promos) == 0 {
+	pending, err := a.stagedTgzPending()
+	if err != nil {
+		return fmt.Errorf("reconcile: %w", err)
+	}
+	if pending {
+		return nil // reboot hasn't happened yet
+	}
+	if !a.state.StagedCommitted {
+		// Staged fields may have been recorded, but the tgz never went live
+		// (interrupted stage). Nothing was installed: discard the intent.
+		if a.stateHasStaged() {
+			a.state.RollbackStaged()
+			if serr := a.state.Save(); serr != nil {
+				return fmt.Errorf("reconcile: save state: %w", serr)
+			}
+		}
 		return nil
+	}
+	promos := a.state.PromoteStaged()
+	if len(promos) == 0 {
+		// Committed flag set but nothing staged (e.g. already promoted): clear
+		// the stale identity so the guard doesn't see a phantom staging.
+		a.state.RollbackStaged()
+		return a.state.Save()
 	}
 	if serr := a.state.Save(); serr != nil {
 		return fmt.Errorf("reconcile: save state: %w", serr)
@@ -314,4 +393,40 @@ func (a *App) reconcile() error {
 		a.paths.Log("INSTALLED", fmt.Sprintf("%s  %s", pr.ID, pr.Version))
 	}
 	return nil
+}
+
+// stagedTgzPending reports whether kpm's staged tgz is still awaiting the boot
+// installer: it exists AND its content hash matches what we recorded at stage
+// time. A missing tgz, or a foreign tgz in the slot, means ours was consumed. A
+// stat or hash error (not "not exist") is returned so the caller can abort
+// rather than guess.
+func (a *App) stagedTgzPending() (bool, error) {
+	fi, err := os.Stat(a.paths.StagedTgz())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // gone -> consumed
+		}
+		return false, err // transient: do not guess
+	}
+	if a.state.StagedSHA256 == "" {
+		// A tgz is present but we recorded no identity for it (e.g. after
+		// corrupt-state recovery). We can't prove it's ours, so don't promote on
+		// unprovable evidence — treat as pending; the guard/unstage handle it.
+		return true, nil
+	}
+	sum, size, err := sha256AndSize(a.paths.StagedTgz())
+	if err != nil {
+		return false, err
+	}
+	return size == a.state.StagedSize && fi.Size() == size && sum == a.state.StagedSHA256, nil
+}
+
+// stateHasStaged reports whether any package currently carries a staged version.
+func (a *App) stateHasStaged() bool {
+	for _, ps := range a.state.Packages {
+		if ps.StagedVersion != "" {
+			return true
+		}
+	}
+	return false
 }

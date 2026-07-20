@@ -268,6 +268,11 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	a.reportConflicts(conflicts)
 
 	if failed > 0 {
+		// Exit 2 ("partial") only when at least one registry also refreshed; if
+		// every target failed, that is a plain error (exit 1).
+		if failed == len(targets) {
+			return exitError
+		}
 		return exitPartial
 	}
 	return exitOK

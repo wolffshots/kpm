@@ -143,6 +143,42 @@ func TestComputeAllowPathsDenylisted(t *testing.T) {
 	}
 }
 
+// finding 1: allow_paths can no longer reach sensitive rootfs trees or the book
+// library — each of these is refused at Compute.
+func TestComputeAllowPathsSensitiveRejected(t *testing.T) {
+	for _, ap := range []string{"/etc/passwd", "/etc", "/var", "/root", "/dev", "/mnt/onboard"} {
+		cfg := config.Uninstall{AllowPaths: []string{ap}}
+		if _, err := Compute([]string{"usr/local/x"}, cfg, false); err == nil {
+			t.Errorf("allow_paths=[%q] must be rejected on the hard denylist", ap)
+		}
+	}
+}
+
+// A legitimate allow_paths entry (not on the denylist) still extends the
+// allowlist so a path under it becomes deletable.
+func TestComputeAllowPathsLegitExtends(t *testing.T) {
+	cfg := config.Uninstall{
+		AllowPaths: []string{"/srv/pkgdata"}, // not denied, not built-in allowlisted
+		ExtraPaths: []string{"/srv/pkgdata/cache"},
+	}
+	plan, err := Compute(nil, cfg, false)
+	if err != nil {
+		t.Fatalf("legit allow_paths must be accepted: %v", err)
+	}
+	if _, ok := deletePaths(plan)["/srv/pkgdata/cache"]; !ok {
+		t.Errorf("allow_paths should make /srv/pkgdata/cache deletable: %+v", plan.Deletes)
+	}
+	// The /etc/udev/rules.d carve-out is a valid target too.
+	cfg = config.Uninstall{ExtraPaths: []string{"/etc/udev/rules.d/99-pkg.rules"}}
+	plan, err = Compute(nil, cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := deletePaths(plan)["/etc/udev/rules.d/99-pkg.rules"]; !ok {
+		t.Errorf("/etc/udev/rules.d entry should be deletable: %+v", plan.Deletes)
+	}
+}
+
 // --- path policy ---
 
 func TestClassifyDenylistBeatsAllowExtra(t *testing.T) {
@@ -187,23 +223,67 @@ func TestClassifyAllowlistAndUnlisted(t *testing.T) {
 			t.Errorf("classify(%q) = %v, want vAllowed", p, v)
 		}
 	}
-	for _, p := range []string{"/etc/passwd", "/home/user/x", "/var/log/x", "/mnt/onboard/book.epub"} {
+	// Outside any allow/deny root: skipped with a WARN, not denied.
+	for _, p := range []string{"/home/user/x", "/data/x", "/mnt/sd/x"} {
 		if v := classify(p, nil); v != vNotAllowed {
 			t.Errorf("classify(%q) = %v, want vNotAllowed", p, v)
 		}
 	}
 }
 
+// The hardened denylist protects sensitive rootfs trees and the book library
+// even against allow_paths (finding 1).
+func TestClassifyHardenedDenylist(t *testing.T) {
+	for _, p := range []string{
+		"/etc/passwd", "/etc/shadow", "/etc/fstab", "/etc/hosts", "/etc/inittab", "/etc/init.d/kpm",
+		"/var", "/var/log/x", "/root", "/root/.ssh/id", "/dev", "/dev/null",
+		"/proc/1/mem", "/sys/class/x",
+		"/mnt/onboard", "/mnt/onboard/book.epub", "/mnt/onboard/Books/x", "/mnt/onboard/.kobo-x/y",
+	} {
+		if v := classify(p, nil); v != vDenied {
+			t.Errorf("classify(%q) = %v, want vDenied", p, v)
+		}
+		// allow_paths must not be able to override the hard denylist.
+		if v := classify(p, []string{p}); v != vDenied {
+			t.Errorf("classify(%q, allowExtra=self) = %v, want vDenied", p, v)
+		}
+	}
+	// The /etc carve-outs and onboard allow-subtrees still classify as allowed.
+	for _, p := range []string{
+		"/etc/udev/rules.d/99.rules", "/etc/dbus-1/system.d/x",
+		"/mnt/onboard/.adds/pkg/f", "/mnt/onboard/.kobo/pkg/f",
+	} {
+		if v := classify(p, nil); v != vAllowed {
+			t.Errorf("classify(%q) = %v, want vAllowed", p, v)
+		}
+	}
+}
+
 func TestComputeSkipsUnlistedManifestPath(t *testing.T) {
-	plan, err := Compute([]string{"etc/passwd", "usr/local/pkg/f"}, config.Uninstall{}, false)
+	plan, err := Compute([]string{"data/blob", "usr/local/pkg/f"}, config.Uninstall{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := deletePaths(plan)["/usr/local/pkg/f"]; !ok {
 		t.Error("allowlisted manifest file should be deleted")
 	}
-	if r := skipReason(plan, "/etc/passwd"); r != "not-allowlisted" {
-		t.Errorf("/etc/passwd reason = %q, want not-allowlisted", r)
+	if r := skipReason(plan, "/data/blob"); r != "not-allowlisted" {
+		t.Errorf("/data/blob reason = %q, want not-allowlisted", r)
+	}
+}
+
+// A denylisted manifest path is a plan-time skip (reason "denylist"), never a
+// deletion — but it does not abort Compute.
+func TestComputeSkipsDenylistedManifestPath(t *testing.T) {
+	plan, err := Compute([]string{"etc/passwd", "usr/local/pkg/f"}, config.Uninstall{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := deletePaths(plan)["/etc/passwd"]; ok {
+		t.Error("/etc/passwd must never be a deletion target")
+	}
+	if r := skipReason(plan, "/etc/passwd"); r != "denylist" {
+		t.Errorf("/etc/passwd reason = %q, want denylist", r)
 	}
 }
 

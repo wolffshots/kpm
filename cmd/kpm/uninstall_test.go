@@ -183,6 +183,71 @@ func TestUninstallPartialFailureExit2(t *testing.T) {
 	}
 }
 
+// finding 2: an execution-time safety skip (symlinked parent, C7) leaves a file
+// on disk, so the package must NOT be unregistered — registration and state are
+// kept for retry and the exit is partial.
+func TestUninstallExecSkipRetainsRegistration(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	// The real directory the symlink points at — its file must survive.
+	real := filepath.Join(sysroot, "opt", "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(real, "secret")
+	if err := os.WriteFile(secret, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(sysroot, "opt", "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(pkgDir, "link")); err != nil {
+		t.Skipf("symlink creation unsupported on this host: %v", err)
+	}
+	registerPkg(t, a, "pkg", config.Uninstall{}, []string{"opt/pkg/link/secret"})
+
+	if code := a.cmdUninstall([]string{"--yes", "pkg"}); code != exitPartial {
+		t.Errorf("exec-skip: exit %d, want %d", code, exitPartial)
+	}
+	if !exists(secret) {
+		t.Error("delete must not follow the symlinked parent")
+	}
+	if a.state.Packages["pkg"] == nil {
+		t.Error("exec-skip must retain state entry")
+	}
+	if _, err := os.Stat(a.paths.PackageFile("pkg")); err != nil {
+		t.Error("exec-skip must keep the registration")
+	}
+}
+
+// A plan-time policy skip (denylist) is the user's accepted policy: the package
+// still unregisters cleanly, deleting the allowlisted paths.
+func TestUninstallPlanSkipStillUnregisters(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	f := mkfile(t, sysroot, "usr/local/pkg/lib.so")
+	mkfile(t, sysroot, "usr/local/keepme")
+	// A denylisted manifest entry (/etc/passwd) is skipped at plan time.
+	registerPkg(t, a, "pkg", config.Uninstall{}, []string{"etc/passwd", "usr/local/pkg/lib.so"})
+
+	if code := a.cmdUninstall([]string{"--yes", "pkg"}); code != exitOK {
+		t.Fatalf("plan-skip: exit %d, want %d", code, exitOK)
+	}
+	if _, err := os.Stat(f); !os.IsNotExist(err) {
+		t.Error("allowlisted file should be deleted")
+	}
+	if _, err := os.Stat(a.paths.PackageFile("pkg")); !os.IsNotExist(err) {
+		t.Error("plan-time skip must still allow unregistration")
+	}
+	if a.state.Packages["pkg"] != nil {
+		t.Error("state entry should be cleared despite the plan-time skip")
+	}
+}
+
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
 func TestListToleratesBadUninstallBlock(t *testing.T) {
 	a, _ := newUninstallApp(t)
 	// A package with an invalid method must not break list.

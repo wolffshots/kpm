@@ -20,10 +20,32 @@ const (
 	vNotAllowed                // outside the allowlist — skipped with a WARN
 )
 
-// denyPrefixes are roots whose contents can brick boot/Nickel. Anything at or
-// under these is refused, even if listed in allow_paths (§4).
+// denyPrefixes are whole trees that are refused, even if listed in allow_paths
+// (§4): boot/Nickel roots (/bin, /sbin, /lib, /drivers), the kernel/device
+// pseudo-filesystems (/dev, /proc, /sys), root's home (/root), and the mutable
+// system state tree (/var). /etc/init.d is subsumed by the broad /etc deny
+// below.
 var denyPrefixes = []string{
-	"/bin", "/sbin", "/lib", "/drivers", "/etc/init.d",
+	"/bin", "/sbin", "/lib", "/drivers",
+	"/dev", "/proc", "/sys", "/root", "/var",
+}
+
+// etcDir is denied broadly (protecting /etc/passwd, /etc/shadow, /etc/fstab,
+// /etc/hosts, /etc/inittab, /etc/init.d, …) EXCEPT the subtrees kpm packages
+// legitimately write, which stay on the allowlist. Mirrors the /usr/local/Kobo
+// except-imageformats carve-out (§4).
+var (
+	etcDir        = "/etc"
+	etcExceptions = []string{"/etc/udev/rules.d", "/etc/dbus-1"}
+)
+
+// onboardAllowed are the only /mnt/onboard subtrees kpm may delete under. The
+// rest of the FAT32 partition — the book library and the firmware .kobo tree's
+// siblings — is denied even via allow_paths, so allow_paths=["/mnt/onboard"]
+// cannot be used to wipe books (§4).
+var onboardAllowed = []string{
+	"/mnt/onboard/.adds",
+	"/mnt/onboard/.kobo",
 }
 
 // kpmSelfDenied are kpm's own paths that must never be deleted (§4). These are
@@ -81,6 +103,16 @@ func under(abs, prefix string) bool {
 	return strings.HasPrefix(abs, sep)
 }
 
+// underAny reports whether abs is at or below any of prefixes (C2 case rule).
+func underAny(abs string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if under(abs, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // components counts the non-empty path segments of a cleaned absolute path.
 func components(abs string) int {
 	t := strings.Trim(abs, "/")
@@ -102,7 +134,14 @@ func classify(abs string, allowExtra []string) verdict {
 			return vDenied
 		}
 	}
-	if pathEqual(abs, "/etc/inittab") {
+	// /etc is denied broadly, except the few kpm-writable subtrees.
+	if under(abs, etcDir) && !underAny(abs, etcExceptions) {
+		return vDenied
+	}
+	// The FAT32 onboard partition is protected except /mnt/onboard/.adds and
+	// /mnt/onboard/.kobo — this guards the book library and the firmware root
+	// (case-insensitively, honoring the onboard case rule C2).
+	if onOnboard(abs) && !underAny(abs, onboardAllowed) {
 		return vDenied
 	}
 	// /usr/local/Kobo is denied EXCEPT the imageformats subtree.
