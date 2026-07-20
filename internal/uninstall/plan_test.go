@@ -106,6 +106,65 @@ func TestComputeMarkerMethod(t *testing.T) {
 	}
 }
 
+// MARKER-REMOVE §4.1: the plan's only op is the marker delete — the manifest is
+// never part of the deletion set (the package removes itself), reboot defaults
+// on, and the marker rides Plan.Marker (printed as "delete marker").
+func TestComputeMarkerRemoveMethod(t *testing.T) {
+	cfg := config.Uninstall{
+		Method:     config.MethodMarkerRemove,
+		MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+	}
+	plan, err := Compute([]string{"usr/local/x/should-be-ignored"}, cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Marker != "/mnt/onboard/.adds/nickelclock/uninstall" {
+		t.Errorf("marker = %q", plan.Marker)
+	}
+	if !plan.NeedsReboot {
+		t.Error("marker-remove should default needs_reboot=true")
+	}
+	if len(plan.Deletes) != 0 {
+		t.Errorf("deletion set must be empty (no manifest deletion): %+v", plan.Deletes)
+	}
+}
+
+// MARKER-REMOVE §4.6: --purge composes — the marker delete plus purge_paths.
+func TestComputeMarkerRemovePurgeComposes(t *testing.T) {
+	cfg := config.Uninstall{
+		Method:     config.MethodMarkerRemove,
+		MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+		PurgePaths: []string{"/mnt/onboard/.adds/nickelclock/**"},
+	}
+	plan, err := Compute(nil, cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Marker == "" {
+		t.Error("marker delete missing")
+	}
+	d, ok := deletePaths(plan)["/mnt/onboard/.adds/nickelclock"]
+	if !ok || !d.Purge || !d.Recursive {
+		t.Errorf("purge_paths must compose with the marker delete: %+v", plan.Deletes)
+	}
+}
+
+// MARKER-REMOVE §4.4: a denylisted marker path is a Compute error.
+func TestComputeMarkerRemoveDenylisted(t *testing.T) {
+	cfg := config.Uninstall{Method: config.MethodMarkerRemove, MarkerFile: "/etc/inittab"}
+	if _, err := Compute(nil, cfg, false); err == nil {
+		t.Fatal("denylisted marker-remove path must error")
+	}
+}
+
+// MARKER-REMOVE §4.5: marker_file unset with the new method is a config error.
+func TestComputeMarkerRemoveMissingFile(t *testing.T) {
+	cfg := config.Uninstall{Method: config.MethodMarkerRemove}
+	if _, err := Compute(nil, cfg, false); err == nil {
+		t.Fatal("marker-remove without marker_file must error")
+	}
+}
+
 func TestComputeMarkerMissingFile(t *testing.T) {
 	cfg := config.Uninstall{Method: config.MethodMarker}
 	if _, err := Compute(nil, cfg, false); err == nil {

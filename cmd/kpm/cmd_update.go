@@ -347,8 +347,9 @@ func fresh(lastCheck string) bool {
 	return d < checkFreshness
 }
 
-// download streams the asset to cache/<id>-<tag>.tgz (via .part), then verifies
-// gzip integrity + walks the tar, returning the captured manifest.
+// download streams the asset to cache/<id>-<tag>.tgz (via .part), unwraps a
+// zip-wrapped tgz if the asset is one (ZIP-ASSETS §1), then verifies gzip
+// integrity + walks the tar, returning the captured manifest.
 func (a *App) download(id, tag string, asset forge.Asset) (string, []string, error) {
 	final := a.paths.CacheDir() + "/" + id + "-" + safeTag(tag) + ".tgz"
 	part := final + ".part"
@@ -372,6 +373,25 @@ func (a *App) download(id, tag string, asset forge.Asset) (string, []string, err
 	}
 	if err := os.Rename(part, final); err != nil {
 		return "", nil, err
+	}
+	// The asset may be a zip wrapping the real KoboRoot.tgz (e.g. NickelClock's
+	// NickelClock-<tag>.zip). Detection is by content, not filename: unwrap the
+	// single inner tgz over `final` so the cache path and everything downstream
+	// (Verify, merge, staged-hash guard B4, uninstall manifests) are identical to
+	// the non-zip flow (ZIP-ASSETS §1). The zip is deleted after successful
+	// extraction and on every error path; its temporary .zip.part name keeps a
+	// crash leftover inside cleanCache's .part sweep (F3).
+	if tgz.IsZip(final) {
+		zipTmp := final + ".zip.part"
+		if err := os.Rename(final, zipTmp); err != nil {
+			os.Remove(final)
+			return "", nil, err
+		}
+		uerr := tgz.Unwrap(zipTmp, final)
+		os.Remove(zipTmp)
+		if uerr != nil {
+			return "", nil, fmt.Errorf("unwrap: %w", uerr)
+		}
 	}
 	res, err := tgz.Verify(final)
 	if err != nil {

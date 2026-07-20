@@ -165,7 +165,7 @@ func TestExecuteKeepInsideRecursiveDelete(t *testing.T) {
 	p, sysroot := sandbox(t)
 	mkfile(t, sysroot, "mnt/onboard/.adds/Foo/a.txt")
 	mkfile(t, sysroot, "mnt/onboard/.adds/Foo/b.txt")
-	mkfile(t, sysroot, "mnt/onboard/.adds/Foo/user.cfg") // must survive
+	mkfile(t, sysroot, "mnt/onboard/.adds/Foo/user.cfg")  // must survive
 	mkfile(t, sysroot, "mnt/onboard/.adds/keepdir_alive") // keeps .adds non-empty
 
 	cfg := config.Uninstall{
@@ -253,6 +253,71 @@ func TestExecuteSymlinkedParentSkipped(t *testing.T) {
 	}
 	if len(res.Skipped) != 1 {
 		t.Errorf("expected a symlinked-parent skip, got %+v", res.Skipped)
+	}
+}
+
+// MARKER-REMOVE §2: the shipped trigger file is deleted; its absence makes the
+// package remove itself on the next boot.
+func TestExecuteMarkerRemoveDeletes(t *testing.T) {
+	p, sysroot := sandbox(t)
+	host := mkfile(t, sysroot, "mnt/onboard/.adds/nickelclock/uninstall")
+	cfg := config.Uninstall{Method: config.MethodMarkerRemove, MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall"}
+	plan, err := Compute(nil, cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Execute(p, plan)
+	if !res.OK() {
+		t.Fatalf("unexpected failures: %+v", res.Failed)
+	}
+	if exists(host) {
+		t.Error("trigger file should be deleted")
+	}
+	if res.Marker != "/mnt/onboard/.adds/nickelclock/uninstall" {
+		t.Errorf("Marker = %q", res.Marker)
+	}
+}
+
+// MARKER-REMOVE §2/§4.2: an already-absent trigger file is an idempotent
+// success (the package is already uninstalling or was removed by hand).
+func TestExecuteMarkerRemoveAlreadyAbsent(t *testing.T) {
+	p, _ := sandbox(t)
+	cfg := config.Uninstall{Method: config.MethodMarkerRemove, MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall"}
+	plan, err := Compute(nil, cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Execute(p, plan)
+	if !res.OK() {
+		t.Fatalf("absent trigger must be a no-op success: %+v", res.Failed)
+	}
+	if res.Marker != "" {
+		t.Errorf("no marker was deleted, Marker = %q", res.Marker)
+	}
+	if len(res.AlreadyGone) != 1 || res.AlreadyGone[0] != "/mnt/onboard/.adds/nickelclock/uninstall" {
+		t.Errorf("AlreadyGone = %v", res.AlreadyGone)
+	}
+}
+
+// MARKER-REMOVE §2/§4.3: a directory at the marker path is an error (mirror of
+// the marker method's dir-in-the-way rule).
+func TestExecuteMarkerRemoveDirInTheWay(t *testing.T) {
+	p, sysroot := sandbox(t)
+	dir := filepath.Join(sysroot, filepath.FromSlash("mnt/onboard/.adds/nickelclock/uninstall"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Uninstall{Method: config.MethodMarkerRemove, MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall"}
+	plan, err := Compute(nil, cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Execute(p, plan)
+	if res.OK() || len(res.Failed) != 1 {
+		t.Fatalf("directory at the marker path must fail: %+v", res)
+	}
+	if !exists(dir) {
+		t.Error("the directory must be left in place")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/version"
 )
@@ -26,7 +27,7 @@ type Result struct {
 	Kept        []string  // paths preserved by keep_paths inside a recursive delete (C1)
 	Skipped     []Skipped // execution-time skips (e.g. symlinked parent, C7)
 	Failed      []FailedPath
-	Marker      string // marker file created, "" if none
+	Marker      string // marker file created (marker) or deleted (marker-remove), "" if none
 }
 
 // OK reports whether the plan applied cleanly: no deletion failures AND no
@@ -37,13 +38,35 @@ type Result struct {
 // Plan, not the Result — they do not affect OK().
 func (r Result) OK() bool { return len(r.Failed) == 0 && len(r.Skipped) == 0 }
 
-// Execute applies plan's marker creation, file deletions, and empty-directory
-// cleanup through the device layer's HostPath mapping. run_before/run_after are
+// Execute applies plan's marker creation (or deletion, for marker-remove),
+// file deletions, and empty-directory cleanup through the device layer's
+// HostPath mapping. run_before/run_after are
 // NOT run here (the CLI runs them, honoring --force). Missing files are fine.
 func Execute(p device.Paths, plan Plan) Result {
 	var r Result
 
-	if plan.Marker != "" {
+	if plan.Marker != "" && plan.Method == config.MethodMarkerRemove {
+		// marker-remove: DELETE the shipped trigger file; its absence makes the
+		// package remove itself on the next boot (MARKER-REMOVE §2).
+		host := p.HostPath(plan.Marker)
+		if info, err := os.Lstat(host); err == nil {
+			// A directory in the marker's place is an error, mirroring the
+			// marker method's dir-in-the-way rule (MARKER-REMOVE §2).
+			if info.IsDir() {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
+			} else if err := os.Remove(host); err != nil {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+			} else {
+				r.Marker = plan.Marker
+			}
+		} else if os.IsNotExist(err) {
+			// Idempotent: already absent — the package is already uninstalling
+			// or was removed manually (MARKER-REMOVE §2).
+			r.AlreadyGone = append(r.AlreadyGone, plan.Marker)
+		} else {
+			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+		}
+	} else if plan.Marker != "" {
 		host := p.HostPath(plan.Marker)
 		if info, err := os.Lstat(host); err == nil {
 			// Idempotent: an existing marker is left untouched (never truncated),

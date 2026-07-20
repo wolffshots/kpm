@@ -288,6 +288,57 @@ func TestUninstallValidate(t *testing.T) {
 	}
 }
 
+// MARKER-REMOVE §1/§4.5: the new method validates like marker (marker_file
+// required) and defaults needs_reboot=true; explicit needs_reboot still wins.
+func TestUninstallMarkerRemove(t *testing.T) {
+	if err := (Uninstall{Method: MethodMarkerRemove}).Validate(); err == nil {
+		t.Error("marker-remove without marker_file should be invalid")
+	}
+	u := Uninstall{Method: MethodMarkerRemove, MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall"}
+	if err := u.Validate(); err != nil {
+		t.Errorf("marker-remove with marker_file should be valid: %v", err)
+	}
+	if !u.RebootRequired() {
+		t.Error("marker-remove should default needs_reboot=true")
+	}
+	off := false
+	u.NeedsReboot = &off
+	if u.RebootRequired() {
+		t.Error("explicit needs_reboot=false must override the marker-remove default")
+	}
+}
+
+// MARKER-REMOVE §4.7: a def with the new method parses from TOML, validates,
+// and survives install's def write (SaveReplace) round-trip.
+func TestUninstallMarkerRemoveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nickelclock.toml")
+	def := &Package{
+		Name:   "NickelClock",
+		Source: "github.com/shermp/NickelClock",
+		Forge:  ForgeGitHub,
+		Asset:  "NickelClock-*.zip",
+		Uninstall: Uninstall{
+			Method:     MethodMarkerRemove,
+			MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+			PurgePaths: []string{"/mnt/onboard/.adds/nickelclock/**"},
+		},
+	}
+	if err := SaveReplace(path, def); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(path, "nickelclock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Uninstall.Method != MethodMarkerRemove || p.Uninstall.MarkerFile != def.Uninstall.MarkerFile {
+		t.Errorf("round-trip lost the method/marker_file: %+v", p.Uninstall)
+	}
+	if err := p.Uninstall.Validate(); err != nil {
+		t.Errorf("round-tripped def must validate: %v", err)
+	}
+}
+
 func TestLoadToleratesBadUninstallBlock(t *testing.T) {
 	// A bad [uninstall] block must not fail Load (so check/update/list keep
 	// working); it only surfaces when Validate() is called at uninstall time.

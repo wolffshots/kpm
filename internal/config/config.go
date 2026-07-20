@@ -25,21 +25,22 @@ const DefaultAsset = "KoboRoot.tgz"
 
 // Uninstall methods.
 const (
-	MethodManifest = "manifest"
-	MethodMarker   = "marker"
+	MethodManifest     = "manifest"
+	MethodMarker       = "marker"
+	MethodMarkerRemove = "marker-remove"
 )
 
 // Uninstall is the per-package [uninstall] table (UNINSTALL.md §2). All fields
 // are optional; a bad block only surfaces errors when "kpm uninstall" runs, so
 // registration/check/update never fail on it.
 type Uninstall struct {
-	Method      string   `toml:"method"`       // "manifest" (default) | "marker"
+	Method      string   `toml:"method"`       // "manifest" (default) | "marker" | "marker-remove"
 	ExtraPaths  []string `toml:"extra_paths"`  // always-delete software artifacts
 	PurgePaths  []string `toml:"purge_paths"`  // user data/config; deleted only with --purge
 	KeepPaths   []string `toml:"keep_paths"`   // subtract from the deletion set
 	AllowPaths  []string `toml:"allow_paths"`  // per-package allowlist extension (§4)
-	MarkerFile  string   `toml:"marker_file"`  // method="marker": file to create
-	NeedsReboot *bool    `toml:"needs_reboot"` // nil => default (true for marker, else false)
+	MarkerFile  string   `toml:"marker_file"`  // method="marker": file to create; "marker-remove": file to delete
+	NeedsReboot *bool    `toml:"needs_reboot"` // nil => default (true for the marker methods, else false)
 	RunBefore   string   `toml:"run_before"`   // /bin/sh -c before removal; nonzero aborts
 	RunAfter    string   `toml:"run_after"`    // /bin/sh -c after removal; nonzero is WARN
 }
@@ -53,25 +54,28 @@ func (u Uninstall) EffectiveMethod() string {
 }
 
 // RebootRequired reports whether removal needs a reboot to complete: the
-// explicit needs_reboot if set, otherwise true for the marker method.
+// explicit needs_reboot if set, otherwise true for the marker methods (the
+// package only acts on its trigger at the next boot — MARKER-REMOVE §1).
 func (u Uninstall) RebootRequired() bool {
 	if u.NeedsReboot != nil {
 		return *u.NeedsReboot
 	}
-	return u.EffectiveMethod() == MethodMarker
+	m := u.EffectiveMethod()
+	return m == MethodMarker || m == MethodMarkerRemove
 }
 
 // Validate checks the method and marker constraints. Path-policy validation of
 // allow_paths lives in internal/uninstall (it needs the denylist). Called only
 // at uninstall time so a bad block never breaks other commands.
 func (u Uninstall) Validate() error {
-	switch u.EffectiveMethod() {
-	case MethodManifest, MethodMarker:
+	m := u.EffectiveMethod()
+	switch m {
+	case MethodManifest, MethodMarker, MethodMarkerRemove:
 	default:
-		return fmt.Errorf("invalid uninstall method %q (want %q or %q)", u.Method, MethodManifest, MethodMarker)
+		return fmt.Errorf("invalid uninstall method %q (want %q, %q, or %q)", u.Method, MethodManifest, MethodMarker, MethodMarkerRemove)
 	}
-	if u.EffectiveMethod() == MethodMarker && strings.TrimSpace(u.MarkerFile) == "" {
-		return fmt.Errorf("uninstall method %q requires marker_file", MethodMarker)
+	if (m == MethodMarker || m == MethodMarkerRemove) && strings.TrimSpace(u.MarkerFile) == "" {
+		return fmt.Errorf("uninstall method %q requires marker_file", m)
 	}
 	return nil
 }

@@ -178,6 +178,11 @@ func (a *App) logUninstall(id string, plan uninstall.Plan, res uninstall.Result)
 	if res.Marker != "" {
 		a.paths.Log("UNINSTALL", fmt.Sprintf("%s  marker %s", id, res.Marker))
 	}
+	if plan.Method == config.MethodMarkerRemove && plan.Marker != "" && res.Marker == "" && res.OK() {
+		// Idempotent no-op: the shipped trigger file was already absent — the
+		// package is already uninstalling or was removed by hand (MARKER-REMOVE §2).
+		a.paths.Log("INFO", fmt.Sprintf("%s  marker %s already absent — nothing to delete", id, plan.Marker))
+	}
 	for _, p := range res.Purged {
 		a.paths.Log("PURGE", fmt.Sprintf("%s  %s", id, p))
 	}
@@ -202,7 +207,13 @@ func printPlan(w io.Writer, id string, plan uninstall.Plan, purge, hasPurgePaths
 		fmt.Fprintf(w, "  run before  %s\n", plan.RunBefore)
 	}
 	if plan.Marker != "" {
-		fmt.Fprintf(w, "  marker      %s\n", plan.Marker)
+		// marker creates the trigger file; marker-remove deletes the shipped one
+		// (MARKER-REMOVE §2).
+		verb := "create marker"
+		if plan.Method == config.MethodMarkerRemove {
+			verb = "delete marker"
+		}
+		fmt.Fprintf(w, "  %s %s\n", verb, plan.Marker)
 	}
 	if len(plan.Deletes) == 0 && plan.Marker == "" {
 		fmt.Fprintln(w, "  (nothing to delete)")

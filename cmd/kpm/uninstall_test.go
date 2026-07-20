@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/state"
+	"kpm/internal/uninstall"
 )
 
 // newUninstallApp builds an App with KPM_SYSROOT and a consistent KPM_ROOT so
@@ -246,6 +249,80 @@ func TestUninstallPlanSkipStillUnregisters(t *testing.T) {
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// MARKER-REMOVE: end to end — the shipped trigger file is deleted and the
+// package unregisters cleanly; --purge composes with the trigger delete.
+func TestUninstallMarkerRemoveEndToEnd(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	trigger := mkfile(t, sysroot, "mnt/onboard/.adds/nickelclock/uninstall")
+	cfgFile := mkfile(t, sysroot, "mnt/onboard/.adds/nickelclock/settings.ini")
+	registerPkg(t, a, "nickelclock", config.Uninstall{
+		Method:     config.MethodMarkerRemove,
+		MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+		PurgePaths: []string{"/mnt/onboard/.adds/nickelclock/**"},
+	}, []string{"usr/local/Kobo/imageformats/libnickelclock.so"})
+
+	if code := a.cmdUninstall([]string{"--yes", "--purge", "nickelclock"}); code != exitOK {
+		t.Fatalf("exit %d, want %d", code, exitOK)
+	}
+	if exists(trigger) {
+		t.Error("trigger file should be deleted")
+	}
+	if exists(cfgFile) {
+		t.Error("--purge should remove the config dir alongside the trigger delete")
+	}
+	if _, err := os.Stat(a.paths.PackageFile("nickelclock")); !os.IsNotExist(err) {
+		t.Error("registration should be removed")
+	}
+	if a.state.Packages["nickelclock"] != nil {
+		t.Error("state entry should be cleared")
+	}
+}
+
+// MARKER-REMOVE §2: an already-absent trigger file is an idempotent success —
+// the package still unregisters.
+func TestUninstallMarkerRemoveAbsentSucceeds(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerPkg(t, a, "nickelclock", config.Uninstall{
+		Method:     config.MethodMarkerRemove,
+		MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+	}, nil)
+
+	if code := a.cmdUninstall([]string{"--yes", "nickelclock"}); code != exitOK {
+		t.Fatalf("absent trigger: exit %d, want %d", code, exitOK)
+	}
+	if _, err := os.Stat(a.paths.PackageFile("nickelclock")); !os.IsNotExist(err) {
+		t.Error("idempotent no-op should still unregister")
+	}
+}
+
+// MARKER-REMOVE §2: the plan prints "delete marker" for marker-remove and
+// "create marker" for marker.
+func TestPrintPlanMarkerVerbs(t *testing.T) {
+	rm, err := uninstall.Compute(nil, config.Uninstall{
+		Method: config.MethodMarkerRemove, MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	printPlan(&buf, "nickelclock", rm, false, false)
+	if !strings.Contains(buf.String(), "delete marker /mnt/onboard/.adds/nickelclock/uninstall") {
+		t.Errorf("marker-remove plan should print the delete verb:\n%s", buf.String())
+	}
+
+	cr, err := uninstall.Compute(nil, config.Uninstall{
+		Method: config.MethodMarker, MarkerFile: "/mnt/onboard/.adds/nm/uninstall",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	printPlan(&buf, "nickelmenu", cr, false, false)
+	if !strings.Contains(buf.String(), "create marker /mnt/onboard/.adds/nm/uninstall") {
+		t.Errorf("marker plan should print the create verb:\n%s", buf.String())
+	}
 }
 
 func TestListToleratesBadUninstallBlock(t *testing.T) {

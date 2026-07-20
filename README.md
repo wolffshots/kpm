@@ -304,13 +304,13 @@ that one package simply doesn't exist until you fix the file.
 
 ```toml
 [uninstall]
-method       = "manifest"   # "manifest" (default) | "marker"
+method       = "manifest"   # "manifest" (default) | "marker" | "marker-remove"
 extra_paths  = []           # extra software artifacts to always delete
 purge_paths  = []           # user data/config; deleted ONLY with --purge
 keep_paths   = []           # protect these (subtracted from the deletion set)
 allow_paths  = []           # extend the deletable-path allowlist (never the denylist)
-marker_file  = ""           # method="marker": file to create (required)
-needs_reboot = false        # defaults to true for marker, false otherwise
+marker_file  = ""           # marker: file to create; marker-remove: file to delete (required for both)
+needs_reboot = false        # defaults to true for marker/marker-remove, false otherwise
 run_before   = ""           # /bin/sh -c before removal; nonzero aborts (unless --force)
 run_after    = ""           # /bin/sh -c after removal; nonzero is logged, not fatal
 ```
@@ -366,6 +366,35 @@ kpm uninstall nickelmenu --yes --reboot   # writes the marker, reboots to finish
 
 `extra_paths`/`purge_paths`/`keep_paths` still apply for the marker method (e.g.
 purge NickelMenu's config dir alongside the marker with `--purge`).
+
+**Marker-remove method** is the inverse convention used by NickelHook mods like
+NickelClock, NickelDBus, and NickelTypeFix: the package *ships* a trigger file
+whose *absence* makes it remove itself on the next boot. kpm deletes that file
+and reboots — deleting the mod's files directly would rip a loaded `.so` out
+from under Nickel instead of following the package's supported path:
+
+```toml
+# packages.d/nickelclock.toml
+name = "NickelClock"
+source = "github.com/shermp/NickelClock"
+forge = "github"
+asset = "NickelClock-*.zip"
+
+[uninstall]
+method      = "marker-remove"
+marker_file = "/mnt/onboard/.adds/nickelclock/uninstall"
+purge_paths = ["/mnt/onboard/.adds/nickelclock/**"]
+```
+
+```
+kpm uninstall nickelclock --yes --reboot   # deletes the trigger, reboots to finish
+```
+
+If the trigger file is already absent (the package is already uninstalling, or
+was removed by hand), the uninstall succeeds as a no-op — the reboot note still
+applies. A *directory* at the marker path is an error. The other fields compose
+exactly as for `marker` (e.g. `--purge` removes the config dir alongside the
+trigger delete).
 
 There is no NickelMenu entry for uninstall — it stays CLI-only (telnet/SSH) on
 purpose: a one-tap destructive action is a footgun.

@@ -26,7 +26,7 @@ type Skipped struct {
 type Plan struct {
 	Method      string
 	RunBefore   string
-	Marker      string   // marker file to create (absolute device path), "" if none
+	Marker      string   // marker file to create (marker) or delete (marker-remove), "" if none
 	Deletes     []Delete // files/subtrees to remove, in order
 	Rmdirs      []string // empty-dir cleanup, deepest-first
 	RunAfter    string
@@ -84,13 +84,13 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 	plan.keeps = keeps
 	plan.allowExtra = allowExtra
 
-	if method == config.MethodMarker {
+	if method == config.MethodMarker || method == config.MethodMarkerRemove {
 		m, err := cleanDeviceAbs(cfg.MarkerFile)
 		if err != nil {
 			return Plan{}, fmt.Errorf("marker_file: %w", err)
 		}
 		// The marker path is subject to policy too — it must be allowlisted
-		// (built-in or via allow_paths), never denied (C3).
+		// (built-in or via allow_paths), never denied (C3; MARKER-REMOVE §2).
 		if classify(m, allowExtra) != vAllowed {
 			return Plan{}, fmt.Errorf("marker_file %q is not within a deletable/writable path", cfg.MarkerFile)
 		}
