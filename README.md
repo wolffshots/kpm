@@ -39,31 +39,88 @@ repair it over USB:
 /mnt/onboard/.adds/nm/kpm   NickelMenu drop-in
 ```
 
-## Install / bootstrap
+## Install
 
-Requires [NickelMenu](https://github.com/pgaskin/NickelMenu). NickelDBus (`qndb`)
-is optional — if present, kpm shows toasts; if not, use the **Status** menu entry.
+kpm is installed the same way it installs everything else: a `KoboRoot.tgz`
+goes into the firmware's boot-time install slot and the next reboot installs
+it. Grab the archive from the
+[latest release](https://github.com/wolffshots/kpm/releases/latest) or build it
+yourself:
 
-1. Build the package (or grab `releases/<version>/KoboRoot.tgz`):
+```
+go run ./build          # produces dist/kpm and dist/KoboRoot.tgz
+```
 
-   ```
-   go run ./build          # produces dist/kpm and dist/KoboRoot.tgz
-   ```
+Get it into the slot either way:
 
-2. Connect the Kobo over USB and copy the archive into the hidden install slot:
+- **Over USB** — copy the archive into the hidden install slot, then eject;
+  the Kobo reboots and installs it on boot:
 
-   ```
-   cp dist/KoboRoot.tgz /media/<you>/KOBOeReader/.kobo/KoboRoot.tgz
-   ```
+  ```
+  cp dist/KoboRoot.tgz /media/<you>/KOBOeReader/.kobo/KoboRoot.tgz
+  ```
 
-3. Eject and let the Kobo reboot. On boot it installs `kpm` and its NickelMenu
-   entries.
+- **Over SSH** — if the device already has SSH access:
+
+  ```
+  scp dist/KoboRoot.tgz root@<kobo>:/mnt/onboard/.kobo/KoboRoot.tgz
+  ssh root@<kobo> reboot
+  ```
+
+The binary installs to `/mnt/onboard/.adds/kpm/bin/kpm`, which is not on the
+device's `PATH` — over SSH/telnet run it by full path or add it to your shell:
+
+```
+export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
+```
+
+[NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional but
+recommended**: with it kpm gets on-device menu entries (see "NickelMenu
+usage"); without it kpm is a normal CLI over SSH/telnet. NickelDBus (`qndb`)
+is also optional — if present, kpm shows toasts; if not, use the **Status**
+menu entry. What to do next depends on which side you start from:
+
+### Already running NickelMenu
+
+kpm's menu entries appear after the install reboot. Register the mods you
+already have so kpm *tracks* them instead of thinking they need a reinstall —
+seed each one with the version currently on the device:
+
+```
+kpm registry add https://github.com/wolffshots/kobo-registry
+kpm registry refresh
+kpm install nickelmenu --installed v0.6.0 --yes    # the version you have
+```
+
+A hand-added `kpm add https://github.com/pgaskin/NickelMenu --installed v0.6.0`
+works too, but the registry def also carries the curated uninstall recipe.
+
+### No NickelMenu yet (SSH-first install)
+
+kpm works headless, so use it to install NickelMenu:
+
+```
+kpm registry add https://github.com/wolffshots/kobo-registry
+kpm registry refresh
+kpm install nickelmenu --yes
+kpm update nickelmenu --reboot
+```
+
+The reboot installs NickelMenu, and kpm's menu entries appear with it.
+
+### Self-update
 
 kpm ships `packages.d/kpm.toml` with an **empty `source`**, so self-update is
 "not configured": `check`/`update` skip kpm silently and `list`/`status` show it
-as `self-update not configured` — never an error. Once kpm's release repo
-exists, set `source = "host/owner/kpm"` in that file (or `kpm add` it) and kpm
-maintains itself like any other package.
+as `self-update not configured` — never an error. Adopt the registry's kpm def
+to turn it on (after the `registry add`/`refresh` above):
+
+```
+kpm install kpm --adopt --yes
+```
+
+and kpm maintains itself like any other package. (Setting
+`source = "github.com/wolffshots/kpm"` in `kpm.toml` by hand works too.)
 
 kpm's own recorded version self-heals from the running binary, so a
 USB-sideloaded kpm corrects its `installed_version` on the next mutating command.
