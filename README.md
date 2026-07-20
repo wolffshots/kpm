@@ -108,6 +108,11 @@ curated `[uninstall]` recipes). kpm fetches its `registry.toml` over raw-file
 HTTPS — no git client, no clone. A registry holds *definitions only*, never
 binaries; the actual software still comes from each package's own release page.
 
+A public registry of common Kobo mods lives at
+[wolffshots/kobo-registry](https://github.com/wolffshots/kobo-registry) —
+**browse its packages at
+[wolffshots.github.io/kobo-registry](https://wolffshots.github.io/kobo-registry/)**.
+
 Trusting a registry is the same trust decision as running `kpm add` on each of
 its entries yourself: a def chooses the source repo and the uninstall recipe
 (including `run_before`/`run_after` hooks, which run as root). There is **no def
