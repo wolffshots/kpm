@@ -1,5 +1,6 @@
 // NICKEL-UI.md §6 — DetailDialog + action flow.
 
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -23,6 +24,16 @@ DetailDialog::DetailDialog(QJsonObject package)
     setFixedSize(parent->size());
   }
 
+  // Title-bar buttons. The back arrow (top-left) closes only this detail view,
+  // returning to the browse list; the close X (top-right) dismisses the whole
+  // package manager — the base Dialog already deletes this view on closeTapped,
+  // and closeRequested tells the browse dialog to close underneath us.
+  if (N3Dialog__enableBackButton) {
+    N3Dialog__enableBackButton(dialog, true);
+  }
+  QObject::connect(dialog, SIGNAL(backTapped()), dialog, SLOT(deleteLater()));
+  QObject::connect(dialog, SIGNAL(closeTapped()), this, SIGNAL(closeRequested()));
+
   QString installed = pkg.value("installed").toString();
   bool staged = pkg.value("staged").toBool();
   bool updateAvailable = pkg.value("update").toBool();
@@ -32,7 +43,8 @@ DetailDialog::DetailDialog(QJsonObject package)
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
 
   QVBoxLayout *layout = new QVBoxLayout(this);
-  layout->setContentsMargins(30, 30, 30, 30);
+  // 30px padding, plus the home-screen chrome insets on top/bottom (base Dialog).
+  layout->setContentsMargins(30, 30 + chrome.top(), 30, 30 + chrome.bottom());
   layout->setSpacing(8);
 
   auto addInfo = [&](const QString &labelText, const QString &value) {
@@ -67,12 +79,17 @@ DetailDialog::DetailDialog(QJsonObject package)
   statusLabel = new Label(Label::Small, "");
   layout->addWidget(statusLabel);
 
-  // Action buttons by state (§6).
+  // Action buttons sit in a right-aligned footer pinned to the bottom of the
+  // view (added after the stretch below). primaryButton is Nickel's dark-filled
+  // style: light text on a dark button.
+  QHBoxLayout *actions = new QHBoxLayout();
+  actions->setSpacing(16);
+  actions->addStretch(1);
   auto addButton = [&](const QString &text, const char *slot) {
     N3ButtonLabel *button = construct_N3ButtonLabel(this);
-    button->setProperty("borderedButton", true);
+    button->setProperty("primaryButton", true);
     button->setText(text);
-    layout->addWidget(button, 0, Qt::AlignLeft);
+    actions->addWidget(button);
     QObject::connect(button, SIGNAL(tapped(bool)), this, slot);
     buttons.append(button);
   };
@@ -97,6 +114,7 @@ DetailDialog::DetailDialog(QJsonObject package)
   }
 
   layout->addStretch(1);
+  layout->addLayout(actions);
 }
 
 void DetailDialog::setBusy(bool busy) {

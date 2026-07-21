@@ -1,16 +1,17 @@
-// NICKEL-UI.md §1/§3 — NickelKPM hook entry point and Nickel symbol tables.
+// NICKEL-UI.md §1/§3, NICKELMENU-LAUNCH.md — NickelKPM hook and Nickel symbols.
 //
 // Structure and the Nickel symbol set are adapted from NickelHardcover's
 // nickelhardcover.cc (MIT, https://codeberg.org/StrayRose/NickelHardcover).
-// The More-menu ("main" menu) injection technique is replicated minimally from
-// pgaskin/NickelMenu's src/nickelmenu.cc (see §3): NickelKPM appends exactly one
-// static "Package manager" row and marks every entry-point hook optional so a
-// firmware symbol miss degrades to "no entry point" rather than a failed load.
+// The UI is launched from a NickelMenu "kpm - Package manager" item (which runs
+// `kpm ui`) rather than by injecting a menu row: FW 4.23.15505+ moved the "main"
+// menu off the More tab, so the old createMenuTextItem/"Settings" anchor no
+// longer fires (verified on 4.45.23697). The hook is now init-only — it watches
+// Files::ui_trigger and opens BrowseDialog — and hooks no Nickel functions.
 
-#include <QAction>
-#include <QCoreApplication>
-#include <QMenu>
+#include <QFile>
+#include <QFileSystemWatcher>
 #include <QProcess>
+#include <QStringList>
 #include <QTimer>
 #include <QWidget>
 
@@ -27,6 +28,10 @@
 MainWindowController *(*MainWindowController__sharedInstance)();
 QWidget *(*MainWindowController__currentView)(MainWindowController *mwc);
 QWidget *(*MainWindowController__pushView)(MainWindowController *mwc, QWidget *view);
+StatusBarController *(*MainWindowController__statusBarController)(MainWindowController *mwc);
+void (*StatusBarController__hideStatusBar)(StatusBarController *sbc);
+void (*StatusBarController__showStatusBar)(StatusBarController *sbc);
+bool (*StatusBarController__isVisible)(StatusBarController *sbc);
 
 void (*ConfirmationDialogFactory__showErrorDialog)(QString const &title, QString const &body);
 ConfirmationDialog *(*ConfirmationDialogFactory__getConfirmationDialog)(QWidget *parent);
@@ -47,6 +52,8 @@ void (*SearchKeyboardController__setGoText)(SearchKeyboardController *__this, QS
 
 N3Dialog *(*N3DialogFactory__getDialog)(QWidget *content, bool idk);
 void (*N3Dialog__setTitle)(N3Dialog *__this, QString const &);
+void (*N3Dialog__enableFullViewMode)(N3Dialog *__this);
+void (*N3Dialog__enableBackButton)(N3Dialog *__this, bool enable);
 KeyboardFrame *(*N3Dialog__keyboardFrame)(N3Dialog *__this);
 void (*N3Dialog__showKeyboard)(N3Dialog *__this);
 void (*N3Dialog__hideKeyboard)(N3Dialog *__this);
@@ -104,59 +111,45 @@ void rebootDevice() {
   });
 }
 
-// ---- entry point: "Package manager" row in the More menu (§3) -----------
+// ---- entry point: NickelMenu-launched UI (NICKELMENU-LAUNCH.md) ----------
 //
-// NickelMenu injects into the home/library "main" menu (the More tab on FW
-// 4.23.15505+) by hooking AbstractNickelMenuController::createMenuTextItem and,
-// when it sees the "Settings" text item being built, connecting to the menu's
-// aboutToShow to append its own rows via createAction. We replicate exactly that
-// for a single static row.
+// The 4.23-era "inject a row when the More tab builds its Settings item"
+// technique is dead on FW 4.23.15505+ (Nickel moved that menu to a nav-bar
+// button), so the UI is now launched from a NickelMenu item that runs `kpm ui`,
+// which writes to Files::ui_trigger. On init we watch that tmpfs file and open
+// the browser when it changes. The watcher and its handler run on Nickel's main
+// (UI) thread — init is called there — so creating the dialog is safe.
 
-typedef QWidget MenuTextItem;
-static MenuTextItem *(*AbstractNickelMenuController__createMenuTextItem)(void *_this, QMenu *menu, QString const &text,
-                                                                         bool checkable, bool checked,
-                                                                         QString const &objectName);
-static QAction *(*AbstractNickelMenuController__createAction)(void *_this, QMenu *menu, QWidget *actionWidget,
-                                                              bool closeOnTap, bool enabled, bool separatorAfter);
-
-// injectRow appends the single "Package manager" row to a main/More menu, once
-// per menu instance (guarded by a dynamic property), and opens BrowseDialog on
-// tap. It no-ops safely if the createMenuTextItem/createAction symbols were not
-// resolved on this firmware (§3: optional entry point).
-static void injectRow(void *nmc, QMenu *menu) {
-  if (!AbstractNickelMenuController__createMenuTextItem || !AbstractNickelMenuController__createAction) {
-    nh_log("NickelKPM: menu symbols unavailable, cannot add entry row");
-    return;
+static void onUITrigger() {
+  static bool pending = false;
+  if (pending) {
+    return; // debounce: inotify can deliver a single write as several events
   }
-  if (menu->property("nkpm_added").toBool()) {
-    return; // aboutToShow fires on every open; add our row only once
-  }
-  menu->setProperty("nkpm_added", true);
-
-  MenuTextItem *item =
-      AbstractNickelMenuController__createMenuTextItem(nmc, menu, QStringLiteral("Package manager"), false, false,
-                                                       QLatin1String(""));
-  // closeOnTap=true, enabled=true, separatorAfter=true — mirrors NickelMenu's
-  // own main-menu injection call.
-  QAction *action = AbstractNickelMenuController__createAction(nmc, menu, item, true, true, true);
-  QObject::connect(action, &QAction::triggered, menu, [](bool) {
-    nh_log("NickelKPM: Package manager tapped");
-    BrowseDialog::show();
-  });
+  pending = true;
+  QTimer::singleShot(400, [] { pending = false; });
+  nh_log("NickelKPM: UI trigger fired");
+  BrowseDialog::show(); // re-entrancy-guarded (only one browser at a time)
 }
 
-extern "C" __attribute__((visibility("default"))) MenuTextItem *
-_nkpm_menu_hook(void *_this, QMenu *menu, QString const &label, bool checkable, bool checked,
-                QString const &objectName) {
-  // The main/More menu is identified exactly as NickelMenu does: the untranslated
-  // "Settings" text item, non-checkable (§3).
-  QString settings = QCoreApplication::translate("StatusBarMenuController", "Settings");
-  if (label == settings && !checkable) {
-    nh_log("NickelKPM: intercepting main/More menu (label=Settings)");
-    void *nmc = _this;
-    QObject::connect(menu, &QMenu::aboutToShow, menu, [nmc, menu]() { injectRow(nmc, menu); });
-  }
-  return AbstractNickelMenuController__createMenuTextItem(_this, menu, label, checkable, checked, objectName);
+static int nkpm_init() {
+  // Ensure the trigger file exists so the watcher has a path to watch (tmpfs is
+  // empty at boot); a plain create is enough, `kpm ui` truncates+writes it.
+  { QFile f(QString::fromUtf8(Files::ui_trigger)); f.open(QIODevice::WriteOnly); }
+
+  static QFileSystemWatcher *watcher = new QFileSystemWatcher(QStringList() << QString::fromUtf8(Files::ui_trigger));
+  QObject::connect(watcher, &QFileSystemWatcher::fileChanged, watcher, [](QString const &path) {
+    // Re-arm: QFileSystemWatcher drops the watch if the file was replaced
+    // (delete+create). `kpm ui` truncates in place, but guard regardless.
+    if (!watcher->files().contains(path)) {
+      QFile f(path);
+      f.open(QIODevice::WriteOnly);
+      f.close();
+      watcher->addPath(path);
+    }
+    onUITrigger();
+  });
+  nh_log("NickelKPM: watching %s for UI launch", Files::ui_trigger);
+  return 0;
 }
 
 // ---- NickelHook registration --------------------------------------------
@@ -175,20 +168,23 @@ static struct nh_info NickelKPM = (struct nh_info){
 };
 
 // clang-format off
+// No Nickel functions are hooked: the UI is launched from a NickelMenu item via
+// Files::ui_trigger (NICKELMENU-LAUNCH.md), not by injecting a menu row.
 static struct nh_hook NickelKPMHook[] = {
-  // Entry point: hook createMenuTextItem to inject the "Package manager" row.
-  // Optional so a symbol miss loads the mod with no entry point (§3.3).
-  { .sym = "_ZN28AbstractNickelMenuController18createMenuTextItemEP5QMenuRK7QStringbbS4_", .sym_new = "_nkpm_menu_hook", .lib = "libnickel.so.1.0.0", .out = nh_symoutptr(AbstractNickelMenuController__createMenuTextItem), .desc = "More-menu entry row (NickelMenu main-menu technique)", .optional = true }, // libnickel 4.6+ (main menu → More tab on 4.23.15505+)
   {0},
 };
 
 static struct nh_dlsym NickelKPMDlsym[] = {
-  // Entry-point helper (optional, pairs with the hook above, §3.3).
-  { .name = "_ZN22AbstractMenuController12createActionEP5QMenuP7QWidgetbbb",                .out = nh_symoutptr(AbstractNickelMenuController__createAction), .desc = "More-menu entry row", .optional = true }, // libnickel 4.6+
-
   { .name = "_ZN20MainWindowController14sharedInstanceEv",                     .out = nh_symoutptr(MainWindowController__sharedInstance) },
   { .name = "_ZNK20MainWindowController11currentViewEv",                       .out = nh_symoutptr(MainWindowController__currentView) },
   { .name = "_ZN20MainWindowController8pushViewEP7QWidget",                    .out = nh_symoutptr(MainWindowController__pushView) },
+  // Optional chrome-control set (dialog.cc hides the bars while a dialog is
+  // open); absence falls back to the geometry-inset workaround, never a
+  // load failure. All present in FW 4.45.23697.
+  { .name = "_ZNK20MainWindowController19statusBarControllerEv",               .out = nh_symoutptr(MainWindowController__statusBarController), .desc = "MainWindowController::statusBarController()", .optional = true },
+  { .name = "_ZN19StatusBarController13hideStatusBarEv",                       .out = nh_symoutptr(StatusBarController__hideStatusBar), .desc = "StatusBarController::hideStatusBar()", .optional = true },
+  { .name = "_ZN19StatusBarController13showStatusBarEv",                       .out = nh_symoutptr(StatusBarController__showStatusBar), .desc = "StatusBarController::showStatusBar()", .optional = true },
+  { .name = "_ZN19StatusBarController9isVisibleEv",                            .out = nh_symoutptr(StatusBarController__isVisible), .desc = "StatusBarController::isVisible()", .optional = true },
 
   { .name = "_ZN25ConfirmationDialogFactory15showErrorDialogERK7QStringS2_",   .out = nh_symoutptr(ConfirmationDialogFactory__showErrorDialog) },
   { .name = "_ZN25ConfirmationDialogFactory21getConfirmationDialogEP7QWidget", .out = nh_symoutptr(ConfirmationDialogFactory__getConfirmationDialog) },
@@ -210,6 +206,9 @@ static struct nh_dlsym NickelKPMDlsym[] = {
 
   { .name = "_ZN15N3DialogFactory9getDialogEP7QWidgetb",                       .out = nh_symoutptr(N3DialogFactory__getDialog) },
   { .name = "_ZN8N3Dialog8setTitleERK7QString",                                .out = nh_symoutptr(N3Dialog__setTitle) },
+  // Optional so an absence can't stop the whole mod loading; call sites null-check.
+  { .name = "_ZN8N3Dialog18enableFullViewModeEv",                              .out = nh_symoutptr(N3Dialog__enableFullViewMode), .desc = "N3Dialog::enableFullViewMode()", .optional = true },
+  { .name = "_ZN8N3Dialog16enableBackButtonEb",                                .out = nh_symoutptr(N3Dialog__enableBackButton), .desc = "N3Dialog::enableBackButton(bool)", .optional = true },
   { .name = "_ZN8N3Dialog13keyboardFrameEv",                                   .out = nh_symoutptr(N3Dialog__keyboardFrame) },
   { .name = "_ZN8N3Dialog12showKeyboardEv",                                    .out = nh_symoutptr(N3Dialog__showKeyboard) },
   { .name = "_ZN8N3Dialog12hideKeyboardEv",                                    .out = nh_symoutptr(N3Dialog__hideKeyboard) },
@@ -223,4 +222,4 @@ static struct nh_dlsym NickelKPMDlsym[] = {
 };
 // clang-format on
 
-NickelHook(.init = nullptr, .info = &NickelKPM, .hook = NickelKPMHook, .dlsym = NickelKPMDlsym, .uninstall = nullptr);
+NickelHook(.init = nkpm_init, .info = &NickelKPM, .hook = NickelKPMHook, .dlsym = NickelKPMDlsym, .uninstall = nullptr);

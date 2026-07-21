@@ -2,9 +2,9 @@
 // per §0; simplified to a text-only, tappable row (no cover art / buttons).
 
 #include <QHBoxLayout>
-#include <QMouseEvent>
 #include <QVBoxLayout>
 
+#include "../nkpm.h"
 #include "elidedlabel.h"
 #include "label.h"
 #include "packagerow.h"
@@ -58,6 +58,13 @@ PackageRow::PackageRow(QJsonObject json, QWidget *parent)
   badge->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   top->addWidget(badge, 0, Qt::AlignRight);
 
+  // A Nickel touch button opens the detail dialog: Kobo does not deliver a
+  // plain QFrame a mouseReleaseEvent, so the tap must go through tapped().
+  N3ButtonLabel *manage = construct_N3ButtonLabel(this);
+  manage->setText("Manage");
+  top->addWidget(manage, 0, Qt::AlignRight);
+  QObject::connect(manage, SIGNAL(tapped(bool)), this, SLOT(manageTapped()));
+
   QString subtitle = json.value("description").toString();
   if (subtitle.isEmpty()) {
     subtitle = json.value("source").toString();
@@ -65,9 +72,4 @@ PackageRow::PackageRow(QJsonObject json, QWidget *parent)
   layout->addWidget(new ElidedLabel(Label::Small, subtitle));
 }
 
-void PackageRow::mouseReleaseEvent(QMouseEvent *event) {
-  QFrame::mouseReleaseEvent(event);
-  if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
-    selected(id);
-  }
-}
+void PackageRow::manageTapped() { selected(id); }

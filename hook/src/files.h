@@ -37,4 +37,9 @@ constexpr char const *arrow_forward = ":/images/reading/global_forward.png";
 // removes the UI hook only; kpm's binary/config/state are untouched. Declared
 // in nh_info in nkpm.cc — repeated here for reference only.
 constexpr char const *uninstall_flag = "/mnt/onboard/kpm_ui_uninstall";
+
+// UI launch trigger (NICKELMENU-LAUNCH.md): the hook watches this tmpfs file and
+// opens the browser when it changes; `kpm ui` (fired by the NickelMenu
+// "kpm - Package manager" item) writes to it. Kept in sync with cmd_ui.go.
+constexpr char const *ui_trigger = "/tmp/nkpm-open";
 } // namespace Files

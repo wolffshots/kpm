@@ -21,6 +21,10 @@ public:
 Q_SIGNALS:
   // changed is emitted after a successful mutation so the browse list reloads.
   void changed();
+  // closeRequested is emitted when the title-bar close (X) is tapped, asking the
+  // browse dialog to close too so the whole UI dismisses (the back button, by
+  // contrast, only closes this detail view — see the constructor).
+  void closeRequested();
 
 public Q_SLOTS:
   void install();

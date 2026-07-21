@@ -3,7 +3,9 @@
 // NICKEL-UI.md §5 — one package in the browse list. Structure adapted from
 // NickelHardcover hook/src/search/bookrow.{h,cc} (MIT) per §0: name (bold),
 // a right-aligned version/state badge, and an elided description (falling back
-// to the source URL). The whole row is tappable and emits selected(id).
+// to the source URL). A "Manage" N3ButtonLabel opens the detail dialog — Kobo
+// touch input does not reach a plain QFrame's mouseReleaseEvent, so taps must go
+// through a Nickel touch widget (the tapped() signal), as NickelHardcover does.
 
 #include <QFrame>
 #include <QJsonObject>
@@ -21,8 +23,8 @@ public:
 Q_SIGNALS:
   void selected(QString id);
 
-protected:
-  void mouseReleaseEvent(QMouseEvent *event) override;
+private Q_SLOTS:
+  void manageTapped();
 
 private:
   QString id;

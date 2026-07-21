@@ -8,3 +8,4 @@ menu_item :main :kpm - Update all :nickel_wifi :autoconnect
   chain_success :cmd_spawn :quiet:/mnt/onboard/.adds/kpm/bin/kpm update --all --reboot --notify
   chain_success :dbg_toast :Updating — will reboot when done
 menu_item :main :kpm - Status :cmd_output :9000 :/mnt/onboard/.adds/kpm/bin/kpm status
+menu_item :main :kpm - Package manager :cmd_spawn :/mnt/onboard/.adds/kpm/bin/kpm ui

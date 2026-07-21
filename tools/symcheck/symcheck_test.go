@@ -26,7 +26,12 @@ func TestParseRealSource(t *testing.T) {
 		t.Fatalf("ParseSymbols: %v", err)
 	}
 
-	const wantTotal, wantOptional = 29, 2
+	// Since 0.7.0 the UI is launched from a NickelMenu item (NICKELMENU-LAUNCH.md),
+	// so the hook injects no menu row and dlsyms only the dialog symbols. Six
+	// optional (all null-checked): N3Dialog::enableFullViewMode,
+	// N3Dialog::enableBackButton, and the status-bar chrome-control set
+	// (statusBarController/hide/show/isVisible).
+	const wantTotal, wantOptional = 33, 6
 	if len(syms) != wantTotal {
 		t.Errorf("total symbols = %d, want %d", len(syms), wantTotal)
 	}
@@ -44,22 +49,14 @@ func TestParseRealSource(t *testing.T) {
 	if !hasSym(syms, "_ZN20MainWindowController14sharedInstanceEv") {
 		t.Error("missing expected required symbol MainWindowController::sharedInstance")
 	}
-	// The two optional entry-point symbols must be flagged optional.
+	// The obsolete menu-injection symbols must be gone.
 	for _, m := range []string{
 		"_ZN28AbstractNickelMenuController18createMenuTextItemEP5QMenuRK7QStringbbS4_",
 		"_ZN22AbstractMenuController12createActionEP5QMenuP7QWidgetbbb",
 	} {
-		s := findSym(syms, m)
-		if s == nil {
-			t.Errorf("missing expected optional symbol %s", m)
-		} else if !s.Optional {
-			t.Errorf("symbol %s should be optional", m)
+		if hasSym(syms, m) {
+			t.Errorf("obsolete menu symbol %s should no longer be present", m)
 		}
-	}
-
-	// The injected hook function name (.sym_new) must NOT be captured as a Nickel symbol.
-	if hasSym(syms, "_nkpm_menu_hook") {
-		t.Error(".sym_new value _nkpm_menu_hook was wrongly parsed as a Nickel symbol")
 	}
 }
 

@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QHBoxLayout>
 #include <QHash>
+#include <QPointer>
 #include <QVBoxLayout>
 
 #include <NickelHook.h>
@@ -18,7 +19,19 @@
 #include "widgets/label.h"
 #include "widgets/packagerow.h"
 
-void BrowseDialog::show() { new BrowseDialog(); }
+void BrowseDialog::show() {
+  // Relaunch = close-and-reopen. A prior browser can be left buried but alive by
+  // a view change we don't intercept (e.g. a USB connect/eject) — NickelHardcover
+  // auto-closes on currentViewChanged, which we don't hook — so tapping the menu
+  // item again must dismiss the stale one and open a fresh, foreground browser
+  // rather than no-op behind it. The QPointer auto-nulls once destroyed.
+  static QPointer<BrowseDialog> open;
+  if (open) {
+    open->dialog->deleteLater();
+    open = nullptr;
+  }
+  open = new BrowseDialog();
+}
 
 BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   // getDialog is expected to reparent this under an N3Dialog synchronously, but
@@ -28,7 +41,9 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   }
 
   QVBoxLayout *layout = new QVBoxLayout(this);
-  layout->setContentsMargins(0, 0, 0, 0);
+  // chrome is zero when the base Dialog hid the status/nav bars; on firmware
+  // without those symbols it holds fallback insets past the persistent chrome.
+  layout->setContentsMargins(0, chrome.top(), 0, chrome.bottom());
   layout->setSpacing(0);
 
   lineEdit = construct_TouchLineEdit(nullptr);
@@ -41,13 +56,19 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
 
   QHBoxLayout *footer = new QHBoxLayout();
   footer->setContentsMargins(14, 6, 14, 6);
+  footer->setSpacing(16); // gap between the two action buttons
+  // Right-align: the leading stretch pushes both buttons to the trailing edge.
+  footer->addStretch(1);
+  // primaryButton: Nickel's dark-filled button style (light text on dark), the
+  // same property NickelHardcover's journal buttons use.
   refreshButton = construct_N3ButtonLabel(this);
+  refreshButton->setProperty("primaryButton", true);
   refreshButton->setText("Refresh");
   footer->addWidget(refreshButton);
   updateAllButton = construct_N3ButtonLabel(this);
+  updateAllButton->setProperty("primaryButton", true);
   updateAllButton->setText("Update all");
   footer->addWidget(updateAllButton);
-  footer->addStretch(1);
   layout->addLayout(footer);
   QObject::connect(refreshButton, SIGNAL(tapped(bool)), this, SLOT(refresh()));
   QObject::connect(updateAllButton, SIGNAL(tapped(bool)), this, SLOT(updateAll()));
@@ -213,6 +234,9 @@ void BrowseDialog::openDetail(QString id) {
     if (o.value("id").toString() == id) {
       DetailDialog *d = DetailDialog::show(o);
       QObject::connect(d, &DetailDialog::changed, this, [this] { loadSearch(false); });
+      // Detail's close (X) closes the whole package manager: dismiss this browse
+      // dialog underneath it (the detail view deletes itself via the base Dialog).
+      QObject::connect(d, &DetailDialog::closeRequested, this, [this] { dialog->deleteLater(); });
       return;
     }
   }

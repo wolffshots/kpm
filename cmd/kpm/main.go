@@ -36,6 +36,7 @@ Usage:
   kpm sync [<id>...] [--overwrite]
   kpm log [-n N]
   kpm status
+  kpm ui                       (open the graphical package manager; used by NickelMenu)
   kpm version
 `
 
@@ -102,6 +103,9 @@ func run(argv []string) int {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return exitOK
+	case "ui":
+		// UI launch trigger for the NickelKPM hook: no state, no lock (§ui).
+		return cmdUI(args)
 	}
 
 	app, err := newApp(isMutating(cmd, args))
