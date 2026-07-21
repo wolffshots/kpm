@@ -75,10 +75,11 @@ export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
 ```
 
 [NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional but
-recommended**: with it kpm gets on-device menu entries (see "NickelMenu
-usage"); without it kpm is a normal CLI over SSH/telnet. NickelDBus (`qndb`)
-is also optional — if present, kpm shows toasts; if not, use the **Status**
-menu entry. What to do next depends on which side you start from:
+recommended**: with it kpm gets on-device menu entries (see "NickelMenu usage"),
+including the launch point for the graphical UI (the UI needs NickelMenu — see
+"Graphical UI"); without it kpm is a normal CLI over SSH/telnet. NickelDBus
+(`qndb`) is also optional — if present, kpm shows toasts; if not, use the
+**Status** menu entry. What to do next depends on which side you start from:
 
 ### Already running NickelMenu
 
@@ -264,7 +265,7 @@ not.
 
 ## NickelMenu usage
 
-The shipped drop-in (`/mnt/onboard/.adds/nm/kpm`) adds three entries to the main
+The shipped drop-in (`/mnt/onboard/.adds/nm/kpm`) adds four entries to the main
 menu:
 
 - **Check for updates** — brings Wi-Fi up, runs `kpm check --notify` in the
@@ -272,6 +273,8 @@ menu:
 - **Update all** — brings Wi-Fi up, runs `kpm update --all --reboot --notify`.
   This stages every pending package and reboots to install them.
 - **Status** — shows `status.txt` in a dialog (offline, instant).
+- **Package manager** — runs `kpm ui`, which opens the graphical browser (see
+  "Graphical UI"). This is the launch point for the NickelKPM hook.
 
 Because NickelMenu's `cmd_spawn` reports success on *spawn*, not on completion,
 long-running work can't report back through the menu — kpm signals completion via
@@ -279,29 +282,45 @@ long-running work can't report back through the menu — kpm signals completion 
 
 ## Graphical UI (NickelKPM)
 
-kpm 0.6.0 ships a built-in graphical package browser, **NickelKPM**
-(`libnkpm.so`) — a NickelHook Qt mod injected into Nickel. It needs **no
-NickelMenu**: it adds its own **"Package manager"** row to the **More** tab of
-the home/library bottom nav (the same list that holds Settings, on firmware
-4.23.15505 and newer). Every kpm KoboRoot.tgz installs it under
+kpm ships a built-in graphical package browser, **NickelKPM** (`libnkpm.so`) — a
+NickelHook Qt mod injected into Nickel. Every kpm KoboRoot.tgz installs it under
 `/usr/local/Kobo/imageformats/libnkpm.so`.
 
-Tapping the row opens a full-screen browser that lists every package from your
+| Package list | Not installed | Installed |
+|---|---|---|
+| ![Package manager list](docs/screenshots/browse.png) | ![Package detail — install](docs/screenshots/detail-not-installed.png) | ![Package detail — uninstall](docs/screenshots/detail-installed.png) |
+
+Launch it from the **NickelMenu** "kpm - Package manager" entry (see "NickelMenu
+usage"). It opens a full-screen browser that lists every package from your
 registries merged with what's installed, lets you filter with the on-screen
 keyboard, and drills into a per-package view with **Install**, **Update**,
-**Uninstall**, plus registry-wide **Refresh** and **Update all**. All real work
-is done by shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
+**Uninstall**, plus registry-wide **Refresh** and **Update all**. On the package
+list the title-bar **✕** closes the UI; in a package's detail view the **←**
+returns to the list and **✕** closes the whole UI. All real work is done by
+shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
 crash-isolated view layer. Staged changes prompt a **Reboot now / Later** dialog,
 matching kpm's stage-then-reboot install model.
+
+While the browser is open it hides the home screen's status and nav bars so the
+dialog (and its keyboard) render full-screen, and restores them when you close
+it — so the launcher is a NickelMenu entry rather than an injected home-screen
+row (see below).
 
 If the `kpm` binary is missing, the browser shows a "kpm not found — install kpm
 first" message and does nothing else (it never crashes Nickel).
 
+**Requires NickelMenu.** Through kpm 0.6.x the hook injected its own row into the
+home/library **More** tab. Firmware **4.23.15505+** moved that menu to a
+bottom-nav-bar button, so the old anchor no longer fires (confirmed dead on
+4.45.23697), and since **0.7.0** the UI is launched from a NickelMenu item that
+runs `kpm ui`. A NickelMenu-independent launch button is a possible future
+addition, but for now the graphical UI needs NickelMenu installed.
+
 **Symbol compatibility (fail-closed):** at load the hook resolves every Nickel
 C++ symbol it needs; if any required symbol is missing it refuses to load
-cleanly — Nickel runs untouched, the menu row simply never appears, and a
-diagnostic log is dumped to `/mnt/onboard`. Verified to load on firmware
-4.33.19608; **4.20.14601 and older fail this check** (Nickel's method signatures
+cleanly — Nickel runs untouched and a diagnostic log is dumped to
+`/mnt/onboard`. Verified to load on firmware **4.45.23697** (and back to
+4.33.19608); **4.20.14601 and older fail this check** (Nickel's method signatures
 drifted), so on those the UI is absent by design. Check any firmware from your
 desk with `tools/symcheck` (see "Build & release"). A crash inside the first
 15 seconds after load trips NickelHook's failsafe, which leaves the hook
@@ -355,6 +374,7 @@ kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
 kpm sync [<id>...] [--overwrite]  re-copy registry defs for registry-managed packages
 kpm log [-n N]              print the last N log lines (default 12)
 kpm status                  print status.txt + any pending staging; fast/offline
+kpm ui                      signal the NickelKPM hook to open the graphical browser
 kpm version                 print the compiled-in version
 ```
 
