@@ -1,0 +1,545 @@
+package main
+
+// uicontract_test.go pins the exact JSON/exit-code contract the graphical UI
+// (the NickelKPM Qt hook under hook/) consumes, so a future kpm change cannot
+// silently break the on-device UI. Unlike json_test.go's per-command goldens,
+// these tests drive each of the SEVEN command shapes the hook actually issues
+// (hook/src/kpmprocess.cc) end to end through the real cmd* entry points, and
+// assert the PRESENCE and TYPE of every field the hook reads — a rename or a
+// type flip is caught even when the golden string would still "look" valid.
+//
+// The fields the hook reads (derived from hook/src/{browsedialog,detaildialog,
+// kpmprocess}.cc and hook/src/widgets/packagerow.cc — code is ground truth):
+//
+//   search  --json  (KpmProcess::search, browse call; read-only, no lock):
+//     top-level: packages[] (array), staged{} (OBJECT: .count int),
+//                registries[] (array; each .refreshed = string|null)
+//     packages[i]: id(str), name(str), description(str|null), source(str),
+//                registry(str|null), installed(str|null), pinned(str|null),
+//                staged(BOOL), uninstallable(bool), min_kpm(str|null),
+//                min_kpm_ok(bool).  latest/update are DELIBERATELY ABSENT here
+//                (registry defs carry no versions) — the hook merges them in
+//                from check (browsedialog.cc mergeCheck).
+//   check   --json  (KpmProcess::check; takes the lock):
+//     packages[i]: id(str), latest(str|null), update(BOOL)  [+installed,pinned,error]
+//   registry refresh --json (KpmProcess::registryRefresh):
+//     payload is IGNORED by the hook (browsedialog.cc onRefreshDone voids it) —
+//     contract is only: exit 0/2 + a parseable trailing BEGIN_JSON line.
+//   install <id> --yes --json / update <id> --json / update --all --json /
+//   uninstall <id> --yes --json  (the four mutations):
+//     top-level: staged(BOOL), reboot_required(BOOL)  [+changed[],failed[]]
+//     NOTE the shape split the hook relies on: `staged` is an OBJECT in the
+//     search payload but a BOOL in every mutation payload; both are exercised.
+//
+// The hook maps a mutating command that hits the single-instance lock — whose
+// stderr contains "another kpm instance" — to its "kpm is busy" dialog
+// (kpmprocess.cc processFinished). That exact substring is pinned below.
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"kpm/internal/config"
+	"kpm/internal/device"
+	"kpm/internal/forge"
+	"kpm/internal/registry"
+)
+
+// ---- contract type assertions ------------------------------------------
+
+// decodeJSON parses the BEGIN_JSON payload into a generic map so field presence
+// and type can be asserted structurally (json numbers -> float64, null -> nil).
+func decodeJSON(t *testing.T, payload string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		t.Fatalf("payload is not a JSON object: %v\n%s", err, payload)
+	}
+	return m
+}
+
+func present(t *testing.T, m map[string]any, key string) any {
+	t.Helper()
+	v, ok := m[key]
+	if !ok {
+		t.Fatalf("contract field %q absent: %v", key, m)
+	}
+	return v
+}
+
+// wantStr asserts a required non-null string (id/name/source).
+func wantStr(t *testing.T, m map[string]any, key string) string {
+	t.Helper()
+	v := present(t, m, key)
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf("field %q must be a string, got %T (%v)", key, v, v)
+	}
+	return s
+}
+
+// wantStrOrNull asserts a string-or-null field (description/registry/installed/
+// pinned/latest/min_kpm/refreshed).
+func wantStrOrNull(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	v := present(t, m, key)
+	if v == nil {
+		return
+	}
+	if _, ok := v.(string); !ok {
+		t.Fatalf("field %q must be string or null, got %T (%v)", key, v, v)
+	}
+}
+
+func wantBool(t *testing.T, m map[string]any, key string) bool {
+	t.Helper()
+	v := present(t, m, key)
+	b, ok := v.(bool)
+	if !ok {
+		t.Fatalf("field %q must be a bool, got %T (%v)", key, v, v)
+	}
+	return b
+}
+
+func wantArray(t *testing.T, m map[string]any, key string) []any {
+	t.Helper()
+	v := present(t, m, key)
+	a, ok := v.([]any)
+	if !ok {
+		t.Fatalf("field %q must be an array, got %T (%v)", key, v, v)
+	}
+	return a
+}
+
+func wantObject(t *testing.T, m map[string]any, key string) map[string]any {
+	t.Helper()
+	v := present(t, m, key)
+	o, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("field %q must be an object, got %T (%v)", key, v, v)
+	}
+	return o
+}
+
+func wantNumber(t *testing.T, m map[string]any, key string) float64 {
+	t.Helper()
+	v := present(t, m, key)
+	n, ok := v.(float64)
+	if !ok {
+		t.Fatalf("field %q must be a number, got %T (%v)", key, v, v)
+	}
+	return n
+}
+
+func wantAbsent(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	if _, ok := m[key]; ok {
+		t.Fatalf("field %q must be ABSENT from this payload (contract §2.1): %v", key, m)
+	}
+}
+
+// assertSearchPkg walks one search-payload package and pins every field the
+// hook's PackageRow/DetailDialog read, plus the deliberate absence of
+// latest/update (merged from check, not present in search).
+func assertSearchPkg(t *testing.T, pkg map[string]any) {
+	t.Helper()
+	wantStr(t, pkg, "id")
+	wantStr(t, pkg, "name")
+	wantStrOrNull(t, pkg, "description")
+	wantStr(t, pkg, "source")
+	wantStrOrNull(t, pkg, "registry")
+	wantStrOrNull(t, pkg, "installed")
+	wantStrOrNull(t, pkg, "pinned")
+	wantBool(t, pkg, "staged") // per-package staged is a BOOL (packagerow.cc)
+	wantBool(t, pkg, "uninstallable")
+	wantStrOrNull(t, pkg, "min_kpm")
+	wantBool(t, pkg, "min_kpm_ok")
+	wantAbsent(t, pkg, "latest")
+	wantAbsent(t, pkg, "update")
+}
+
+// ---- captureStderr (mirror of captureStdout) ----------------------------
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 0, 4096)
+		tmp := make([]byte, 4096)
+		for {
+			n, err := r.Read(tmp)
+			buf = append(buf, tmp[:n]...)
+			if err != nil {
+				break
+			}
+		}
+		done <- string(buf)
+	}()
+	fn()
+	w.Close()
+	os.Stderr = old
+	return <-done
+}
+
+// releaseServer starts a fake Forgejo forge: it answers the network-probe HEAD,
+// serves a latest-release JSON for owner/repo pairs NOT named in failRepos, and
+// serves a real tgz for any /download/ path (so update can stage). A repo in
+// failRepos 404s its release lookup, exercising the partial-failure path.
+func releaseServer(t *testing.T, tag string, failRepos ...string) *httptest.Server {
+	t.Helper()
+	fails := map[string]bool{}
+	for _, r := range failRepos {
+		fails[r] = true
+	}
+	tgz := tgzBytes(t, map[string]string{"./mnt/onboard/.adds/pkg/file": "payload"})
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/releases/latest"):
+			// path: /api/v1/repos/<owner>/<repo>/releases/latest
+			parts := strings.Split(r.URL.Path, "/")
+			repo := ""
+			for i, p := range parts {
+				if p == "repos" && i+2 < len(parts) {
+					repo = parts[i+2]
+				}
+			}
+			if fails[repo] {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprintf(w, `{"tag_name":%q,"draft":false,"prerelease":false,`+
+				`"assets":[{"name":"KoboRoot.tgz","size":%d,"browser_download_url":%q}]}`,
+				tag, len(tgz), srv.URL+"/download/"+repo+"/KoboRoot.tgz")
+		case strings.HasPrefix(r.URL.Path, "/download/"):
+			w.Write(tgz)
+		default:
+			w.WriteHeader(http.StatusOK) // network probe / anything else
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func fakeForgePkg(t *testing.T, a *App, host, id, installed string) {
+	t.Helper()
+	if err := config.Save(a.paths.PackageFile(id), &config.Package{
+		Name: id, Source: host + "/o/" + id, Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if installed != "" {
+		a.state.Get(id).InstalledVersion = installed
+	}
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ---- 1. search --json ---------------------------------------------------
+
+func TestUIContractSearch(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	seedRegistry(t, a, "main", jsonClockManifest)
+	a.state.Get("nickelclock").InstalledVersion = "v0.4.0"
+	a.state.Registry("main").LastFetched = "2026-07-20T09:00:00Z"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdSearch([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("search --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+
+	// top-level: staged is an OBJECT (with .count), registries carry .refreshed.
+	staged := wantObject(t, m, "staged")
+	wantNumber(t, staged, "count")
+	regs := wantArray(t, m, "registries")
+	if len(regs) != 1 {
+		t.Fatalf("registries len = %d, want 1", len(regs))
+	}
+	reg0 := regs[0].(map[string]any)
+	wantStrOrNull(t, reg0, "refreshed")
+	if reg0["refreshed"] != "2026-07-20T09:00:00Z" {
+		t.Errorf("registries[0].refreshed = %v, want the RFC3339 timestamp", reg0["refreshed"])
+	}
+
+	pkgs := wantArray(t, m, "packages")
+	if len(pkgs) != 1 {
+		t.Fatalf("packages len = %d, want 1", len(pkgs))
+	}
+	p0 := pkgs[0].(map[string]any)
+	assertSearchPkg(t, p0)
+	// Concrete, deterministic values the UI renders.
+	if p0["id"] != "nickelclock" || p0["installed"] != "v0.4.0" || p0["staged"] != false {
+		t.Errorf("unexpected package fields: %v", p0)
+	}
+	if p0["uninstallable"] != true || p0["min_kpm_ok"] != true {
+		t.Errorf("uninstallable/min_kpm_ok = %v/%v, want true/true", p0["uninstallable"], p0["min_kpm_ok"])
+	}
+}
+
+// ---- 2. check --json ----------------------------------------------------
+
+func TestUIContractCheck(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	srv := releaseServer(t, "v0.5.0")
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	host := strings.TrimPrefix(srv.URL, "https://")
+	fakeForgePkg(t, a, host, "nickelclock", "v0.4.0")
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdCheck([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("check --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	present(t, m, "checked")
+	pkgs := wantArray(t, m, "packages")
+	if len(pkgs) != 1 {
+		t.Fatalf("check packages len = %d, want 1", len(pkgs))
+	}
+	p0 := pkgs[0].(map[string]any)
+	// The three fields browsedialog.cc mergeCheck reads: id, latest, update.
+	if wantStr(t, p0, "id") != "nickelclock" {
+		t.Errorf("check id = %v", p0["id"])
+	}
+	wantStrOrNull(t, p0, "latest")
+	if p0["latest"] != "v0.5.0" {
+		t.Errorf("check latest = %v, want v0.5.0", p0["latest"])
+	}
+	if wantBool(t, p0, "update") != true {
+		t.Errorf("check update = %v, want true (v0.4.0 -> v0.5.0)", p0["update"])
+	}
+}
+
+// ---- 3. registry refresh --json -----------------------------------------
+
+func TestUIContractRegistryRefresh(t *testing.T) {
+	a := newTestApp(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(nmManifest))
+	}))
+	t.Cleanup(srv.Close)
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	host := strings.TrimPrefix(srv.URL, "https://")
+
+	// A registry pointing at the fake host (seedRegistry hardcodes a real host).
+	cfg, err := a.loadRegistryConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Registries = append(cfg.Registries, registry.Registry{
+		Name: "main", URL: host + "/o/r", Ref: "main", Path: "registry.toml", Forge: config.ForgeForgejo,
+	})
+	if err := a.saveRegistryConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdRegistryRefresh([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("registry refresh --json exit = %d, want %d", code, exitOK)
+	}
+	// The hook ignores this payload, but it must still be a parseable trailing
+	// BEGIN_JSON line (lastJSON enforces marker-is-last), and the §2.4 shape.
+	m := decodeJSON(t, lastJSON(t, out))
+	refreshed := wantArray(t, m, "refreshed")
+	if len(refreshed) != 1 {
+		t.Fatalf("refreshed len = %d, want 1", len(refreshed))
+	}
+	r0 := refreshed[0].(map[string]any)
+	if wantStr(t, r0, "name") != "main" {
+		t.Errorf("refreshed[0].name = %v", r0["name"])
+	}
+	wantNumber(t, r0, "packages")
+	if len(wantArray(t, m, "failed")) != 0 {
+		t.Errorf("failed should be empty on a clean refresh: %v", m["failed"])
+	}
+}
+
+// ---- 4. install <id> --yes --json ---------------------------------------
+
+func TestUIContractInstallYes(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	seedRegistry(t, a, "main", jsonClockManifest)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdInstall([]string{"nickelclock", "--yes", "--json"}) })
+	// --yes MUST bypass the exit-3 confirmation path (kpmprocess.cc passes --yes).
+	if code == exitConfirm {
+		t.Fatalf("install --yes hit the exit-3 confirm path — the UI would stall")
+	}
+	if code != exitOK {
+		t.Fatalf("install --yes --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	// install only registers the def — it stages nothing (spec §2.3). The hook's
+	// install chain relies on this: it drives the reboot prompt off the FOLLOWING
+	// `update`, not off install.
+	if wantBool(t, m, "staged") != false || wantBool(t, m, "reboot_required") != false {
+		t.Errorf("install must report staged=false,reboot_required=false, got %v/%v",
+			m["staged"], m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "nickelclock" {
+		t.Errorf("install changed = %v, want [nickelclock]", m["changed"])
+	}
+}
+
+// ---- 5. update <id> --json ----------------------------------------------
+
+func TestUIContractUpdateOne(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	srv := releaseServer(t, "v1.1.0")
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	host := strings.TrimPrefix(srv.URL, "https://")
+	fakeForgePkg(t, a, host, "pkg", "v1.0.0")
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUpdate([]string{"pkg", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("update pkg --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	// A staged update: both bools true drive the hook's reboot prompt.
+	if wantBool(t, m, "staged") != true || wantBool(t, m, "reboot_required") != true {
+		t.Errorf("staged update must report staged=true,reboot_required=true, got %v/%v",
+			m["staged"], m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "pkg" {
+		t.Errorf("update changed = %v, want [pkg]", m["changed"])
+	}
+	if _, err := os.Stat(a.paths.StagedTgz()); err != nil {
+		t.Errorf("update should have staged a tgz: %v", err)
+	}
+}
+
+// ---- 6. update --all --json (partial = exit 2) --------------------------
+
+func TestUIContractUpdateAllPartial(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	// "badpkg" 404s its release lookup; "goodpkg" resolves and stages.
+	srv := releaseServer(t, "v2.0.0", "badpkg")
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	host := strings.TrimPrefix(srv.URL, "https://")
+	fakeForgePkg(t, a, host, "goodpkg", "v1.0.0")
+	fakeForgePkg(t, a, host, "badpkg", "v1.0.0")
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUpdate([]string{"--all", "--json"}) })
+	// One staged, one failed -> partial (exit 2), a payload the hook still renders.
+	if code != exitPartial {
+		t.Fatalf("update --all with one failure exit = %d, want %d (partial)", code, exitPartial)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	if wantBool(t, m, "staged") != true || wantBool(t, m, "reboot_required") != true {
+		t.Errorf("partial-but-staged must still report reboot true, got %v/%v", m["staged"], m["reboot_required"])
+	}
+	changed := wantArray(t, m, "changed")
+	if len(changed) != 1 || changed[0] != "goodpkg" {
+		t.Errorf("changed = %v, want [goodpkg]", changed)
+	}
+	failed := wantArray(t, m, "failed")
+	if len(failed) != 1 {
+		t.Fatalf("failed len = %d, want 1", len(failed))
+	}
+	f0 := failed[0].(map[string]any)
+	if wantStr(t, f0, "id") != "badpkg" {
+		t.Errorf("failed[0].id = %v, want badpkg", f0["id"])
+	}
+	wantStr(t, f0, "error")
+}
+
+// ---- 7. uninstall <id> --yes --json -------------------------------------
+
+func TestUIContractUninstallYes(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	mkfile(t, sysroot, "usr/local/pkg/lib.so")
+	registerPkg(t, a, "pkg", config.Uninstall{}, []string{"usr/local/pkg/lib.so"})
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUninstall([]string{"pkg", "--yes", "--json"}) })
+	// --yes MUST bypass the exit-3 confirmation path.
+	if code == exitConfirm {
+		t.Fatalf("uninstall --yes hit the exit-3 confirm path — the UI would stall")
+	}
+	if code != exitOK {
+		t.Fatalf("uninstall --yes --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	// uninstall stages nothing; reboot_required reflects the method (a manifest
+	// delete needs no reboot). staged is a BOOL here (mutation payload).
+	if wantBool(t, m, "staged") != false {
+		t.Errorf("uninstall staged = %v, want false", m["staged"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "pkg" {
+		t.Errorf("uninstall changed = %v, want [pkg]", m["changed"])
+	}
+}
+
+// assertMutationShape pins the top-level shape of every install/update/uninstall
+// payload: the two bools the hook reads plus the changed/failed arrays.
+func assertMutationShape(t *testing.T, m map[string]any) {
+	t.Helper()
+	wantBool(t, m, "staged")
+	wantBool(t, m, "reboot_required")
+	wantArray(t, m, "changed")
+	wantArray(t, m, "failed")
+}
+
+// ---- busy: the "another kpm instance" dialog trigger --------------------
+
+// A second MUTATING command against a held single-instance lock must fail with
+// stderr containing "another kpm instance" — the exact substring kpmprocess.cc
+// matches to show its "kpm is busy" dialog instead of a raw error.
+func TestUIContractBusyLockMessage(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("KPM_ROOT", root)
+	p := device.New()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the lock with a FRESH mtime so it is not treated as stale/abandoned.
+	if err := os.MkdirAll(filepath.Dir(p.LockFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.LockFile(), []byte("999 held\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	stderr := captureStderr(t, func() {
+		// Drive the real binary entry point; install is one of the seven UI shapes.
+		code = run([]string{"install", "nickelclock", "--yes", "--json"})
+	})
+	if code != exitError {
+		t.Errorf("busy install exit = %d, want %d (hard error the hook surfaces)", code, exitError)
+	}
+	if !strings.Contains(strings.ToLower(stderr), "another kpm instance") {
+		t.Errorf("stderr must contain the busy-dialog trigger \"another kpm instance\":\n%s", stderr)
+	}
+}
