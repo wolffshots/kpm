@@ -591,6 +591,13 @@ Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
   (`CGO_ENABLED=0`) and assembles `dist/KoboRoot.tgz` entirely in Go — no
   `tar`/WSL needed on Windows — then self-checks the archive's exact member list
   and modes. Override the embedded version with `KPM_VERSION=<v> go run ./build`.
+- `go run ./tools/symcheck <kobo-firmware.zip>` — **required pre-release gate**
+  for the UI hook: verifies every Nickel symbol `nkpm.cc` resolves at load
+  against that firmware's `libnickel.so.1.0.0` (accepts a firmware zip,
+  a `KoboRoot.tgz`, a bare `libnickel.so*`, or an https URL; see
+  `tools/symcheck/README.md`). Run it against the newest firmware before
+  tagging — a missing required symbol means the UI cleanly refuses to load
+  there.
 - Release artifacts are copied to `releases/<version>/KoboRoot.tgz`.
 
 ## Non-goals (v1)
