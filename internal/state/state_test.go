@@ -121,6 +121,32 @@ func TestLoadRecoversFromCorrupt(t *testing.T) {
 	}
 }
 
+// M2: a well-formed state.json with a null package entry (e.g. an out-of-band
+// USB edit) must not leave a nil *PackageState in the map — the many
+// `range Packages` loops dereference it directly and would panic inside newApp,
+// wedging every command. Load drops nil entries.
+func TestLoadDropsNilPackageEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte(`{"packages":{"nickelmenu":null,"nh":{"installed_version":"v1"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := s.Packages["nickelmenu"]; ok {
+		t.Error("null package entry should have been dropped")
+	}
+	// A direct range-deref (the shape that panicked) must be safe now.
+	for _, ps := range s.Packages {
+		_ = ps.StagedVersion
+	}
+	if s.Packages["nh"].InstalledVersion != "v1" {
+		t.Error("non-null entries must survive")
+	}
+}
+
 func TestSaveLoadAtomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

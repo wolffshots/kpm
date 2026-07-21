@@ -111,6 +111,17 @@ func Load(path string) (*State, error) {
 	if s.Packages == nil {
 		s.Packages = map[string]*PackageState{}
 	}
+	// A well-formed but null entry ({"packages":{"x":null}}, e.g. from an
+	// out-of-band edit) unmarshals to a nil *PackageState. Get heals it on
+	// access, but the many `range Packages` loops dereference the pointer
+	// directly and would panic — inside newApp, before the lock's deferred
+	// release, wedging every command. Drop nil entries here (they carry no
+	// data anyway) so the rest of kpm can assume non-nil values.
+	for id, ps := range s.Packages {
+		if ps == nil {
+			delete(s.Packages, id)
+		}
+	}
 	s.path = path
 	return s, nil
 }
