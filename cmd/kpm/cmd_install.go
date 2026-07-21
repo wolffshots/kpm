@@ -119,12 +119,12 @@ func (a *App) cmdInstall(args []string) int {
 		return exitConfirm
 	}
 
-	// kpm's own pin lives in state.json (so a self-update that overwrites
-	// kpm.toml can't drop it, §10); never persist it into the TOML, where
-	// effectivePin would ignore it anyway.
-	if id == selfID {
-		pkg.Pin = ""
-	}
+	// kpm's own source/forge/pin live in state.json (so a self-update that
+	// overwrites kpm.toml can't drop them, §10); persistDef moves them there and
+	// blanks them in the def before it is written (SELF-SOURCE §5).
+	logSource := pkg.Source // record the real source for the INSTALL log, pre-blank
+	ps := a.state.Get(id)
+	a.persistDef(id, pkg, ps)
 	if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm install:", err)
 		return exitError
@@ -136,7 +136,6 @@ func (a *App) cmdInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "kpm install:", err)
 		return exitError
 	}
-	ps := a.state.Get(id)
 	ps.SyncedDefSHA256 = hash
 	if id == selfID && pinVal != "" {
 		ps.Pin = pinVal // kpm's pin belongs in state.json (§10), read by effectivePin
@@ -151,7 +150,7 @@ func (a *App) cmdInstall(args []string) int {
 	}
 
 	verb := "INSTALL"
-	a.paths.Log(verb, fmt.Sprintf("%s  from %s (%s)", id, entry.Registry, pkg.Source))
+	a.paths.Log(verb, fmt.Sprintf("%s  from %s (%s)", id, entry.Registry, logSource))
 	if *adopt {
 		fmt.Printf("adopted %s from registry %s (pin and state preserved)\n", id, entry.Registry)
 		if provenanceChange != "" {

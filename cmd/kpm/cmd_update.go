@@ -62,7 +62,7 @@ func (a *App) cmdUpdate(args []string) int {
 
 	// Wait for connectivity before resolving (like check), but only if any
 	// selected package is actually configured to resolve (D3/F7).
-	if host := firstConfiguredHost(pkgs); host != "" {
+	if host := a.firstConfiguredHost(pkgs); host != "" {
 		if !device.WaitForNetwork(a.client.HTTP(), host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.WriteStatus(msg)
@@ -199,11 +199,13 @@ func (a *App) cmdUpdate(args []string) int {
 }
 
 // firstConfiguredHost returns the forge host of the first configured package,
-// or "" if none is configured (nothing to resolve, so no network wait).
-func firstConfiguredHost(pkgs []*config.Package) string {
+// or "" if none is configured (nothing to resolve, so no network wait). It
+// tests the effective source so an adopted kpm (source in state) counts as
+// configured (SELF-SOURCE §1).
+func (a *App) firstConfiguredHost(pkgs []*config.Package) string {
 	for _, p := range pkgs {
-		if p.Configured() {
-			return p.Host()
+		if a.configured(p) {
+			return config.SourceHost(a.effectiveSource(p))
 		}
 	}
 	return ""
@@ -244,7 +246,7 @@ func (a *App) selectPackages(ids []string, all bool) ([]*config.Package, error) 
 // staged and needs no action.
 func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	// Unconfigured (e.g. self-update with empty source): skip silently (F7).
-	if !p.Configured() {
+	if !a.configured(p) {
 		return resolved{}, true, nil
 	}
 	// Honor the def's min_kpm: an old kpm skips a package that needs a newer one
@@ -321,15 +323,18 @@ func (a *App) resolveRelease(ctx context.Context, p *config.Package) (forge.Rele
 	if err != nil {
 		return forge.Release{}, err
 	}
+	// Split the effective source so an adopted kpm resolves from state (§1/§3).
+	src := a.effectiveSource(p)
+	host, owner, repo := config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src)
 	pin := a.effectivePin(p)
 	if pin != "" {
-		return f.ReleaseByTag(ctx, p.Host(), p.Owner(), p.Repo(), pin)
+		return f.ReleaseByTag(ctx, host, owner, repo, pin)
 	}
 	ps := a.state.Get(p.ID)
 	if ps.LatestSeen != "" && fresh(a.state.LastCheck) {
-		return f.ReleaseByTag(ctx, p.Host(), p.Owner(), p.Repo(), ps.LatestSeen)
+		return f.ReleaseByTag(ctx, host, owner, repo, ps.LatestSeen)
 	}
-	return f.LatestRelease(ctx, p.Host(), p.Owner(), p.Repo())
+	return f.LatestRelease(ctx, host, owner, repo)
 }
 
 func fresh(lastCheck string) bool {

@@ -38,7 +38,7 @@ func (a *App) cmdCheck(args []string) int {
 	n.toast("kpm: checking for updates…")
 
 	// Wait for connectivity against the first configured package's forge host.
-	if host := firstConfiguredHost(pkgs); host != "" {
+	if host := a.firstConfiguredHost(pkgs); host != "" {
 		if !device.WaitForNetwork(a.client.HTTP(), host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.WriteStatus(msg)
@@ -55,7 +55,7 @@ func (a *App) cmdCheck(args []string) int {
 	available := 0
 	for _, p := range pkgs {
 		// Unconfigured (e.g. self-update with empty source): skip silently (F7).
-		if !p.Configured() {
+		if !a.configured(p) {
 			continue
 		}
 		tag, err := a.resolveTag(p)
@@ -125,15 +125,17 @@ func (a *App) resolveTag(p *config.Package) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Split the effective source so an adopted kpm resolves from state (§1/§3).
+	src := a.effectiveSource(p)
 	pin := a.effectivePin(p)
 	if pin != "" {
-		rel, err := f.ReleaseByTag(ctx, p.Host(), p.Owner(), p.Repo(), pin)
+		rel, err := f.ReleaseByTag(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src), pin)
 		if err != nil {
 			return "", err
 		}
 		return rel.Tag, nil
 	}
-	rel, err := f.LatestRelease(ctx, p.Host(), p.Owner(), p.Repo())
+	rel, err := f.LatestRelease(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src))
 	if err != nil {
 		return "", err
 	}

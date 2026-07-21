@@ -139,6 +139,15 @@ func (a *App) syncOne(cfg *registry.Config, p *config.Package, overwrite bool) (
 	}
 
 	localDef := registry.DefFromPackage(p)
+	// kpm's local def is deliberately sourceless — its adoption identity lives in
+	// state.json to survive a self-update overwriting kpm.toml (§10). Compare on
+	// the effective source/forge, or the local def could never hash-equal the
+	// registry def and an adopted kpm would read as permanently drifted, skipping
+	// it from every sync (SELF-SOURCE §6).
+	if p.ID == selfID {
+		localDef.Source = a.effectiveSource(p)
+		localDef.Forge = a.effectiveForge(p)
+	}
 	localHash, _ := registry.HashDef(localDef)
 	remoteHash, _ := registry.HashDef(remoteDef)
 	ps := a.state.Get(p.ID)
@@ -155,6 +164,10 @@ func (a *App) syncOne(cfg *registry.Config, p *config.Package, overwrite bool) (
 		}
 		diffs := registry.FieldDiffs(localDef, remoteDef)
 		newPkg := remoteDef.ToPackage(p.ID, p.Registry, p.Pin)
+		// For kpm, funnel source/forge into state and blank them in the def, so a
+		// sync keeps kpm.toml matching the shipped, sourceless template and never
+		// reintroduces the clobber-exposed source (SELF-SOURCE §6).
+		a.persistDef(p.ID, newPkg, ps)
 		if err := config.SaveReplace(a.paths.PackageFile(p.ID), newPkg); err != nil {
 			fmt.Printf("%s: write failed: %v\n", p.ID, err)
 			return syncSkipped, false

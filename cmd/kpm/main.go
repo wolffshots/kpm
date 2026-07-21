@@ -331,12 +331,12 @@ func (a *App) refreshLock() {
 	_ = os.Chtimes(a.paths.LockFile(), now, now)
 }
 
-// seedSelf records and reconciles kpm's own installed_version from the
-// compiled-in version string (internal/version.Version — what "kpm version"
-// prints), the authoritative source for kpm's own id. It runs only when
-// kpm.toml is registered and only on mutating commands, after a.reconcile()
-// has promoted any just-installed staged self-update (SELF-VERSION §1). This
-// never uses --installed.
+// seedSelf records and reconciles kpm's own state from the running binary and
+// its adopted def. It runs only when kpm.toml is registered and only on mutating
+// commands, after a.reconcile() has promoted any just-installed staged
+// self-update (SELF-VERSION §1, SELF-SOURCE §2). It first migrates kpm's own
+// source/forge into state.json (see migrateSelfSource), then reconciles the
+// installed_version:
 //
 //   - Empty record: seed it, exactly as before (any binary, including "dev").
 //   - Stale record: overwrite from the running binary, refresh InstalledAt,
@@ -346,9 +346,14 @@ func (a *App) refreshLock() {
 //     no log.
 //   - A "dev" binary never reconciles an existing record, so host sandboxes /
 //     `go run` against a copied device tree cannot pollute state.
+//
+// The version reconcile never uses --installed.
 func (a *App) seedSelf() error {
 	if _, err := os.Stat(a.paths.PackageFile(selfID)); err != nil {
 		return nil // kpm not registered (e.g. tests)
+	}
+	if err := a.migrateSelfSource(); err != nil {
+		return err
 	}
 	ps := a.state.Get(selfID)
 	if ps.InstalledVersion == "" {
@@ -371,6 +376,41 @@ func (a *App) seedSelf() error {
 		return fmt.Errorf("reconcile self version: %w", err)
 	}
 	a.paths.Log("INFO", fmt.Sprintf("%s  self version reconciled %s -> %s (running binary is authoritative)", selfID, old, version.Version))
+	return nil
+}
+
+// migrateSelfSource captures an adopted kpm's source/forge into state.json the
+// first time a fixed (>=0.5.0) binary runs while the adoption still lives in
+// kpm.toml — the adopted-but-not-yet-clobbered case (SELF-SOURCE §2.1). Once in
+// state, the identity survives the self-update that overwrites kpm.toml (§10),
+// mirroring the pin, so kpm stops un-adopting itself on every self-update.
+//
+// It is a no-op when the source is already in state (never overwrites a durable
+// value), when the loaded kpm.toml has no usable source (a never-adopted kpm, or
+// an already-clobbered device that needs the one-time re-adopt of §2.2), and
+// under a "dev" binary (host sandboxes / `go run` against a copied device tree
+// must not pollute state).
+func (a *App) migrateSelfSource() error {
+	if version.Version == "dev" {
+		return nil
+	}
+	if a.state.Get(selfID).Source != "" {
+		return nil // already durable in state
+	}
+	p, err := a.loadPackage(selfID)
+	if err != nil {
+		return nil // unreadable def: nothing to migrate
+	}
+	if !p.Configured() {
+		return nil // never adopted, or already clobbered (§2.2)
+	}
+	ps := a.state.Get(selfID)
+	ps.Source = p.Source
+	ps.Forge = p.Forge
+	if err := a.state.Save(); err != nil { // save before logging (B5)
+		return fmt.Errorf("migrate self source: %w", err)
+	}
+	a.paths.Log("INFO", fmt.Sprintf("%s  self source migrated to state (%s)", selfID, p.Source))
 	return nil
 }
 

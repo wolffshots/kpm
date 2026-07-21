@@ -7,6 +7,7 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
+	"kpm/internal/state"
 )
 
 // selfID is kpm's own package id.
@@ -50,14 +51,70 @@ func (a *App) effectivePin(p *config.Package) string {
 	return p.Pin
 }
 
+// effectiveSource returns the source in force for a package. kpm's own source
+// lives in state.json so it survives a self-update that overwrites kpm.toml
+// (§10, SELF-SOURCE §1), mirroring effectivePin. State wins when set; a non-kpm
+// package (or an un-adopted kpm with empty state) falls back to the TOML.
+func (a *App) effectiveSource(p *config.Package) string {
+	if p.ID == selfID {
+		if s := a.state.Get(selfID).Source; s != "" {
+			return s
+		}
+	}
+	return p.Source
+}
+
+// effectiveForge returns the forge in force for a package, from state for an
+// adopted kpm and from the TOML otherwise (SELF-SOURCE §1), mirroring
+// effectiveSource.
+func (a *App) effectiveForge(p *config.Package) string {
+	if p.ID == selfID {
+		if f := a.state.Get(selfID).Forge; f != "" {
+			return f
+		}
+	}
+	return p.Forge
+}
+
+// configured reports whether a package resolves to a usable host/owner/repo,
+// honoring kpm's state-resident source override (SELF-SOURCE §1). Callers use
+// this instead of p.Configured() so an adopted kpm is not seen as unconfigured.
+func (a *App) configured(p *config.Package) bool {
+	return config.SourceConfigured(a.effectiveSource(p))
+}
+
 // forgeFor returns the Forge client for a package, surfacing an unknown forge
-// identifier as a clear error naming the offending TOML (D9).
+// identifier as a clear error naming the file that holds it — packages.d/<id>.toml
+// for a normal package, state.json for an adopted kpm (D9, SELF-SOURCE §1).
 func (a *App) forgeFor(p *config.Package) (forge.Forge, error) {
-	f, err := forge.For(p.Forge, a.client)
+	fk := a.effectiveForge(p)
+	f, err := forge.For(fk, a.client)
 	if err != nil {
-		return nil, fmt.Errorf("unknown forge %q in packages.d/%s.toml", p.Forge, p.ID)
+		where := fmt.Sprintf("packages.d/%s.toml", p.ID)
+		if p.ID == selfID {
+			where = "state.json"
+		}
+		return nil, fmt.Errorf("unknown forge %q in %s", fk, where)
 	}
 	return f, nil
+}
+
+// persistDef routes a def about to be written so kpm's own adoption identity
+// stays out of the tarball-clobbered kpm.toml. For selfID it moves source/forge
+// into state.json (durable across a self-update that overwrites kpm.toml, §10 —
+// mirroring the pin) and blanks source/forge/pin in the def so the written
+// kpm.toml matches the shipped, sourceless template and a clobber is a no-op
+// (SELF-SOURCE §5/§6). For every other id it is a no-op: their source/forge stay
+// in their TOML exactly as before. Shared by install and sync.
+func (a *App) persistDef(id string, pkg *config.Package, ps *state.PackageState) {
+	if id != selfID {
+		return
+	}
+	ps.Source = pkg.Source // durable adoption identity (§10)
+	ps.Forge = pkg.Forge
+	pkg.Source = "" // keep kpm.toml sourceless, matching the shipped def
+	pkg.Forge = ""
+	pkg.Pin = "" // kpm's pin also lives in state.json (§10)
 }
 
 // notifier reports progress via NickelDBus toast when --notify is set and qndb

@@ -54,7 +54,7 @@ func (a *App) cmdList(args []string) int {
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
 		latest := dash(ps.LatestSeen)
-		if !p.Configured() {
+		if !a.configured(p) {
 			latest = unconfiguredNote(p.ID) // F7
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",

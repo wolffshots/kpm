@@ -385,6 +385,38 @@ func TestLoadAllSorted(t *testing.T) {
 	}
 }
 
+// SELF-SOURCE §3a: AppleDouble sidecars (._foo.toml) and other dotfiles are
+// silently skipped — never reported as unreadable — while a genuinely invalid
+// name (invalid chars, no dot prefix) still lands in unreadable.
+func TestLoadAllSkipsAppleDoubleAndHidden(t *testing.T) {
+	dir := t.TempDir()
+	// A valid def.
+	if err := os.WriteFile(filepath.Join(dir, "nickeldbus.toml"), []byte("source = \"h/o/nickeldbus\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// AppleDouble sidecar + a hidden dotfile: both silently ignored.
+	if err := os.WriteFile(filepath.Join(dir, "._nickeldbus.toml"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hidden.toml"), []byte("source = \"h/o/x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A genuinely invalid name (no dot prefix, invalid chars) still reported.
+	if err := os.WriteFile(filepath.Join(dir, "Bad_Name.toml"), []byte("source = \"h/o/x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgs, unreadable, err := LoadAll(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0].ID != "nickeldbus" {
+		t.Errorf("only the valid def should load: %+v", pkgs)
+	}
+	if len(unreadable) != 1 || unreadable[0] != "Bad_Name.toml" {
+		t.Errorf("only Bad_Name.toml should be unreadable, got %v", unreadable)
+	}
+}
+
 func TestLoadAllSkipsBadAndInvalidId(t *testing.T) {
 	dir := t.TempDir()
 	// A valid def.

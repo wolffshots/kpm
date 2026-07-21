@@ -96,16 +96,31 @@ type Package struct {
 	ID string `toml:"-"`
 }
 
-// Host/Owner/Repo split the "source" field.
-func (p Package) Host() string  { return field(p.Source, 0) }
-func (p Package) Owner() string { return field(p.Source, 1) }
-func (p Package) Repo() string  { return field(p.Source, 2) }
+// Host/Owner/Repo split the "source" field. They delegate to the package-level
+// Source* helpers so there is a single split implementation that kpm can also
+// apply to an effective (state-resident) source string (SELF-SOURCE §3).
+func (p Package) Host() string  { return SourceHost(p.Source) }
+func (p Package) Owner() string { return SourceOwner(p.Source) }
+func (p Package) Repo() string  { return SourceRepo(p.Source) }
 
 // Configured reports whether the package has a usable host/owner/repo source.
 // An empty/partial source marks self-update (or any package) "unconfigured":
 // check/update skip it silently instead of erroring (F7).
 func (p Package) Configured() bool {
-	return p.Host() != "" && p.Owner() != "" && p.Repo() != ""
+	return SourceConfigured(p.Source)
+}
+
+// SourceHost/Owner/Repo split a "host/owner/repo" source string. kpm's own
+// source lives in state.json (SELF-SOURCE §1), so the forge call sites split
+// the effective source string through these rather than reading p.Source
+// directly, which would bypass the state override (SELF-SOURCE §3).
+func SourceHost(src string) string  { return field(src, 0) }
+func SourceOwner(src string) string { return field(src, 1) }
+func SourceRepo(src string) string  { return field(src, 2) }
+
+// SourceConfigured reports whether src has a usable host/owner/repo triple (F7).
+func SourceConfigured(src string) bool {
+	return SourceHost(src) != "" && SourceOwner(src) != "" && SourceRepo(src) != ""
 }
 
 func field(source string, i int) string {
@@ -319,6 +334,13 @@ func LoadAll(dir string) (pkgs []*Package, unreadable []string, err error) {
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
+			continue
+		}
+		// AppleDouble sidecars (._foo.toml the Kobo's FAT partition collects from
+		// macOS/Finder) and any other dotfile are never package defs — a valid id
+		// is [a-z0-9-]+, which can't start with '.'. Skip silently so they don't
+		// masquerade as unreadable definitions (SELF-SOURCE §3a).
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".toml")

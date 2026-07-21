@@ -119,8 +119,24 @@ to turn it on (after the `registry add`/`refresh` above):
 kpm install kpm --adopt --yes
 ```
 
-and kpm maintains itself like any other package. (Setting
-`source = "github.com/wolffshots/kpm"` in `kpm.toml` by hand works too.)
+and kpm maintains itself like any other package.
+
+Since 0.5.0 the adoption (`source`/`forge`) is stored in `state.json`, not in
+`kpm.toml` — the same place kpm's pin lives, and for the same reason. Every kpm
+release ships `packages.d/kpm.toml`, so a self-update overwrites that file; when
+the adoption lived there, each self-update silently un-adopted kpm and it went
+back to `self-update not configured`. Storing it in `state.json`, which updates
+never overwrite, makes the adoption durable.
+
+Upgrading from **0.4.1 or earlier**: if your kpm is still adopted (`status` does
+not say `self-update not configured`), 0.5.0 migrates the source into
+`state.json` automatically on its first mutating command. If a previous
+self-update already wiped it, re-adopt **once** under 0.5.0 and it sticks for
+good:
+
+```
+kpm registry refresh && kpm install kpm --adopt --yes
+```
 
 kpm's own recorded version self-heals from the running binary, so a
 USB-sideloaded kpm corrects its `installed_version` on the next mutating command.

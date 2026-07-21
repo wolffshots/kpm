@@ -24,7 +24,7 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 		installed := dash(ps.InstalledVersion)
 		target, avail := updateTarget(p, ps, a.effectivePin(p))
 		switch {
-		case !p.Configured():
+		case !a.configured(p):
 			fmt.Fprintf(tw, "%s\t%s\t%s\n", p.ID, installed, unconfiguredNote(p.ID))
 		case ps.StagedVersion != "":
 			staged++

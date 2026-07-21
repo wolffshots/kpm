@@ -22,16 +22,14 @@ const (
 	memNm   = "./mnt/onboard/.adds/nm/kpm"
 )
 
-// selfToml is kpm's own package definition shipped in the tgz. It ships with
-// pin = "" on purpose: kpm's pin lives in state.json to survive self-update
-// overwrite (§10). source is empty until kpm's release repo exists: an empty
-// source marks self-update "unconfigured" — check/update skip it silently and
-// list/status report it, never an error (F7). Set source once the repo exists,
-// e.g. source = "codeberg.org/<owner>/kpm".
+// selfToml is kpm's own package definition shipped in the tgz. It carries only
+// the release-invariant fields: kpm's source, forge, and pin all live in
+// state.json so they survive a self-update that overwrites this file (§10;
+// SELF-SOURCE.md). An adopted kpm reads its source/forge from state via the
+// effective* accessors; an un-adopted kpm has empty state, so it reads
+// "self-update not configured" and check/update skip it silently (F7). This file
+// is still shipped: its presence is what marks kpm registered.
 const selfToml = `name = "kpm"
-# source: set to host/owner/repo once kpm's release repo exists to enable self-update.
-source = ""
-forge = "forgejo"
 asset = "KoboRoot.tgz"
 pin = ""
 `
@@ -46,7 +44,7 @@ type tgzFile struct {
 func main() {
 	version := os.Getenv("KPM_VERSION")
 	if version == "" {
-		version = "0.4.1"
+		version = "0.5.0"
 	}
 
 	root, err := repoRoot()

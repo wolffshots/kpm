@@ -32,6 +32,11 @@ type PackageState struct {
 	// Pin holds kpm's own pin, kept here (not in kpm.toml) so it survives
 	// self-update overwrite (§10). Other packages pin via their TOML.
 	Pin string `json:"pin,omitempty"`
+	// Source/Forge hold kpm's own adoption identity, kept here (not in
+	// kpm.toml) so they survive self-update overwrite (§10), mirroring Pin.
+	// Populated only for kpm; other packages read source/forge from their TOML.
+	Source string `json:"source,omitempty"`
+	Forge  string `json:"forge,omitempty"`
 	// SyncedDefSHA256 is the SHA-256 of the canonical registry def last written
 	// into this package's local TOML by install/sync (excluding pin/registry).
 	// It lets sync tell "up to date" from local drift (REGISTRY.md §9.7).
