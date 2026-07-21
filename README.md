@@ -297,6 +297,16 @@ matching kpm's stage-then-reboot install model.
 If the `kpm` binary is missing, the browser shows a "kpm not found — install kpm
 first" message and does nothing else (it never crashes Nickel).
 
+**Symbol compatibility (fail-closed):** at load the hook resolves every Nickel
+C++ symbol it needs; if any required symbol is missing it refuses to load
+cleanly — Nickel runs untouched, the menu row simply never appears, and a
+diagnostic log is dumped to `/mnt/onboard`. Verified to load on firmware
+4.33.19608; **4.20.14601 and older fail this check** (Nickel's method signatures
+drifted), so on those the UI is absent by design. Check any firmware from your
+desk with `tools/symcheck` (see "Build & release"). A crash inside the first
+15 seconds after load trips NickelHook's failsafe, which leaves the hook
+disabled on the next boot instead of bootlooping.
+
 **Removing the UI only:** create the flag file `/mnt/onboard/kpm_ui_uninstall`
 and reboot. NickelHook deletes `libnkpm.so` on the next boot; kpm itself (binary,
 config, state, packages) is untouched. (Firmware is out of scope past 4.x, same

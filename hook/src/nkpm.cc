@@ -54,6 +54,10 @@ void (*N3Dialog__hideKeyboard)(N3Dialog *__this);
 void (*TouchLabel__setHitStateEnabled)(TouchLabel *_this, bool enabled);
 
 // ---- constructors (file-local; used by the construct_* helpers) ---------
+//
+// Each calloc must be at least the real (unknown, firmware-dependent) Nickel
+// class size or the constructor corrupts the heap. 1024 is deliberate headroom
+// against object growth in future firmware; the cost is only slack bytes.
 
 static void (*TouchLineEdit__constructor)(TouchLineEdit *__this, QWidget *parent);
 static void (*TouchLabel__constructor)(TouchLabel *_this, QWidget *parent, QFlags<Qt::WindowType>);
@@ -61,25 +65,25 @@ static void (*N3ButtonLabel__constructor)(N3ButtonLabel *_this, QWidget *parent)
 static void (*KeyboardReceiver__constructor)(KeyboardReceiver *__this, QLineEdit *lineEdit, bool unknown);
 
 TouchLineEdit *construct_TouchLineEdit(QWidget *parent) {
-  TouchLineEdit *lineEdit = reinterpret_cast<TouchLineEdit *>(calloc(1, 128));
+  TouchLineEdit *lineEdit = reinterpret_cast<TouchLineEdit *>(calloc(1, 1024));
   TouchLineEdit__constructor(lineEdit, parent);
   return lineEdit;
 }
 
 TouchLabel *construct_TouchLabel(QWidget *parent) {
-  TouchLabel *label = reinterpret_cast<TouchLabel *>(calloc(1, 128));
+  TouchLabel *label = reinterpret_cast<TouchLabel *>(calloc(1, 1024));
   TouchLabel__constructor(label, parent, 0);
   return label;
 }
 
 N3ButtonLabel *construct_N3ButtonLabel(QWidget *parent) {
-  N3ButtonLabel *button = reinterpret_cast<N3ButtonLabel *>(calloc(1, 512));
+  N3ButtonLabel *button = reinterpret_cast<N3ButtonLabel *>(calloc(1, 1024));
   N3ButtonLabel__constructor(button, parent);
   return button;
 }
 
 KeyboardReceiver *construct_KeyboardReceiver(QLineEdit *lineEdit) {
-  KeyboardReceiver *receiver = reinterpret_cast<KeyboardReceiver *>(calloc(1, 128));
+  KeyboardReceiver *receiver = reinterpret_cast<KeyboardReceiver *>(calloc(1, 1024));
   KeyboardReceiver__constructor(receiver, lineEdit, false);
   return receiver;
 }
@@ -161,6 +165,13 @@ static struct nh_info NickelKPM = (struct nh_info){
     .name = "NickelKPM",
     .desc = "Graphical package browser for kpm",
     .uninstall_flag = "/mnt/onboard/kpm_ui_uninstall",
+    // nullptr placeholder: the device GCC only accepts a gap-free designated-
+    // initializer prefix ("non-trivial designated initializers not supported").
+    .uninstall_xflag = nullptr,
+    // If Nickel crashes within this window after load, NickelHook's failsafe
+    // leaves libnkpm.so renamed aside so the next boot comes up without the mod
+    // (no bootloop); a clean boot restores it once the window passes.
+    .failsafe_delay = 15,
 };
 
 // clang-format off
