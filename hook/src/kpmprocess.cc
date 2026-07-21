@@ -245,26 +245,32 @@ void KpmProcess::processFinished(int exitCode, QProcess::ExitStatus status) {
     }
   }
 
+  bool haveMarker = index >= 0;
   QJsonObject payload;
-  if (index >= 0) {
+  if (haveMarker) {
     QByteArray json = out.mid(index + static_cast<int>(sizeof("BEGIN_JSON") - 1));
     payload = QJsonDocument::fromJson(json).object();
   }
 
   // exit 0 (ok) and exit 2 (partial) both carry a payload the caller renders;
-  // the caller summarizes a partial run (§4).
-  if (exitCode == 0 || exitCode == 2) {
+  // the caller summarizes a partial run (§4). But ONLY when the BEGIN_JSON
+  // marker is actually present: a Go panic exits 2 with no marker and no
+  // payload, which must surface as an error rather than render an empty result
+  // as success (JSON-OUTPUT §1 — every --json path ends on the marker).
+  if (haveMarker && (exitCode == 0 || exitCode == 2)) {
     response(exitCode, payload);
     finish();
     return;
   }
 
-  // Any other non-zero exit is a hard error: surface stderr, mapping kpm's
-  // single-instance-lock message to a friendly "busy" dialog (§4).
+  // Hard error: a non-zero exit, or a missing payload marker. Surface stderr,
+  // mapping kpm's single-instance-lock message to a friendly "busy" dialog (§4).
   QByteArray err = proc->readAllStandardError();
   QString message = QString::fromUtf8(err).trimmed();
   if (message.contains("another kpm instance", Qt::CaseInsensitive)) {
     message = "kpm is busy — try again in a moment.";
+  } else if (!haveMarker) {
+    message = "kpm produced no result (exit code " + QString::number(exitCode) + ").";
   } else if (message.isEmpty()) {
     message = "kpm failed (exit code " + QString::number(exitCode) + ").";
   }

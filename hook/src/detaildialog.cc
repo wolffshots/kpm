@@ -17,7 +17,11 @@ DetailDialog::DetailDialog(QJsonObject package)
     : Dialog(package.value("name").toString().isEmpty() ? package.value("id").toString()
                                                         : package.value("name").toString()),
       pkg(package), id(package.value("id").toString()) {
-  setFixedSize(parentWidget()->size());
+  // Guard against a null parent (see BrowseDialog): a deref here would crash
+  // Nickel the moment a package detail is opened.
+  if (QWidget *parent = parentWidget()) {
+    setFixedSize(parent->size());
+  }
 
   QString installed = pkg.value("installed").toString();
   bool staged = pkg.value("staged").toBool();

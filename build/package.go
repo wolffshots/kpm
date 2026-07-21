@@ -173,6 +173,15 @@ func writeTgz(path string, files []tgzFile) error {
 	if err != nil {
 		return err
 	}
+	// Close on every error path (the success path Sync+Close's explicitly below);
+	// a double Close just returns an error we ignore. Without this an error mid-
+	// write leaks the handle and, on Windows, locks the half-written file.
+	closed := false
+	defer func() {
+		if !closed {
+			f.Close()
+		}
+	}()
 	gw := gzip.NewWriter(f)
 	tw := tar.NewWriter(gw)
 	for _, m := range files {
@@ -202,6 +211,7 @@ func writeTgz(path string, files []tgzFile) error {
 	if err := f.Sync(); err != nil { // durable before self-check reopens it (B3)
 		return err
 	}
+	closed = true
 	return f.Close()
 }
 

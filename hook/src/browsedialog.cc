@@ -21,7 +21,11 @@
 void BrowseDialog::show() { new BrowseDialog(); }
 
 BrowseDialog::BrowseDialog() : Dialog("Package manager") {
-  setFixedSize(parentWidget()->size());
+  // getDialog is expected to reparent this under an N3Dialog synchronously, but
+  // don't assume it: a null parent here would crash Nickel on open.
+  if (QWidget *parent = parentWidget()) {
+    setFixedSize(parent->size());
+  }
 
   QVBoxLayout *layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
