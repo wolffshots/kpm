@@ -290,8 +290,10 @@ func TestUIContractSearch(t *testing.T) {
 	if p0["id"] != "nickelclock" || p0["installed"] != "v0.4.0" || p0["staged"] != false {
 		t.Errorf("unexpected package fields: %v", p0)
 	}
-	if p0["uninstallable"] != true || p0["min_kpm_ok"] != true {
-		t.Errorf("uninstallable/min_kpm_ok = %v/%v, want true/true", p0["uninstallable"], p0["min_kpm_ok"])
+	// Registry def only (no local packages.d def): kpm cannot uninstall it, so
+	// uninstallable is false regardless of the registry's advertised recipe (M2).
+	if p0["uninstallable"] != false || p0["min_kpm_ok"] != true {
+		t.Errorf("uninstallable/min_kpm_ok = %v/%v, want false/true", p0["uninstallable"], p0["min_kpm_ok"])
 	}
 }
 

@@ -80,7 +80,10 @@ func TestSearchJSONGolden(t *testing.T) {
 
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":true,"min_kpm":"0.4.0","min_kpm_ok":true}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}]}`
+	// nickelclock has a registry def and is installed (in state) but has NO local
+	// packages.d def, so kpm cannot uninstall it (cmdUninstall needs a local def):
+	// uninstallable is false, not driven by the registry's advertised recipe (M2).
+	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}]}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
 	}
@@ -141,6 +144,59 @@ func TestListJSONGolden(t *testing.T) {
 	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","installed":"v0.4.0","pinned":null,"source":"github.com/shermp/NickelClock","registry":"main"}]}`
 	if got != want {
 		t.Errorf("list --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// M2 regression: search's `uninstallable` must track whether kpm actually CAN
+// uninstall — it requires a LOCAL packages.d def (cmdUninstall's precondition),
+// not merely a registry-advertised recipe. Same registry def, two states.
+func TestSearchUninstallableRequiresLocalDef(t *testing.T) {
+	uninstallable := func(t *testing.T, payload string) any {
+		t.Helper()
+		var m struct {
+			Packages []map[string]any `json:"packages"`
+		}
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			t.Fatal(err)
+		}
+		if len(m.Packages) != 1 {
+			t.Fatalf("want 1 package, got %d", len(m.Packages))
+		}
+		return m.Packages[0]["uninstallable"]
+	}
+
+	// (a) local def present + installed → uninstallable.
+	a := newTestApp(t)
+	setVersion(t, "0.6.0")
+	seedRegistry(t, a, "main", jsonClockManifest)
+	if err := config.Save(a.paths.PackageFile("nickelclock"), &config.Package{
+		Name: "NickelClock", Source: "github.com/shermp/NickelClock", Forge: "github",
+		Asset: "NickelClock-*.zip", MinKpm: "0.4.0", Registry: "main",
+		Uninstall: config.Uninstall{Method: "marker-remove", MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("nickelclock").InstalledVersion = "v0.4.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
+	if u := uninstallable(t, lastJSON(t, out)); u != true {
+		t.Errorf("with a local def, uninstallable = %v, want true", u)
+	}
+
+	// (b) registry def only (no local def) but installed → NOT uninstallable,
+	// matching that cmdUninstall would refuse it (loadPackage fails).
+	b := newTestApp(t)
+	setVersion(t, "0.6.0")
+	seedRegistry(t, b, "main", jsonClockManifest)
+	b.state.Get("nickelclock").InstalledVersion = "v0.4.0"
+	if err := b.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() { b.cmdSearch([]string{"--json"}) })
+	if u := uninstallable(t, lastJSON(t, out)); u != false {
+		t.Errorf("with only a registry def, uninstallable = %v, want false", u)
 	}
 }
 

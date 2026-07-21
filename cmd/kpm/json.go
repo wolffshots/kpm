@@ -217,27 +217,27 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			pin = a.state.Get(selfID).Pin
 		}
 
-		var uni config.Uninstall
-		switch {
-		case local != nil:
-			uni = local.Uninstall
-		case e != nil:
-			uni = e.Def.Uninstall
+		// Uninstallable is driven by the LOCAL def only: cmdUninstall requires
+		// loadPackage(id) to succeed, so a package that has only a registry def
+		// (no local packages.d entry — e.g. after "kpm remove" left state behind)
+		// is NOT uninstallable no matter what recipe the registry advertises, and
+		// kpm refuses to uninstall itself (M2).
+		uninstallable := false
+		if local != nil && id != selfID {
+			uninstallable = methodUninstallable(local.Uninstall, ps.Manifest)
 		}
 
 		pkgs = append(pkgs, jsonSearchPkg{
-			ID:          id,
-			Name:        name,
-			Description: ptr(desc),
-			Homepage:    ptr(home),
-			Source:      source,
-			Registry:    ptr(regName),
-			Installed:   ptr(ps.InstalledVersion),
-			Pinned:      ptr(pin),
-			Staged:      ps.StagedVersion != "",
-			// kpm refuses to uninstall itself (cmd_uninstall), so never
-			// advertise it as uninstallable to the UI.
-			Uninstallable: id != selfID && methodUninstallable(uni, ps.Manifest),
+			ID:            id,
+			Name:          name,
+			Description:   ptr(desc),
+			Homepage:      ptr(home),
+			Source:        source,
+			Registry:      ptr(regName),
+			Installed:     ptr(ps.InstalledVersion),
+			Pinned:        ptr(pin),
+			Staged:        ps.StagedVersion != "",
+			Uninstallable: uninstallable,
 			MinKpm:        ptr(minKpm),
 			MinKpmOK:      registry.MinKpmSatisfied(version.Version, minKpm),
 		})
