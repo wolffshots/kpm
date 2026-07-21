@@ -138,9 +138,19 @@ func checkEntryType(hdr *tar.Header, normalizedName string) error {
 	return nil
 }
 
+// kpmReservedLinkPrefixes are kpm's own install locations. A symlink or hardlink
+// whose target RESOLVES here could redirect a later archive entry onto kpm's
+// binary/state at root-run extraction time — defeating the "kpm merged last"
+// clobber guard, which only inspects literal member names (§7.3, A1). Compared
+// case-insensitively because they live on the FAT32 onboard partition.
+var kpmReservedLinkPrefixes = []string{
+	"mnt/onboard/.adds/kpm",
+	"mnt/onboard/.adds/nm/kpm",
+}
+
 // checkLinkTarget validates a symlink/hardlink target. Absolute targets are
 // rejected. Relative targets are resolved against the entry's directory and
-// rejected if they escape the archive root.
+// rejected if they escape the archive root or resolve into kpm's reserved tree.
 func checkLinkTarget(normalizedName, linkname string) error {
 	if linkname == "" {
 		return fmt.Errorf("empty link target for %q", normalizedName)
@@ -151,6 +161,12 @@ func checkLinkTarget(normalizedName, linkname string) error {
 	resolved := path.Clean(path.Join(path.Dir(normalizedName), linkname))
 	if resolved == ".." || strings.HasPrefix(resolved, "../") {
 		return fmt.Errorf("link target escapes archive root: %q -> %q", normalizedName, linkname)
+	}
+	lr := strings.ToLower(resolved)
+	for _, pfx := range kpmReservedLinkPrefixes {
+		if lr == pfx || strings.HasPrefix(lr, pfx+"/") {
+			return fmt.Errorf("link target resolves into kpm's reserved path: %q -> %q", normalizedName, resolved)
+		}
 	}
 	return nil
 }

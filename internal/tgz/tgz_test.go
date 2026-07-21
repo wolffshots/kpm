@@ -318,6 +318,31 @@ func TestVerifyRejectsHardlinkEscape(t *testing.T) {
 	}
 }
 
+// M1: a symlink whose relative target stays within the archive root but RESOLVES
+// into kpm's own tree could redirect a later entry onto the kpm binary at root-
+// run extraction, defeating the reserved-path guard (which sees only literal
+// member names). Reject the link so the exploit never stages.
+func TestVerifyRejectsSymlinkIntoKpmReserved(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "evil.tgz")
+	writeTestTgzHeaders(t, p, []*tar.Header{
+		// usr/local/evil/link -> mnt/onboard/.adds/kpm (stays in-root, but reserved).
+		{Name: "usr/local/evil/link", Typeflag: tar.TypeSymlink, Linkname: "../../../mnt/onboard/.adds/kpm", Mode: 0o777},
+		{Name: "usr/local/evil/link/bin/kpm", Typeflag: tar.TypeReg, Mode: 0o755, Size: 1},
+	})
+	if _, err := Verify(p); err == nil {
+		t.Error("expected rejection of a symlink resolving into kpm's reserved tree")
+	}
+	// Case-insensitively too (the onboard partition is FAT32).
+	p2 := filepath.Join(dir, "evil2.tgz")
+	writeTestTgzHeaders(t, p2, []*tar.Header{
+		{Name: "usr/local/evil/link", Typeflag: tar.TypeSymlink, Linkname: "../../../MNT/onboard/.adds/KPM/bin", Mode: 0o777},
+	})
+	if _, err := Verify(p2); err == nil {
+		t.Error("expected case-insensitive rejection of a symlink into kpm's reserved tree")
+	}
+}
+
 func TestVerifyRejectsDeviceAndFifo(t *testing.T) {
 	for _, typ := range []byte{tar.TypeChar, tar.TypeBlock, tar.TypeFifo} {
 		dir := t.TempDir()
