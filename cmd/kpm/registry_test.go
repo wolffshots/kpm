@@ -167,6 +167,44 @@ func TestRefreshUnconditionalWhenCacheMissing(t *testing.T) {
 	}
 }
 
+// M1: a cache file that is PRESENT but corrupt (unparseable) with a recorded
+// etag must trigger an unconditional re-fetch — not an If-None-Match that a
+// server answers 304 and leaves the corruption in place forever. The server
+// here 304s any conditional request, so the only way the cache heals is an
+// unconditional GET.
+func TestRefreshRepairsCorruptCacheDespiteEtag(t *testing.T) {
+	a := newTestApp(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified) // would strand a corrupt cache
+			return
+		}
+		w.Header().Set("ETag", `"new"`)
+		w.Write([]byte(nmManifest))
+	}))
+	defer srv.Close()
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	host := strings.TrimPrefix(srv.URL, "https://")
+	r := registry.Registry{Name: "main", URL: host + "/o/r", Ref: "main", Path: "registry.toml", Forge: "forgejo"}
+
+	// A good etag is recorded, but the cache on disk is garbage.
+	a.state.Registry("main").Etag = `"old"`
+	if err := os.WriteFile(a.paths.RegistryCache("main"), []byte("}{ not toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.refreshOne(r); err != nil {
+		t.Fatalf("refresh should succeed: %v", err)
+	}
+	m, err := a.cachedManifest(r)
+	if err != nil {
+		t.Fatalf("cache should have been repaired and now parse: %v", err)
+	}
+	if len(m.Packages) == 0 {
+		t.Error("repaired cache should hold packages")
+	}
+}
+
 // B2: a Forgejo registry whose branch path 404s but tag path serves refreshes
 // via the tag fallback.
 func TestRefreshForgejoTagFallback(t *testing.T) {
@@ -299,6 +337,37 @@ func TestInstallConfirmAndWrite(t *testing.T) {
 	}
 	if a.state.Get("nickelmenu").SyncedDefSHA256 == "" {
 		t.Error("synced_def_sha256 should be recorded")
+	}
+}
+
+// M1: re-installing a registry package whose local def is unchanged is an
+// idempotent SUCCESS (exit 0), so the UI's install->update chain can't dead-end
+// after a failed update. A drifted local def still routes to sync (exit 1).
+func TestInstallIdempotentWhenUnchanged(t *testing.T) {
+	a := newTestApp(t)
+	seedRegistry(t, a, "main", nmManifest)
+
+	if code := a.cmdInstall([]string{"nickelmenu", "--yes"}); code != exitOK {
+		t.Fatalf("first install exit %d", code)
+	}
+	// Second install of the same, unchanged registry def: idempotent success.
+	var code int
+	out := captureStdout(t, func() { code = a.cmdInstall([]string{"nickelmenu", "--yes", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("idempotent re-install should exit 0, got %d", code)
+	}
+	if got := lastJSON(t, out); !strings.Contains(got, `"changed":["nickelmenu"]`) {
+		t.Errorf("idempotent re-install should report changed: %s", got)
+	}
+
+	// Now drift the local def; re-install must refuse and point at sync.
+	drift := &config.Package{Name: "Drifted", Source: "github.com/pgaskin/NickelMenu", Forge: "github", Asset: "KoboRoot.tgz", Registry: "main"}
+	if err := config.SaveReplace(a.paths.PackageFile("nickelmenu"), drift); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("nickelmenu").SyncedDefSHA256 = "stale-hash"
+	if code := a.cmdInstall([]string{"nickelmenu", "--yes"}); code != exitError {
+		t.Errorf("re-install over a drifted def should refuse (route to sync), got %d", code)
 	}
 }
 

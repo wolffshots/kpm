@@ -99,6 +99,19 @@ func (a *App) cmdInstall(args []string) int {
 	if existsErr == nil {
 		switch {
 		case existing.Registry != "" && !*adopt:
+			// Idempotent re-install: if the local def is exactly this registry
+			// entry (no local drift), report success so the UI's install->update
+			// chain proceeds instead of dead-ending. Without this, a failed update
+			// right after a successful install leaves "Install" as the only UI
+			// action, and a second tap would error here forever (M1). A drifted
+			// def still routes the user to sync.
+			if h, herr := registry.HashDef(entry.Def); herr == nil && h == a.state.Get(id).SyncedDefSHA256 {
+				fmt.Printf("%s is already installed from registry %s\n", id, existing.Registry)
+				if jsonMode {
+					emitMutation([]string{id}, nil, false, false, "")
+				}
+				return exitOK
+			}
 			failJSON(fmt.Sprintf("%q is already installed from registry %q", id, existing.Registry))
 			fmt.Fprintf(os.Stderr, "kpm install: %q is already installed from registry %q — use \"kpm sync %s\" to update its def\n", id, existing.Registry, id)
 			return exitError

@@ -355,9 +355,12 @@ func (a *App) refreshOne(r registry.Registry) error {
 	// C8: read the recorded etag WITHOUT creating a state entry (a failed
 	// refresh must not leave an empty {} behind). B1: only send If-None-Match
 	// when the cache file actually exists — a 304 with no cache would leave us
-	// with neither a body nor a cache to fall back on.
+	// with neither a body nor a cache to fall back on. M1: also require the
+	// cached bytes to still PARSE — a corrupt cache (e.g. truncated by an
+	// out-of-band USB edit) with a valid stored etag would otherwise 304 forever
+	// and never self-heal; a full re-fetch replaces it.
 	etag := ""
-	if _, statErr := os.Stat(a.paths.RegistryCache(r.Name)); statErr == nil {
+	if _, cerr := a.cachedManifest(r); cerr == nil {
 		if rs := a.state.Registries[r.Name]; rs != nil {
 			etag = rs.Etag
 		}
