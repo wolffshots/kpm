@@ -3,8 +3,22 @@
 // NICKEL-UI.md §2 — path and qrc resource constants for NickelKPM.
 
 namespace Files {
+#ifdef NKPM_SIM
+// Desktop simulator (hook/sim, Tier-3 off-device testing): the kpm binary path
+// cannot be shadowed via -I because src/*.cc include "files.h" as a quote-include
+// that always resolves to this file first. So the sim build defines NKPM_SIM and
+// the binary is taken from $NKPM_KPM (falling back to "kpm" on PATH). Compile-time
+// inert on device: NKPM_SIM is never defined by hook/Makefile.
+#include <cstdlib>
+inline char const *kpm_sim_path() {
+  char const *e = ::getenv("NKPM_KPM");
+  return (e && *e) ? e : "kpm";
+}
+static char const *const kpm = kpm_sim_path();
+#else
 // The installed kpm binary the hook shells out to (NICKEL-UI.md §2/§4).
 constexpr char const *kpm = "/mnt/onboard/.adds/kpm/bin/kpm";
+#endif
 
 // Resource icon (nkpm.qrc). The More-menu entry row is icon-less; this is only
 // a bundled asset (NICKEL-UI.md §3).

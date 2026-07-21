@@ -7,3 +7,8 @@
 /hook/**/*.moc
 /hook/**/*.rcc
 /hook/NickelHook/nhplugin.json
+
+# Desktop simulator build artifacts (hook/sim/README.md)
+/hook/sim/build/
+/hook/sim/nkpm-sim
+/hook/sim/shots/
