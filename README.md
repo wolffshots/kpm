@@ -312,6 +312,12 @@ but others still staged), `3` confirmation required (`uninstall`/`install`
 without `--yes`).
 If every selected `update` package fails and nothing stages, the exit is `1`.
 
+**Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
+`update`, `uninstall`, `unstage`, `registry list`, `registry refresh`, and
+`version` accept `--json`. Human/progress output streams as usual; the final
+stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
+object. This is what the graphical UI consumes; it also serves scripts.
+
 `update` merges all pending packages into one staged `KoboRoot.tgz` (kpm's own
 entries are merged last so nothing can clobber the new binary). Re-running
 `update` before a reboot re-merges the already-staged packages so none are lost.

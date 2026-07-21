@@ -18,8 +18,9 @@ import (
 // it reads caches exclusively and never touches the network (§9.2).
 func (a *App) cmdSearch(args []string) int {
 	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
 	if len(flags) > 0 || len(pos) > 1 {
-		fmt.Fprintln(os.Stderr, "usage: kpm search [<term>]")
+		fmt.Fprintln(os.Stderr, "usage: kpm search [<term>] [--json]")
 		return exitError
 	}
 	term := ""
@@ -29,11 +30,20 @@ func (a *App) cmdSearch(args []string) int {
 
 	cfg, err := a.loadRegistryConfig()
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm search:", err)
 		return exitError
 	}
 	mans, missing := a.cachedManifests(cfg)
 	entries, _ := registry.Merge(mans)
+
+	// --json emits the merged browse payload (JSON-OUTPUT.md §2.1) instead of the
+	// human table; the human code below is left exactly as-is.
+	if jsonMode {
+		return a.searchJSON(cfg, entries, term)
+	}
 
 	// Index manifests by registry name so def-update checks can compare against
 	// the package's recorded PROVENANCE registry def (matching sync), not just

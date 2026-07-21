@@ -25,14 +25,22 @@ func (a *App) cmdInstall(args []string) int {
 	yes := fs.Bool("yes", false, "write the def (required; install pauses to show it first)")
 	adopt := fs.Bool("adopt", false, "take over an existing local def, preserving its pin and state")
 	flags, pos := splitArgs(args, map[string]bool{"pin": true, "installed": true})
+	flags, jsonMode := takeJSON(flags)
 	if err := fs.Parse(flags); err != nil {
 		return exitError
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]")
+		fmt.Fprintln(os.Stderr, "usage: kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt] [--json]")
 		return exitError
 	}
 	id := pos[0]
+	// failJSON emits a best-effort structured error for the UI (JSON-OUTPUT.md
+	// §1/§2.3); the exit code stays authoritative.
+	failJSON := func(msg string) {
+		if jsonMode {
+			emitMutation(nil, []jsonFailure{{ID: id, Error: msg}}, false, false, msg)
+		}
+	}
 	if !config.ValidID(id) {
 		fmt.Fprintf(os.Stderr, "kpm install: invalid package id %q\n", id)
 		return exitError
@@ -49,8 +57,10 @@ func (a *App) cmdInstall(args []string) int {
 	entry, ok := entries[id]
 	if !ok {
 		if len(missing) > 0 {
+			failJSON(fmt.Sprintf("%q not found; some registries have no cache", id))
 			fmt.Fprintf(os.Stderr, "kpm install: %q not found; some registries have no cache (%v) — run: kpm registry refresh\n", id, missing)
 		} else {
+			failJSON(fmt.Sprintf("%q not found in any registry", id))
 			fmt.Fprintf(os.Stderr, "kpm install: %q not found in any registry\n", id)
 		}
 		return exitError
@@ -89,9 +99,11 @@ func (a *App) cmdInstall(args []string) int {
 	if existsErr == nil {
 		switch {
 		case existing.Registry != "" && !*adopt:
+			failJSON(fmt.Sprintf("%q is already installed from registry %q", id, existing.Registry))
 			fmt.Fprintf(os.Stderr, "kpm install: %q is already installed from registry %q — use \"kpm sync %s\" to update its def\n", id, existing.Registry, id)
 			return exitError
 		case existing.Registry == "" && !*adopt:
+			failJSON(fmt.Sprintf("%q already exists as a hand-added package", id))
 			fmt.Fprintf(os.Stderr, "kpm install: %q already exists as a hand-added package — \"kpm remove %s\" first, or use --adopt to take it over\n", id, id)
 			return exitError
 		}
@@ -115,7 +127,10 @@ func (a *App) cmdInstall(args []string) int {
 	// Confirm pause: print the def and exit 3 unless --yes (§9.6).
 	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange)
 	if !*yes {
+		// Human line before the emit: BEGIN_JSON must be the final stdout
+		// line on every branch (JSON-OUTPUT.md §1).
 		fmt.Println("\nRe-run with --yes to write this def.")
+		failJSON("re-run with --yes to write this def")
 		return exitConfirm
 	}
 
@@ -160,6 +175,11 @@ func (a *App) cmdInstall(args []string) int {
 		fmt.Printf("installed def for %s from registry %s\n", id, entry.Registry)
 	}
 	fmt.Printf("run \"kpm check\" then \"kpm update %s\" to fetch and stage the software\n", id)
+	// install only writes the def (it does not fetch/stage the software), so
+	// nothing is staged and no reboot is required (JSON-OUTPUT.md §2.3).
+	if jsonMode {
+		emitMutation([]string{id}, nil, false, false, "")
+	}
 	return exitOK
 }
 

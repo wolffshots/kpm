@@ -16,13 +16,21 @@ const SchemaVersion = 1
 // PackageDef is one [packages.<id>] entry in a registry.toml. Its fields are
 // identical to the local packages.d schema except there is no pin (pins are a
 // local decision, never distributed — REGISTRY.md §2) and the optional min_kpm.
+//
+// Description/Homepage are optional, purely-presentational metadata surfaced by
+// "kpm search --json" for the Nickel UI (JSON-OUTPUT.md §3). They are registry-
+// only: they are never copied into a local packages.d def and are deliberately
+// excluded from HashDef, so adding/changing them never registers as a def
+// update or local drift (the sync machinery ignores them).
 type PackageDef struct {
-	Name      string           `toml:"name"`
-	Source    string           `toml:"source"`
-	Forge     string           `toml:"forge"`
-	Asset     string           `toml:"asset"`
-	MinKpm    string           `toml:"min_kpm"`
-	Uninstall config.Uninstall `toml:"uninstall"`
+	Name        string           `toml:"name"`
+	Source      string           `toml:"source"`
+	Forge       string           `toml:"forge"`
+	Asset       string           `toml:"asset"`
+	MinKpm      string           `toml:"min_kpm"`
+	Description string           `toml:"description,omitempty"` // JSON-OUTPUT.md §3
+	Homepage    string           `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
+	Uninstall   config.Uninstall `toml:"uninstall"`
 }
 
 // Manifest is a parsed registry.toml.

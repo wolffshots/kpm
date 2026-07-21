@@ -131,9 +131,13 @@ func field(source string, i int) string {
 	return ""
 }
 
-var idRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+// Ids must start with an alphanumeric so an id can never begin with "-" and
+// read as a flag when passed as a bare argv token (defense in depth: callers
+// already pass ids list-form, never through a shell).
+var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
-// ValidID reports whether id matches the [a-z0-9-]+ package-id rule.
+// ValidID reports whether id matches the package-id rule: lowercase
+// alphanumerics and dashes, starting with an alphanumeric.
 func ValidID(id string) bool { return idRE.MatchString(id) }
 
 // Load reads and parses a single package TOML at path, setting ID from filename.

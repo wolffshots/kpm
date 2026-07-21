@@ -64,7 +64,7 @@ func (a *App) cmdAdd(args []string) int {
 		id = *name
 	}
 	if !config.ValidID(id) {
-		fmt.Fprintf(os.Stderr, "kpm add: invalid package id %q (need [a-z0-9-]+)\n", id)
+		fmt.Fprintf(os.Stderr, "kpm add: invalid package id %q (need [a-z0-9][a-z0-9-]*)\n", id)
 		return exitError
 	}
 

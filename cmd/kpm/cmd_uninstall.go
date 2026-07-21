@@ -23,23 +23,32 @@ func (a *App) cmdUninstall(args []string) int {
 	reboot := fs.Bool("reboot", false, "reboot after a successful removal")
 	notify := fs.Bool("notify", false, "emit NickelDBus toasts")
 	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
 	if err := fs.Parse(flags); err != nil {
 		return exitError
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]")
+		fmt.Fprintln(os.Stderr, "usage: kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify] [--json]")
 		return exitError
 	}
 	id := pos[0]
 	n := notifier{on: *notify}
+	// failJSON emits a best-effort structured failure for the UI (§1/§2.3).
+	failJSON := func(msg string) {
+		if jsonMode {
+			emitMutation(nil, []jsonFailure{{ID: id, Error: msg}}, false, false, msg)
+		}
+	}
 
 	if !config.ValidID(id) {
+		failJSON(fmt.Sprintf("invalid package id %q", id))
 		fmt.Fprintf(os.Stderr, "kpm uninstall: invalid package id %q\n", id)
 		return exitError
 	}
 
 	// Self-uninstall is refused — kpm must remove itself by hand (README).
 	if id == selfID {
+		failJSON("refusing to uninstall kpm itself")
 		fmt.Fprintln(os.Stderr, "kpm uninstall: refusing to uninstall kpm itself; see the README \"Removing kpm\" section for manual removal")
 		return exitError
 	}
@@ -61,6 +70,7 @@ func (a *App) cmdUninstall(args []string) int {
 
 	pkg, err := a.loadPackage(id)
 	if err != nil {
+		failJSON(err.Error())
 		fmt.Fprintln(os.Stderr, "kpm uninstall:", err)
 		return exitError
 	}
@@ -69,6 +79,7 @@ func (a *App) cmdUninstall(args []string) int {
 	ps := a.state.Get(id)
 	if ps.StagedVersion != "" {
 		if _, err := os.Stat(a.paths.StagedTgz()); err == nil {
+			failJSON(fmt.Sprintf("%s has a staged update awaiting reboot", id))
 			fmt.Fprintf(os.Stderr,
 				"kpm uninstall: %s has a staged update awaiting reboot; reboot to install it or remove %s first\n",
 				id, a.paths.StagedTgz())
@@ -78,6 +89,7 @@ func (a *App) cmdUninstall(args []string) int {
 
 	plan, err := uninstall.Compute(ps.Manifest, pkg.Uninstall, *purge)
 	if err != nil {
+		failJSON(err.Error())
 		fmt.Fprintln(os.Stderr, "kpm uninstall:", err)
 		return exitError
 	}
@@ -85,10 +97,17 @@ func (a *App) cmdUninstall(args []string) int {
 	printPlan(os.Stdout, id, plan, *purge, len(pkg.Uninstall.PurgePaths) > 0)
 
 	if *dryRun {
+		if jsonMode {
+			// Dry-run changes nothing; report the reboot the method would need.
+			emitMutation(nil, nil, false, plan.NeedsReboot, "")
+		}
 		return exitOK
 	}
 	if !*yes {
+		// Human line before the emit: BEGIN_JSON must be the final stdout
+		// line on every branch (JSON-OUTPUT.md §1).
 		fmt.Println("\nThis is destructive. Re-run with --yes to apply.")
+		failJSON("re-run with --yes to apply")
 		return exitConfirm
 	}
 
@@ -99,6 +118,7 @@ func (a *App) cmdUninstall(args []string) int {
 		if err := runHook(plan.RunBefore); err != nil {
 			a.paths.Log("WARN", fmt.Sprintf("%s  run_before failed: %v", id, err))
 			if !*force {
+				failJSON(fmt.Sprintf("run_before failed: %v", err))
 				fmt.Fprintf(os.Stderr, "kpm uninstall: run_before failed: %v (use --force to proceed)\n", err)
 				a.paths.WriteStatus(fmt.Sprintf("kpm: uninstall %s aborted — run_before failed", id))
 				return exitError
@@ -126,6 +146,9 @@ func (a *App) cmdUninstall(args []string) int {
 		msg := fmt.Sprintf("kpm: uninstall %s partial — %d failed, %d skipped for safety, see kpm.log",
 			id, len(res.Failed), len(res.Skipped))
 		a.paths.WriteStatus(msg)
+		if jsonMode {
+			emitMutation(nil, []jsonFailure{{ID: id, Error: fmt.Sprintf("partial — %d failed, %d skipped", len(res.Failed), len(res.Skipped))}}, false, plan.NeedsReboot, "partial")
+		}
 		fmt.Fprintln(os.Stderr, msg)
 		for _, s := range res.Skipped {
 			fmt.Fprintf(os.Stderr, "  skipped %s (%s)\n", s.Path, s.Reason)
@@ -140,12 +163,18 @@ func (a *App) cmdUninstall(args []string) int {
 		if err := os.Remove(a.paths.PackageFile(id)); err != nil && !os.IsNotExist(err) {
 			msg := fmt.Sprintf("kpm: uninstall %s could not remove registration (%v) — retry", id, err)
 			a.paths.WriteStatus(msg)
+			if jsonMode {
+				emitMutation(nil, []jsonFailure{{ID: id, Error: "could not remove registration"}}, false, plan.NeedsReboot, "partial")
+			}
 			fmt.Fprintln(os.Stderr, msg)
 			return exitPartial
 		}
 	}
 	delete(a.state.Packages, id)
 	if err := a.state.Save(); err != nil {
+		if jsonMode {
+			jsonError("state: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm uninstall: state:", err)
 		return exitError
 	}
@@ -158,6 +187,12 @@ func (a *App) cmdUninstall(args []string) int {
 	a.paths.WriteStatus(status)
 	fmt.Println(status)
 	n.toast(fmt.Sprintf("kpm: uninstalled %s", id))
+
+	// §2.3: uninstall stages nothing; reboot_required reflects the method
+	// (marker methods act on the next boot). Emitted before the reboot decision.
+	if jsonMode {
+		emitMutation([]string{id}, nil, false, plan.NeedsReboot, "")
+	}
 
 	if *reboot {
 		a.paths.Log("REBOOT", "after uninstall "+id)

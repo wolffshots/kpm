@@ -40,6 +40,7 @@ func (a *App) cmdUpdate(args []string) int {
 	reboot := fs.Bool("reboot", false, "reboot after staging (installs on boot)")
 	notify := fs.Bool("notify", false, "emit NickelDBus toasts")
 	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
 	if err := fs.Parse(flags); err != nil {
 		return exitError
 	}
@@ -47,13 +48,25 @@ func (a *App) cmdUpdate(args []string) int {
 
 	pkgs, err := a.selectPackages(pos, *all)
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm update:", err)
 		return exitError
 	}
 	if len(pkgs) == 0 {
+		// Human line before the emit: BEGIN_JSON must be the final stdout
+		// line on every branch (JSON-OUTPUT.md §1).
 		fmt.Println("no packages selected")
+		if jsonMode {
+			emitMutation(nil, nil, false, false, "")
+		}
 		return exitOK
 	}
+
+	// failures accumulates per-package resolve/download errors for the §2.3
+	// mutation payload; changed is filled from the staged targets at the end.
+	var failures []jsonFailure
 
 	// Cache hygiene: drop stale .part files and week-old cached tgzs (F3).
 	a.cleanCache()
@@ -68,6 +81,9 @@ func (a *App) cmdUpdate(args []string) int {
 			a.paths.WriteStatus(msg)
 			a.paths.Log("UPDATE", "aborted: no network")
 			n.toast(msg)
+			if jsonMode {
+				jsonError("no network — check Wi-Fi and retry")
+			}
 			fmt.Fprintln(os.Stderr, msg)
 			return exitError
 		}
@@ -80,6 +96,7 @@ func (a *App) cmdUpdate(args []string) int {
 		r, skip, err := a.resolveAndDownload(p)
 		if err != nil {
 			failed++
+			failures = append(failures, jsonFailure{ID: p.ID, Error: err.Error()})
 			fmt.Fprintf(os.Stderr, "kpm update: %s: %v\n", p.ID, err)
 			a.paths.Log("ERROR", fmt.Sprintf("%s  %v", p.ID, err))
 			continue
@@ -92,6 +109,9 @@ func (a *App) cmdUpdate(args []string) int {
 
 	if len(targets) == 0 {
 		if err := a.state.Save(); err != nil {
+			if jsonMode {
+				jsonError("state: " + err.Error())
+			}
 			fmt.Fprintln(os.Stderr, "kpm update: state:", err)
 			a.paths.Log("ERROR", "state: "+err.Error())
 			return exitError
@@ -112,21 +132,36 @@ func (a *App) cmdUpdate(args []string) int {
 		}
 		if failed > 0 {
 			// Everything selected failed and nothing was staged (F2).
+			if jsonMode {
+				emitMutation(nil, failures, false, false, "update failed")
+			}
 			n.toast("kpm: update failed — see status")
 			return exitError
 		}
+		// Human line before the emit: BEGIN_JSON must be the final stdout
+		// line on every branch (JSON-OUTPUT.md §1).
 		fmt.Println("nothing to stage")
+		if jsonMode {
+			// Nothing to stage: already up to date / already staged (§2.3).
+			emitMutation(nil, failures, false, false, "")
+		}
 		return exitOK
 	}
 
 	// 3. Merge into a not-yet-live part file (hashed before it goes live).
 	if err := a.guardExistingTgz(); err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm update:", err)
 		a.paths.WriteStatus("kpm: refusing to stage — " + err.Error())
 		return exitError
 	}
 	part, sum, size, dups, err := a.mergeStaged(targets)
 	if err != nil {
+		if jsonMode {
+			jsonError("stage: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
 		a.paths.Log("ERROR", "stage: "+err.Error())
 		return exitError
@@ -153,6 +188,9 @@ func (a *App) cmdUpdate(args []string) int {
 	a.state.StagedCommitted = false
 	if err := a.state.Save(); err != nil {
 		os.Remove(part)
+		if jsonMode {
+			jsonError("state: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm update: state:", err)
 		a.paths.Log("ERROR", "state: "+err.Error())
 		return exitError
@@ -160,6 +198,9 @@ func (a *App) cmdUpdate(args []string) int {
 
 	// 5. Commit: move the tgz into the live boot slot, then mark committed.
 	if err := a.commitStaged(part); err != nil {
+		if jsonMode {
+			jsonError("stage: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
 		a.paths.Log("ERROR", "stage: "+err.Error())
 		a.paths.WriteStatus("kpm: staging failed — reboot to install any pending update, or 'kpm unstage'")
@@ -176,6 +217,21 @@ func (a *App) cmdUpdate(args []string) int {
 	fmt.Print(status)
 	n.toast(fmt.Sprintf("kpm: %d package(s) staged", len(targets)))
 
+	// §2.3: at least one package staged; every staged update installs on reboot.
+	// Emitted before the reboot decision so the payload is on stdout even when
+	// --reboot would otherwise not return.
+	if jsonMode {
+		changed := make([]string, 0, len(targets))
+		for _, r := range targets {
+			changed = append(changed, r.pkg.ID)
+		}
+		errMsg := ""
+		if failed > 0 {
+			errMsg = "some packages failed"
+		}
+		emitMutation(changed, failures, true, true, errMsg)
+	}
+
 	// 5. Reboot. At least one package staged, so a reboot is worthwhile even if
 	// some others failed (F2).
 	if *reboot {
@@ -191,7 +247,12 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitOK
 	}
 
-	fmt.Printf("%d package(s) staged — reboot to install\n", len(targets))
+	if !jsonMode {
+		// In JSON mode this line would trail the §2.3 payload emitted above;
+		// BEGIN_JSON must stay the final stdout line (JSON-OUTPUT.md §1). The
+		// staged summary already went out via fmt.Print(status) pre-marker.
+		fmt.Printf("%d package(s) staged — reboot to install\n", len(targets))
+	}
 	if failed > 0 {
 		return exitPartial // mixed: some staged, some failed (F2)
 	}
@@ -556,23 +617,35 @@ func (a *App) cleanCache() {
 // its hash proves kpm staged it, then clears every staged_* field (B4). A
 // foreign tgz is refused (never removed).
 func (a *App) cmdUnstage(args []string) int {
-	_, pos := splitArgs(args, nil)
-	if len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm unstage")
+	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
+	if len(flags) > 0 || len(pos) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: kpm unstage [--json]")
 		return exitError
 	}
 	if _, err := os.Stat(a.paths.StagedTgz()); err != nil {
+		if jsonMode {
+			jsonLine(jsonUnstage{Unstaged: false, IDs: []string{}})
+			return exitOK
+		}
 		fmt.Println("no staged update to cancel")
 		return exitOK
 	}
 	if !a.stagedTgzIsOurs() {
+		if jsonMode {
+			jsonError(fmt.Sprintf("%s was not staged by kpm; refusing to remove it", a.paths.StagedTgz()))
+		}
 		fmt.Fprintf(os.Stderr, "kpm unstage: %s was not staged by kpm; refusing to remove it\n", a.paths.StagedTgz())
 		return exitError
 	}
 	if err := os.Remove(a.paths.StagedTgz()); err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm unstage:", err)
 		return exitError
 	}
+	unstaged := []string{}
 	for id, ps := range a.state.Packages {
 		if ps.StagedVersion == "" {
 			continue
@@ -581,15 +654,24 @@ func (a *App) cmdUnstage(args []string) int {
 		ps.StagedVersion = ""
 		ps.StagedAt = ""
 		ps.StagedManifest = nil
+		unstaged = append(unstaged, id)
 	}
+	sort.Strings(unstaged)
 	a.state.StagedSHA256 = ""
 	a.state.StagedSize = 0
 	a.state.StagedCommitted = false
 	if err := a.state.Save(); err != nil {
+		if jsonMode {
+			jsonError("state: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm unstage: state:", err)
 		return exitError
 	}
 	a.paths.WriteStatus("kpm: staging cancelled")
+	if jsonMode {
+		jsonLine(jsonUnstage{Unstaged: true, IDs: unstaged})
+		return exitOK
+	}
 	fmt.Println("staging cancelled")
 	return exitOK
 }

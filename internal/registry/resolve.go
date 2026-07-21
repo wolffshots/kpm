@@ -75,6 +75,11 @@ func Merge(mans []NamedManifest) (map[string]*Entry, []Conflict) {
 // semantically for the marker method and round-trip consistently.
 func HashDef(def *PackageDef) (string, error) {
 	norm := *def
+	// Description/Homepage are presentational registry-only metadata (JSON-
+	// OUTPUT.md §3): exclude them from the canonical hash so changing them never
+	// looks like a def update or local drift to install/sync.
+	norm.Description = ""
+	norm.Homepage = ""
 	u := norm.Uninstall
 	u.ExtraPaths = nilIfEmpty(u.ExtraPaths)
 	u.PurgePaths = nilIfEmpty(u.PurgePaths)

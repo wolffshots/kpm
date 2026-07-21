@@ -92,7 +92,7 @@ func TestValidID(t *testing.T) {
 			t.Errorf("%q should be valid", id)
 		}
 	}
-	for _, id := range []string{"Kobo", "with_underscore", "with space", ""} {
+	for _, id := range []string{"Kobo", "with_underscore", "with space", "", "-leading-dash", "--json"} {
 		if ValidID(id) {
 			t.Errorf("%q should be invalid", id)
 		}

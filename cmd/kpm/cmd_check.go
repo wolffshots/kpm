@@ -16,21 +16,29 @@ func (a *App) cmdCheck(args []string) int {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	notify := fs.Bool("notify", false, "emit NickelDBus toasts")
 	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
 	if err := fs.Parse(flags); err != nil {
 		return exitError
 	}
 	if len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm check [--notify]")
+		fmt.Fprintln(os.Stderr, "usage: kpm check [--notify] [--json]")
 		return exitError
 	}
 	n := notifier{on: *notify}
 
 	pkgs, err := a.loadPackages()
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm check:", err)
 		return exitError
 	}
 	if len(pkgs) == 0 {
+		if jsonMode {
+			jsonLine(jsonCheckPayload{Packages: []jsonCheckPkg{}, Checked: time.Now().UTC().Format(state.TimeFormat)})
+			return exitOK
+		}
 		fmt.Println("no packages registered")
 		return exitOK
 	}
@@ -44,6 +52,9 @@ func (a *App) cmdCheck(args []string) int {
 			a.paths.WriteStatus(msg)
 			a.paths.Log("CHECK", "aborted: no network")
 			n.toast(msg)
+			if jsonMode {
+				jsonError("no network — check Wi-Fi and retry")
+			}
 			fmt.Fprintln(os.Stderr, msg)
 			return exitError
 		}
@@ -53,6 +64,7 @@ func (a *App) cmdCheck(args []string) int {
 	failed := 0
 	okCount := 0
 	available := 0
+	checkPkgs := []jsonCheckPkg{} // §2.2: per-package latest, in pkgs order
 	for _, p := range pkgs {
 		// Unconfigured (e.g. self-update with empty source): skip silently (F7).
 		if !a.configured(p) {
@@ -61,8 +73,13 @@ func (a *App) cmdCheck(args []string) int {
 		tag, err := a.resolveTag(p)
 		ps := a.state.Get(p.ID)
 		ps.LastChecked = now
+		pin := a.effectivePin(p)
 		if err != nil {
 			failed++
+			checkPkgs = append(checkPkgs, jsonCheckPkg{
+				ID: p.ID, Installed: ptr(ps.InstalledVersion), Latest: nil,
+				Update: false, Pinned: ptr(pin), Error: ptr(err.Error()),
+			})
 			fmt.Fprintf(os.Stderr, "kpm check: %s: %v\n", p.ID, err)
 			a.paths.Log("CHECK", fmt.Sprintf("%s  error: %v", p.ID, err))
 			continue
@@ -70,17 +87,25 @@ func (a *App) cmdCheck(args []string) int {
 		okCount++
 		// Only record latest_seen for unpinned packages so a pin can't poison
 		// the meaning of "latest" (F1).
-		if a.effectivePin(p) == "" {
+		if pin == "" {
 			ps.LatestSeen = tag
 		}
-		if _, avail := updateTarget(p, ps, a.effectivePin(p)); avail {
+		_, avail := updateTarget(p, ps, pin)
+		if avail {
 			available++
 			a.paths.Log("CHECK", fmt.Sprintf("%s  %s -> %s available",
 				p.ID, dash(ps.InstalledVersion), tag))
 		}
+		checkPkgs = append(checkPkgs, jsonCheckPkg{
+			ID: p.ID, Installed: ptr(ps.InstalledVersion), Latest: ptr(tag),
+			Update: avail, Pinned: ptr(pin), Error: nil,
+		})
 	}
 	a.state.LastCheck = now
 	if err := a.state.Save(); err != nil {
+		if jsonMode {
+			jsonError("state: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm check: state:", err)
 		return exitError
 	}
@@ -91,6 +116,10 @@ func (a *App) cmdCheck(args []string) int {
 	}
 	a.paths.WriteStatus(status)
 	fmt.Print(status)
+
+	if jsonMode {
+		jsonLine(jsonCheckPayload{Packages: checkPkgs, Checked: now})
+	}
 
 	// Toast reflects failures too (F8).
 	switch {

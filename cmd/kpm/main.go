@@ -87,11 +87,17 @@ func run(argv []string) int {
 	// version/help are fast/offline and need no state, dirs, or lock.
 	switch cmd {
 	case "version":
-		if len(args) > 0 {
-			fmt.Fprintln(os.Stderr, "usage: kpm version")
+		flags, pos := splitArgs(args, nil)
+		flags, jsonMode := takeJSON(flags)
+		if len(flags) > 0 || len(pos) > 0 {
+			fmt.Fprintln(os.Stderr, "usage: kpm version [--json]")
 			return exitError
 		}
 		fmt.Println(version.Version)
+		if jsonMode {
+			// commit is null: no VCS revision is compiled in (JSON-OUTPUT.md §2.4).
+			jsonLine(jsonVersion{Version: version.Version, Commit: nil})
+		}
 		return exitOK
 	case "-h", "--help", "help":
 		fmt.Print(usage)

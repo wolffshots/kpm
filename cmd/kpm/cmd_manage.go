@@ -36,14 +36,38 @@ func (a *App) cmdRemove(args []string) int {
 }
 
 func (a *App) cmdList(args []string) int {
-	if _, pos := splitArgs(args, nil); len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm list")
+	flags, pos := splitArgs(args, nil)
+	_, jsonMode := takeJSON(flags)
+	// Stray flags stay silently ignored as before 0.6.0 (only positionals
+	// error) so the human-mode CLI surface is unchanged.
+	if len(pos) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: kpm list [--json]")
 		return exitError
 	}
 	pkgs, err := a.loadPackages()
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm list:", err)
 		return exitError
+	}
+	if jsonMode {
+		// list --json: installed packages from state (JSON-OUTPUT.md §2.4).
+		out := make([]jsonListPkg, 0, len(pkgs))
+		for _, p := range pkgs {
+			ps := a.state.Get(p.ID)
+			out = append(out, jsonListPkg{
+				ID:        p.ID,
+				Name:      p.Name,
+				Installed: ptr(ps.InstalledVersion),
+				Pinned:    ptr(a.effectivePin(p)),
+				Source:    a.effectiveSource(p),
+				Registry:  ptr(p.Registry),
+			})
+		}
+		jsonLine(jsonListPayload{Packages: out})
+		return exitOK
 	}
 	if len(pkgs) == 0 {
 		fmt.Println("no packages registered")
@@ -167,9 +191,16 @@ func (a *App) cmdLog(args []string) int {
 }
 
 func (a *App) cmdStatus(args []string) int {
-	if _, pos := splitArgs(args, nil); len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm status")
+	flags, pos := splitArgs(args, nil)
+	_, jsonMode := takeJSON(flags)
+	// Stray flags stay silently ignored as before 0.6.0 (only positionals
+	// error) so the human-mode CLI surface is unchanged.
+	if len(pos) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: kpm status [--json]")
 		return exitError
+	}
+	if jsonMode {
+		return a.statusJSON()
 	}
 	s := a.paths.ReadStatus()
 	if s == "" {

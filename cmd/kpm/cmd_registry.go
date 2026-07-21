@@ -170,14 +170,37 @@ func (a *App) cmdRegistryRemove(args []string) int {
 }
 
 func (a *App) cmdRegistryList(args []string) int {
-	if flags, pos := splitArgs(args, nil); len(flags) > 0 || len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm registry list")
+	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
+	if len(flags) > 0 || len(pos) > 0 {
+		fmt.Fprintln(os.Stderr, "usage: kpm registry list [--json]")
 		return exitError
 	}
 	cfg, err := a.loadRegistryConfig()
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm registry list:", err)
 		return exitError
+	}
+	if jsonMode {
+		// registry list --json (JSON-OUTPUT.md §2.4).
+		out := make([]jsonRegListEntry, 0, len(cfg.Registries))
+		for _, r := range cfg.Registries {
+			fetched := ""
+			if a.state.Registries != nil {
+				if rs := a.state.Registries[r.Name]; rs != nil {
+					fetched = rs.LastFetched
+				}
+			}
+			out = append(out, jsonRegListEntry{
+				Name: r.Name, URL: r.URL, Ref: r.Ref, Path: r.Path,
+				Forge: r.Forge, Refreshed: ptr(fetched),
+			})
+		}
+		jsonLine(jsonRegListPayload{Registries: out})
+		return exitOK
 	}
 	if len(cfg.Registries) == 0 {
 		fmt.Println("no registries configured — add one with \"kpm registry add <url>\"")
@@ -206,13 +229,17 @@ func (a *App) cmdRegistryList(args []string) int {
 
 func (a *App) cmdRegistryRefresh(args []string) int {
 	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
 	if len(flags) > 0 {
 		// The name is a positional; a stray --name (or any flag) is a usage error.
-		fmt.Fprintln(os.Stderr, "usage: kpm registry refresh [<name>] (pass the name as a positional, not a flag)")
+		fmt.Fprintln(os.Stderr, "usage: kpm registry refresh [<name>] [--json] (pass the name as a positional, not a flag)")
 		return exitError
 	}
 	cfg, err := a.loadRegistryConfig()
 	if err != nil {
+		if jsonMode {
+			jsonError(err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm registry refresh:", err)
 		return exitError
 	}
@@ -225,6 +252,9 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	case 1:
 		r, ok := cfg.Find(pos[0])
 		if !ok {
+			if jsonMode {
+				jsonError(fmt.Sprintf("registry %q not configured", pos[0]))
+			}
 			fmt.Fprintf(os.Stderr, "kpm registry refresh: registry %q not configured\n", pos[0])
 			return exitError
 		}
@@ -234,6 +264,10 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 		return exitError
 	}
 	if len(targets) == 0 {
+		if jsonMode {
+			jsonLine(jsonRegRefreshPayload{Refreshed: []jsonRefreshed{}, Failed: []jsonRegFailure{}})
+			return exitOK
+		}
 		fmt.Println("no registries configured — add one with \"kpm registry add <url>\"")
 		return exitOK
 	}
@@ -243,20 +277,37 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 		if !device.WaitForNetwork(a.client.HTTP(), host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.Log("REFRESH", "aborted: no network")
+			if jsonMode {
+				jsonError("no network — check Wi-Fi and retry")
+			}
 			fmt.Fprintln(os.Stderr, msg)
 			return exitError
 		}
 	}
 
 	failed := 0
+	refreshed := []jsonRefreshed{}
+	regFailed := []jsonRegFailure{}
 	for _, r := range targets {
 		if err := a.refreshOne(r); err != nil {
 			failed++
+			regFailed = append(regFailed, jsonRegFailure{Name: r.Name, Error: err.Error()})
 			fmt.Fprintf(os.Stderr, "kpm registry refresh: %s: %v\n", r.Name, err)
 			a.paths.Log("REFRESH", fmt.Sprintf("%s  error: %v", r.Name, err))
+			continue
 		}
+		// Package count comes from the now-current cache (§2.4); a read error
+		// leaves the count at 0 rather than failing the whole refresh.
+		count := 0
+		if m, merr := a.cachedManifest(r); merr == nil {
+			count = len(m.Packages)
+		}
+		refreshed = append(refreshed, jsonRefreshed{Name: r.Name, Packages: count})
 	}
 	if err := a.state.Save(); err != nil {
+		if jsonMode {
+			jsonError("state: " + err.Error())
+		}
 		fmt.Fprintln(os.Stderr, "kpm registry refresh: state:", err)
 		return exitError
 	}
@@ -266,6 +317,10 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	mans, _ := a.cachedManifests(cfg)
 	_, conflicts := registry.Merge(mans)
 	a.reportConflicts(conflicts)
+
+	if jsonMode {
+		jsonLine(jsonRegRefreshPayload{Refreshed: refreshed, Failed: regFailed})
+	}
 
 	if failed > 0 {
 		// Exit 2 ("partial") only when at least one registry also refreshed; if
