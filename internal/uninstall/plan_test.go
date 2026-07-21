@@ -54,6 +54,101 @@ func TestComputeManifestUnionExtraMinusKeep(t *testing.T) {
 	}
 }
 
+// A recursive delete whose base is a shared root (an allowlist root or the
+// imageformats carve-out) would nuke sibling packages and firmware — Compute
+// must refuse it outright (C1). This is the primary guard against the
+// device-bricking `extra_paths = ["/usr/local/**"]` config.
+func TestComputeRefusesRecursiveSharedRoot(t *testing.T) {
+	// vAllowed shared roots must be refused with an explicit error.
+	for _, base := range []string{
+		"/usr/local/**",
+		"/mnt/onboard/.adds/**",
+		"/mnt/onboard/.kobo/**",
+		"/usr/local/Kobo/imageformats/**",
+	} {
+		_, err := Compute(nil, config.Uninstall{ExtraPaths: []string{base}}, false)
+		if err == nil {
+			t.Errorf("recursive delete of shared root %q was allowed; want refusal", base)
+		}
+	}
+	// The same via purge_paths (only reached with --purge).
+	if _, err := Compute(nil, config.Uninstall{PurgePaths: []string{"/usr/local/**"}}, true); err == nil {
+		t.Error("recursive purge of a shared root was allowed; want refusal")
+	}
+	// /opt is denied outright (a single-component path is too shallow to be a
+	// delete target), so /opt/** is safely SKIPPED rather than errored — either
+	// way it must never produce a recursive delete.
+	if plan, err := Compute(nil, config.Uninstall{ExtraPaths: []string{"/opt/**"}}, false); err == nil {
+		if len(plan.Deletes) != 0 {
+			t.Errorf("/opt/** produced deletes: %+v", plan.Deletes)
+		}
+	}
+}
+
+// A recursive delete of a specific subpath UNDER a shared root is fine.
+func TestComputeAllowsRecursiveSubpath(t *testing.T) {
+	plan, err := Compute(nil, config.Uninstall{ExtraPaths: []string{"/usr/local/pkg/**"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := deletePaths(plan)["/usr/local/pkg"]
+	if !ok || !d.Recursive {
+		t.Errorf("recursive subpath delete missing/non-recursive: %+v", plan.Deletes)
+	}
+}
+
+// Nothing under kpm's own tree may be deleted by another package's uninstall —
+// not just bin/state/log but packages.d/, config.toml, cache/ … (M4).
+func TestComputeDeniesKpmSubtree(t *testing.T) {
+	for _, p := range []string{
+		"/mnt/onboard/.adds/kpm/packages.d/other.toml",
+		"/mnt/onboard/.adds/kpm/config.toml",
+		"/mnt/onboard/.adds/kpm/cache/x",
+		"/mnt/onboard/.adds/kpm/bin/kpm",
+	} {
+		plan, err := Compute(nil, config.Uninstall{ExtraPaths: []string{p}}, false)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if _, ok := deletePaths(plan)[p]; ok {
+			t.Errorf("%s was scheduled for deletion; kpm's tree must be denied", p)
+		}
+		if r := skipReason(plan, p); r != "denylist" {
+			t.Errorf("%s skip reason = %q, want denylist", p, r)
+		}
+	}
+}
+
+// A malformed MANIFEST entry (e.g. a partly-corrupt state.json) must not make a
+// package permanently un-uninstallable: it is skipped, and valid entries still
+// plan. A malformed CONFIGURED path stays a hard error (M6).
+func TestComputeMalformedManifestSkipped(t *testing.T) {
+	plan, err := Compute([]string{"", "usr/local/pkg/lib.so"}, config.Uninstall{}, false)
+	if err != nil {
+		t.Fatalf("malformed manifest entry should skip, not error: %v", err)
+	}
+	if _, ok := deletePaths(plan)["/usr/local/pkg/lib.so"]; !ok {
+		t.Error("valid manifest entry should still be planned")
+	}
+	if _, err := Compute(nil, config.Uninstall{ExtraPaths: []string{"../escape"}}, false); err == nil {
+		t.Error("malformed configured path should be a hard error")
+	}
+}
+
+// The shared /usr/local/Kobo/imageformats firmware dir (many NickelHook mods
+// drop a .so there) must never be rmdir'd when a mod's .so is removed (M3).
+func TestComputeImageformatsNotRmdird(t *testing.T) {
+	plan, err := Compute([]string{"usr/local/Kobo/imageformats/libnm.so"}, config.Uninstall{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range plan.Rmdirs {
+		if d == "/usr/local/Kobo/imageformats" {
+			t.Error("imageformats (shared firmware dir) must not be an rmdir target")
+		}
+	}
+}
+
 func TestComputePurgeGating(t *testing.T) {
 	cfg := config.Uninstall{
 		ExtraPaths: []string{"/opt/pkg/bin"},

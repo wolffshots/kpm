@@ -45,48 +45,54 @@ func (r Result) OK() bool { return len(r.Failed) == 0 && len(r.Skipped) == 0 }
 func Execute(p device.Paths, plan Plan) Result {
 	var r Result
 
-	if plan.Marker != "" && plan.Method == config.MethodMarkerRemove {
-		// marker-remove: DELETE the shipped trigger file; its absence makes the
-		// package remove itself on the next boot (MARKER-REMOVE §2).
-		host := p.HostPath(plan.Marker)
-		if info, err := os.Lstat(host); err == nil {
-			// A directory in the marker's place is an error, mirroring the
-			// marker method's dir-in-the-way rule (MARKER-REMOVE §2).
-			if info.IsDir() {
-				r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
-			} else if err := os.Remove(host); err != nil {
+	if plan.Marker != "" {
+		if bad, ok := symlinkedParent(p, plan.Marker, plan.allowExtra); ok {
+			// Never create or delete a marker through a symlinked parent, which
+			// would resolve outside the allowlisted tree (C7/M2).
+			r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("symlinked parent %s", bad)})
+		} else if plan.Method == config.MethodMarkerRemove {
+			// marker-remove: DELETE the shipped trigger file; its absence makes the
+			// package remove itself on the next boot (MARKER-REMOVE §2).
+			host := p.HostPath(plan.Marker)
+			if info, err := os.Lstat(host); err == nil {
+				// A directory in the marker's place is an error, mirroring the
+				// marker method's dir-in-the-way rule (MARKER-REMOVE §2).
+				if info.IsDir() {
+					r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
+				} else if err := os.Remove(host); err != nil {
+					r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+				} else {
+					r.Marker = plan.Marker
+				}
+			} else if os.IsNotExist(err) {
+				// Idempotent: already absent — the package is already uninstalling
+				// or was removed manually (MARKER-REMOVE §2).
+				r.AlreadyGone = append(r.AlreadyGone, plan.Marker)
+			} else {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+			}
+		} else {
+			host := p.HostPath(plan.Marker)
+			if info, err := os.Lstat(host); err == nil {
+				// Idempotent: an existing marker is left untouched (never truncated),
+				// but a directory in its place is an error (C3).
+				if info.IsDir() {
+					r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
+				} else {
+					r.Marker = plan.Marker // already present
+				}
+			} else if !os.IsNotExist(err) {
+				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+			} else if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
 				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
 			} else {
-				r.Marker = plan.Marker
-			}
-		} else if os.IsNotExist(err) {
-			// Idempotent: already absent — the package is already uninstalling
-			// or was removed manually (MARKER-REMOVE §2).
-			r.AlreadyGone = append(r.AlreadyGone, plan.Marker)
-		} else {
-			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
-		}
-	} else if plan.Marker != "" {
-		host := p.HostPath(plan.Marker)
-		if info, err := os.Lstat(host); err == nil {
-			// Idempotent: an existing marker is left untouched (never truncated),
-			// but a directory in its place is an error (C3).
-			if info.IsDir() {
-				r.Failed = append(r.Failed, FailedPath{plan.Marker, fmt.Errorf("marker path exists as a directory")})
-			} else {
-				r.Marker = plan.Marker // already present
-			}
-		} else if !os.IsNotExist(err) {
-			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
-		} else if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
-			r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
-		} else {
-			content := fmt.Sprintf("uninstall requested by kpm %s %s\n",
-				version.Version, time.Now().UTC().Format(time.RFC3339))
-			if err := os.WriteFile(host, []byte(content), 0o644); err != nil {
-				r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
-			} else {
-				r.Marker = plan.Marker
+				content := fmt.Sprintf("uninstall requested by kpm %s %s\n",
+					version.Version, time.Now().UTC().Format(time.RFC3339))
+				if err := os.WriteFile(host, []byte(content), 0o644); err != nil {
+					r.Failed = append(r.Failed, FailedPath{plan.Marker, err})
+				} else {
+					r.Marker = plan.Marker
+				}
 			}
 		}
 	}
@@ -111,8 +117,14 @@ func Execute(p device.Paths, plan Plan) Result {
 		}
 		if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			if d.Recursive {
-				if _, err := removeTree(host, d.Path, kept, &r); err != nil {
+				survived, err := removeTree(host, d.Path, kept, plan.allowExtra, &r)
+				if err != nil {
 					r.Failed = append(r.Failed, FailedPath{d.Path, err})
+					continue
+				}
+				if survived {
+					// A descendant was preserved (keep_paths or policy), so the
+					// directory still exists — do not report it as deleted (#8).
 					continue
 				}
 			} else {
@@ -136,6 +148,12 @@ func Execute(p device.Paths, plan Plan) Result {
 
 	// Deepest-first empty-directory cleanup.
 	for _, dir := range plan.Rmdirs {
+		// Never rmdir through a symlinked parent: os.Lstat/os.Remove resolve
+		// intermediate symlinks, so this would remove a directory outside the
+		// package tree (C7/M2).
+		if _, ok := symlinkedParent(p, dir, plan.allowExtra); ok {
+			continue
+		}
 		host := p.HostPath(dir)
 		info, err := os.Lstat(host)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -153,8 +171,10 @@ func Execute(p device.Paths, plan Plan) Result {
 // it never follows a symlink out of the subtree: a symlink (even to a dir) is
 // unlinked, not descended into. A node matching keep_paths is preserved and
 // recorded (C1); returned survived=true so ancestors are not rmdir'd. dev is the
-// device path parallel to the host path root.
-func removeTree(host, dev string, kept func(string) bool, r *Result) (survived bool, err error) {
+// device path parallel to the host path root. classify is re-applied at every
+// node so a recursive delete can never escape into a denied path (kpm's own
+// files, firmware trees) even when it entered from an allowed ancestor (C1).
+func removeTree(host, dev string, kept func(string) bool, allowExtra []string, r *Result) (survived bool, err error) {
 	info, err := os.Lstat(host)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -164,6 +184,12 @@ func removeTree(host, dev string, kept func(string) bool, r *Result) (survived b
 	}
 	if kept(dev) {
 		r.Kept = append(r.Kept, dev)
+		return true, nil
+	}
+	if classify(dev, allowExtra) != vAllowed {
+		// A denied/unlisted descendant is preserved and recorded as a safety
+		// skip so it blocks clean unregistration (C1).
+		r.Skipped = append(r.Skipped, Skipped{dev, "policy"})
 		return true, nil
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
@@ -176,7 +202,7 @@ func removeTree(host, dev string, kept func(string) bool, r *Result) (survived b
 		}
 		anyKept := false
 		for _, e := range entries {
-			s, err := removeTree(filepath.Join(host, e.Name()), dev+"/"+e.Name(), kept, r)
+			s, err := removeTree(filepath.Join(host, e.Name()), dev+"/"+e.Name(), kept, allowExtra, r)
 			if err != nil {
 				return false, err
 			}

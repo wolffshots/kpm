@@ -61,6 +61,35 @@ func TestExecuteSharedDirSurvival(t *testing.T) {
 	}
 }
 
+// Defense-in-depth for the CRITICAL: even if a recursive delete of a shared
+// root reached Execute (Compute now refuses it), removeTree re-applies the path
+// policy at every node, so a denied descendant — the firmware's own libnickel.so
+// under /usr/local/Kobo — is never deleted. The Plan is built by hand to bypass
+// Compute's refusal and prove the net underneath it.
+func TestExecuteRecursiveNeverDeletesDeniedDescendant(t *testing.T) {
+	p, sysroot := sandbox(t)
+	mkfile(t, sysroot, "usr/local/Kobo/libnickel.so.1.0.0") // firmware — must survive
+	mkfile(t, sysroot, "usr/local/pkg/lib.so")              // allowed — may be removed
+
+	plan := Plan{
+		Method:  config.MethodManifest,
+		Deletes: []Delete{{Path: "/usr/local", Recursive: true}},
+	}
+	res := Execute(p, plan)
+
+	if !exists(filepath.Join(sysroot, "usr/local/Kobo/libnickel.so.1.0.0")) {
+		t.Fatal("CRITICAL: firmware libnickel.so was deleted by a recursive uninstall")
+	}
+	if exists(filepath.Join(sysroot, "usr/local/pkg/lib.so")) {
+		t.Error("allowed file under the recursive base should have been removed")
+	}
+	// A denied descendant was preserved, so the walk reports a safety skip and
+	// the removal is not clean (registration is kept).
+	if res.OK() {
+		t.Error("result should not be OK when a denied path was preserved")
+	}
+}
+
 func TestExecuteDeepestFirstCleanup(t *testing.T) {
 	p, sysroot := sandbox(t)
 	mkfile(t, sysroot, "usr/local/Foo/sub/f")

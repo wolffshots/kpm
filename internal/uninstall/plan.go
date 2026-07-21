@@ -100,9 +100,10 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 	// Ordered candidate list: manifest (manifest method only), then extras,
 	// then purge set (only with --purge).
 	type cand struct {
-		raw       string
-		recursive bool
-		purge     bool
+		raw        string
+		recursive  bool
+		purge      bool
+		configured bool // from extra_paths/purge_paths (vs a recorded manifest entry)
 	}
 	var cands []cand
 	if method == config.MethodManifest {
@@ -112,12 +113,12 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 	}
 	for _, e := range cfg.ExtraPaths {
 		base, rec := splitRecursive(e)
-		cands = append(cands, cand{raw: base, recursive: rec})
+		cands = append(cands, cand{raw: base, recursive: rec, configured: true})
 	}
 	if purge {
 		for _, e := range cfg.PurgePaths {
 			base, rec := splitRecursive(e)
-			cands = append(cands, cand{raw: base, recursive: rec, purge: true})
+			cands = append(cands, cand{raw: base, recursive: rec, purge: true, configured: true})
 		}
 	}
 
@@ -125,7 +126,15 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 	for _, c := range cands {
 		abs, err := cleanDeviceAbs(c.raw)
 		if err != nil {
-			return Plan{}, err
+			// A malformed CONFIGURED path is the def author's error: fail loudly.
+			// A malformed MANIFEST entry (e.g. a partially corrupt state.json) must
+			// not make the package permanently un-uninstallable — skip it like a
+			// denylisted entry so the rest of the removal still proceeds (M6).
+			if c.configured {
+				return Plan{}, err
+			}
+			plan.Skipped = append(plan.Skipped, Skipped{c.raw, "malformed"})
+			continue
 		}
 		if seen[abs] {
 			continue
@@ -141,6 +150,12 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 		case vNotAllowed:
 			plan.Skipped = append(plan.Skipped, Skipped{abs, "not-allowlisted"})
 		case vAllowed:
+			// A recursive delete whose base is a shared root would nuke sibling
+			// packages and (for /usr/local) firmware — refuse it outright (C1).
+			// Specific subpaths under the root are still fine.
+			if c.recursive && isAllowRoot(abs, allowExtra) {
+				return Plan{}, fmt.Errorf("refusing recursive delete of shared root %q; list specific subpaths instead", abs)
+			}
 			plan.Deletes = append(plan.Deletes, Delete{Path: abs, Recursive: c.recursive, Purge: c.purge})
 		}
 	}
@@ -227,10 +242,15 @@ func isKept(abs string, keeps []keepSpec) bool {
 	return false
 }
 
-// isAllowRoot reports whether p is exactly a built-in allowlist root or an
-// allow_paths entry (as opposed to something under one) — such roots are shared
-// and must never be rmdir'd (C4).
+// isAllowRoot reports whether p is exactly a shared deletable root: a built-in
+// allowlist root, the /usr/local/Kobo/imageformats carve-out (a firmware dir
+// many NickelHook mods drop a .so into), or an allow_paths entry — as opposed to
+// something under one. Such roots are shared and must never be rmdir'd (C4) nor
+// recursively deleted (a `/usr/local/**` would nuke sibling packages / firmware).
 func isAllowRoot(p string, allowExtra []string) bool {
+	if pathEqual(p, koboException) {
+		return true
+	}
 	for _, a := range allowPrefixes {
 		if pathEqual(p, a) {
 			return true

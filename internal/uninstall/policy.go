@@ -48,12 +48,14 @@ var onboardAllowed = []string{
 	"/mnt/onboard/.kobo",
 }
 
-// kpmSelfDenied are kpm's own paths that must never be deleted (§4). These are
-// device-absolute (Root is /mnt/onboard on device).
+// kpmDir is kpm's own tree, which must never be deleted by another package's
+// uninstall (§4): not just the binary/state/log but the whole subtree
+// (packages.d/, config.toml, cache/, lock, status) — deleting any of it would
+// unregister other packages or corrupt kpm. Self-uninstall is refused outright
+// elsewhere, so nothing under here is ever a legitimate deletion target. These
+// are device-absolute (Root is /mnt/onboard on device).
 var (
-	kpmBinDir     = "/mnt/onboard/.adds/kpm/bin"
-	kpmStateFile  = "/mnt/onboard/.adds/kpm/state.json"
-	kpmLogFile    = "/mnt/onboard/.adds/kpm/kpm.log"
+	kpmDir        = "/mnt/onboard/.adds/kpm"
 	koboDir       = "/usr/local/Kobo"
 	koboException = "/usr/local/Kobo/imageformats"
 )
@@ -148,7 +150,7 @@ func classify(abs string, allowExtra []string) verdict {
 	if under(abs, koboDir) && !under(abs, koboException) {
 		return vDenied
 	}
-	if under(abs, kpmBinDir) || pathEqual(abs, kpmStateFile) || pathEqual(abs, kpmLogFile) {
+	if under(abs, kpmDir) {
 		return vDenied
 	}
 
