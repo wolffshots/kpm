@@ -1,2 +1,9 @@
 /dist/
 /releases/
+
+# NickelKPM hook build artifacts (NICKEL-UI.md §8 — built via podman/NickelTC)
+/hook/libnkpm.so
+/hook/**/*.o
+/hook/**/*.moc
+/hook/**/*.rcc
+/hook/NickelHook/nhplugin.json

@@ -18,6 +18,7 @@ func TestWriteAndVerifyTgzMembers(t *testing.T) {
 		{memBin, 0o755, []byte("\x7fELF fake arm binary")},
 		{memToml, 0o644, []byte(selfToml)},
 		{memNm, 0o644, []byte("menu_item :main :kpm: Status\n")},
+		{memSo, 0o755, []byte("\x7fELF fake arm shared object")},
 	}
 	if err := writeTgz(out, members); err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func TestWriteAndVerifyTgzMembers(t *testing.T) {
 	}
 
 	// Independently assert exact member list, modes, and ownership.
-	want := map[string]int64{memBin: 0o755, memToml: 0o644, memNm: 0o644}
+	want := map[string]int64{memBin: 0o755, memToml: 0o644, memNm: 0o644, memSo: 0o755}
 	f, err := os.Open(out)
 	if err != nil {
 		t.Fatal(err)

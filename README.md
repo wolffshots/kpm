@@ -277,6 +277,47 @@ Because NickelMenu's `cmd_spawn` reports success on *spawn*, not on completion,
 long-running work can't report back through the menu — kpm signals completion via
 `status.txt` (always) and NickelDBus toasts (if `qndb` exists).
 
+## Graphical UI (NickelKPM)
+
+kpm 0.6.0 ships a built-in graphical package browser, **NickelKPM**
+(`libnkpm.so`) — a NickelHook Qt mod injected into Nickel. It needs **no
+NickelMenu**: it adds its own **"Package manager"** row to the **More** tab of
+the home/library bottom nav (the same list that holds Settings, on firmware
+4.23.15505 and newer). Every kpm KoboRoot.tgz installs it under
+`/usr/local/Kobo/imageformats/libnkpm.so`.
+
+Tapping the row opens a full-screen browser that lists every package from your
+registries merged with what's installed, lets you filter with the on-screen
+keyboard, and drills into a per-package view with **Install**, **Update**,
+**Uninstall**, plus registry-wide **Refresh** and **Update all**. All real work
+is done by shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
+crash-isolated view layer. Staged changes prompt a **Reboot now / Later** dialog,
+matching kpm's stage-then-reboot install model.
+
+If the `kpm` binary is missing, the browser shows a "kpm not found — install kpm
+first" message and does nothing else (it never crashes Nickel).
+
+**Removing the UI only:** create the flag file `/mnt/onboard/kpm_ui_uninstall`
+and reboot. NickelHook deletes `libnkpm.so` on the next boot; kpm itself (binary,
+config, state, packages) is untouched. (Firmware is out of scope past 4.x, same
+as NickelHardcover.)
+
+### Building the hook
+
+The hook is C++ built with the NickelTC cross-toolchain via a container. From the
+repo root:
+
+```sh
+git submodule update --init --recursive          # fetch hook/NickelHook (once)
+podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/pgaskin/nickeltc:1.0 make
+```
+
+That produces `hook/libnkpm.so`. `go run ./build` then bundles it into
+`dist/KoboRoot.tgz` (it fails with a clear message if the `.so` is absent; point
+`KPM_UI_SO` at a prebuilt library to override the path). On Windows the volume
+mount is `-v "C:/…/kpm:/work" -w /work/hook` (set `MSYS_NO_PATHCONV=1` under Git
+Bash).
+
 ## CLI reference
 
 ```

@@ -20,6 +20,10 @@ const (
 	memBin  = "./mnt/onboard/.adds/kpm/bin/kpm"
 	memToml = "./mnt/onboard/.adds/kpm/packages.d/kpm.toml"
 	memNm   = "./mnt/onboard/.adds/nm/kpm"
+	// memSo is the NickelKPM Qt hook, injected via the standard NickelHook
+	// imageformats location (NICKEL-UI.md §7). kpm 0.6.0 always ships the UI, so
+	// this member is required.
+	memSo = "./usr/local/Kobo/imageformats/libnkpm.so"
 )
 
 // selfToml is kpm's own package definition shipped in the tgz. It carries only
@@ -44,7 +48,7 @@ type tgzFile struct {
 func main() {
 	version := os.Getenv("KPM_VERSION")
 	if version == "" {
-		version = "0.5.0"
+		version = "0.6.0"
 	}
 
 	root, err := repoRoot()
@@ -76,10 +80,23 @@ func main() {
 	if err := verifyNmLabels(nmData); err != nil {
 		fatal(fmt.Errorf("res/nm-config: %w", err))
 	}
+	// The Nickel UI hook is required in 0.6.0 (NICKEL-UI.md §7): its build output
+	// is hook/libnkpm.so, overridable via KPM_UI_SO (e.g. a CI artifact path).
+	soPath := os.Getenv("KPM_UI_SO")
+	if soPath == "" {
+		soPath = filepath.Join(root, "hook", "libnkpm.so")
+	}
+	soData, err := os.ReadFile(soPath)
+	if err != nil {
+		fatal(fmt.Errorf("read UI hook %s: %w\n"+
+			"  build it first: podman run --rm -v \"$PWD\":\"$PWD\" -w \"$PWD/hook\" ghcr.io/pgaskin/nickeltc:1.0 make\n"+
+			"  or point KPM_UI_SO at a prebuilt libnkpm.so", soPath, err))
+	}
 	members := []tgzFile{
 		{memBin, 0o755, binData},
 		{memToml, 0o644, []byte(selfToml)},
 		{memNm, 0o644, nmData},
+		{memSo, 0o755, soData},
 	}
 	tgzOut := filepath.Join(distDir, "KoboRoot.tgz")
 	if err := writeTgz(tgzOut, members); err != nil {
@@ -195,6 +212,7 @@ func verifyTgz(path string) error {
 		memBin:  0o755,
 		memToml: 0o644,
 		memNm:   0o644,
+		memSo:   0o755,
 	}
 	f, err := os.Open(path)
 	if err != nil {
