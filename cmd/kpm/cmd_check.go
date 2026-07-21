@@ -72,7 +72,6 @@ func (a *App) cmdCheck(args []string) int {
 		}
 		tag, err := a.resolveTag(p)
 		ps := a.state.Get(p.ID)
-		ps.LastChecked = now
 		pin := a.effectivePin(p)
 		if err != nil {
 			failed++
@@ -85,6 +84,10 @@ func (a *App) cmdCheck(args []string) int {
 			continue
 		}
 		okCount++
+		// Record the per-package check time only on SUCCESS: update's freshness
+		// window keys on it to decide whether latest_seen may be reused, so a
+		// failed check must not mark the package freshly checked (M2).
+		ps.LastChecked = now
 		// Only record latest_seen for unpinned packages so a pin can't poison
 		// the meaning of "latest" (F1).
 		if pin == "" {
@@ -162,11 +165,17 @@ func (a *App) resolveTag(p *config.Package) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if rel.Tag == "" {
+			return "", fmt.Errorf("forge returned a release with an empty tag")
+		}
 		return rel.Tag, nil
 	}
 	rel, err := f.LatestRelease(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src))
 	if err != nil {
 		return "", err
+	}
+	if rel.Tag == "" {
+		return "", fmt.Errorf("forge returned a release with an empty tag")
 	}
 	return rel.Tag, nil
 }

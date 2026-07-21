@@ -70,6 +70,10 @@ func (a *App) cmdUpdate(args []string) int {
 
 	// Cache hygiene: drop stale .part files and week-old cached tgzs (F3).
 	a.cleanCache()
+	// A merged .kpm-part left in the boot slot dir by a power loss mid-merge is
+	// never live (commitStaged renames it into place); sweep it so it can't hold
+	// tens of MB and ENOSPC the next merge on a near-full onboard partition (#7).
+	os.Remove(a.paths.StagedTgz() + ".kpm-part")
 
 	n.toast("kpm: updating…")
 
@@ -124,6 +128,11 @@ func (a *App) cmdUpdate(args []string) int {
 		if *reboot && a.stagedTgzIsOurs() {
 			a.paths.Log("REBOOT", "installing pending staging")
 			n.toast("kpm: rebooting to install…")
+			// Emit the payload BEFORE rebooting so --json always ends on the
+			// marker, even if the reboot call itself fails (JSON-OUTPUT §1).
+			if jsonMode {
+				emitMutation(nil, failures, false, false, "")
+			}
 			if err := device.Reboot(); err != nil {
 				fmt.Fprintln(os.Stderr, "kpm update: reboot failed:", err)
 				return exitError
@@ -174,9 +183,24 @@ func (a *App) cmdUpdate(args []string) int {
 	// stays false until the move succeeds, so a crash between here and the live
 	// move never leaves installed files unrecorded or falsely promotes an
 	// uninstalled version — reconcile rolls an uncommitted staging back (B6).
+	//
+	// Snapshot the identity + per-target staged intent we're about to overwrite,
+	// so a failed commit can restore it. On a re-stage, a previously committed
+	// tgz is still live in the boot slot until the rename lands; without this,
+	// overwriting its identity/committed flag and then failing to go live would
+	// leave state describing a tgz that isn't there — reconcile would roll the
+	// still-live staging back (orphaning its files, untracked) and the guard
+	// would refuse the slot (M3).
+	type stagedSnap struct {
+		id, version, at string
+		manifest        []string
+	}
+	prevSHA, prevSize, prevCommitted := a.state.StagedSHA256, a.state.StagedSize, a.state.StagedCommitted
+	var snaps []stagedSnap
 	now := time.Now().UTC().Format(state.TimeFormat)
 	for _, r := range targets {
 		ps := a.state.Get(r.pkg.ID)
+		snaps = append(snaps, stagedSnap{r.pkg.ID, ps.StagedVersion, ps.StagedAt, ps.StagedManifest})
 		ps.StagedVersion = r.tag
 		ps.StagedAt = now
 		// Record the pending manifest separately; Manifest (installed) is only
@@ -198,6 +222,17 @@ func (a *App) cmdUpdate(args []string) int {
 
 	// 5. Commit: move the tgz into the live boot slot, then mark committed.
 	if err := a.commitStaged(part); err != nil {
+		// The new tgz never went live. Restore the pre-stage identity and the
+		// affected packages' prior staged intent so state matches whatever is
+		// actually in the boot slot — a still-live previous staging, or nothing
+		// (M3). Best-effort: on a restore-save failure the reconcile/guard
+		// recovery still applies on the next run.
+		a.state.StagedSHA256, a.state.StagedSize, a.state.StagedCommitted = prevSHA, prevSize, prevCommitted
+		for _, s := range snaps {
+			ps := a.state.Get(s.id)
+			ps.StagedVersion, ps.StagedAt, ps.StagedManifest = s.version, s.at, s.manifest
+		}
+		_ = a.state.Save()
 		if jsonMode {
 			jsonError("stage: " + err.Error())
 		}
@@ -324,6 +359,12 @@ func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	if err != nil {
 		return resolved{}, false, err
 	}
+	// A 2xx that decodes to an empty tag (a misconfigured proxy, or a non-forge
+	// endpoint on a hand-edited source) must not read as "up to date" via
+	// tagsEqual("", "") for a never-installed package — fail loudly (§11).
+	if rel.Tag == "" {
+		return resolved{}, false, fmt.Errorf("forge returned a release with an empty tag")
+	}
 
 	ps := a.state.Get(p.ID)
 	// Only record latest_seen for unpinned packages, so a pin can't poison the
@@ -392,7 +433,12 @@ func (a *App) resolveRelease(ctx context.Context, p *config.Package) (forge.Rele
 		return f.ReleaseByTag(ctx, host, owner, repo, pin)
 	}
 	ps := a.state.Get(p.ID)
-	if ps.LatestSeen != "" && fresh(a.state.LastCheck) {
+	// Trust a cached latest tag only if THIS package was itself checked within
+	// the freshness window. Keying on the global last_check let a package that
+	// failed (or was pinned during) the last check reuse a stale latest_seen and
+	// stage an old release (M2). ps.LastChecked is set only on a successful
+	// resolve (here and in cmd_check).
+	if ps.LatestSeen != "" && fresh(ps.LastChecked) {
 		return f.ReleaseByTag(ctx, host, owner, repo, ps.LatestSeen)
 	}
 	return f.LatestRelease(ctx, host, owner, repo)
@@ -438,6 +484,7 @@ func (a *App) download(id, tag string, asset forge.Asset) (string, []string, err
 		return "", nil, cerr
 	}
 	if err := os.Rename(part, final); err != nil {
+		os.Remove(part) // don't leak the full-size .part on a rename failure (#9)
 		return "", nil, err
 	}
 	// The asset may be a zip wrapping the real KoboRoot.tgz (e.g. NickelClock's
