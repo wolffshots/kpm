@@ -157,6 +157,82 @@ func TestConfigSetJSONGolden(t *testing.T) {
 	}
 }
 
+// §2.3: sync --json reuses the mutation shape. `changed` = defs re-copied,
+// `failed` = per-package errors; staged/reboot_required are always false (a def
+// re-copy stages nothing). Two cases: a registry-drifted def is re-copied, and a
+// sandbox with nothing to sync emits the empty mutation.
+
+// syncDriftManifest advertises samplemod with a config declaration the local def
+// predates — so sync re-copies it (drift → applied).
+const syncDriftManifest = `schema_version = 1
+[packages.samplemod]
+name = "Sample Mod"
+source = "codeberg.org/o/samplemod"
+forge = "forgejo"
+asset = "KoboRoot.tgz"
+
+  [[packages.samplemod.configs]]
+  name = "Settings"
+  path = "/mnt/onboard/.adds/samplemod/settings.ini"
+  format = "ini"
+  reload = "reboot"
+`
+
+func TestSyncJSONApplied(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.8.1")
+	seedRegistry(t, a, "main", syncDriftManifest)
+	// A registry-managed local def with no config yet and no recorded baseline
+	// hash → a clean apply (decision-tree case 2).
+	if err := config.Save(a.paths.PackageFile("samplemod"), &config.Package{
+		Name: "Sample Mod", Source: "codeberg.org/o/samplemod", Forge: "forgejo",
+		Asset: "KoboRoot.tgz", Registry: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("samplemod").InstalledVersion = "v1.0.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { a.cmdSync([]string{"--json"}) })
+	got := lastJSON(t, out)
+	if want := `{"changed":["samplemod"],"failed":[],"staged":false,"reboot_required":false}`; got != want {
+		t.Errorf("sync --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// syncCleanManifest advertises samplemod identically to its local def, so sync
+// finds nothing to do (up to date → not reported in `changed`).
+const syncCleanManifest = `schema_version = 1
+[packages.samplemod]
+name = "Sample Mod"
+source = "codeberg.org/o/samplemod"
+forge = "forgejo"
+asset = "KoboRoot.tgz"
+`
+
+func TestSyncJSONNothingToDo(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.8.1")
+	seedRegistry(t, a, "main", syncCleanManifest)
+	// Local def already equals the registry def → up to date, no re-copy.
+	if err := config.Save(a.paths.PackageFile("samplemod"), &config.Package{
+		Name: "Sample Mod", Source: "codeberg.org/o/samplemod", Forge: "forgejo",
+		Asset: "KoboRoot.tgz", Registry: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("samplemod").InstalledVersion = "v1.0.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { a.cmdSync([]string{"--json"}) })
+	got := lastJSON(t, out)
+	if want := `{"changed":[],"failed":[],"staged":false,"reboot_required":false}`; got != want {
+		t.Errorf("sync --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
 // §2.4: version --json (commit null — no VCS revision compiled in).
 func TestVersionJSONGolden(t *testing.T) {
 	newTestApp(t) // sets KPM_ROOT

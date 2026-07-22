@@ -27,10 +27,12 @@ package main
 //     payload is IGNORED by the hook (browsedialog.cc onRefreshDone voids it) —
 //     contract is only: exit 0/2 + a parseable trailing BEGIN_JSON line.
 //   install <id> --yes --json / update <id> --json / update --all --json /
-//   uninstall <id> --yes --json  (the four mutations):
+//   uninstall <id> --yes --json / sync --json  (the mutations):
 //     top-level: staged(BOOL), reboot_required(BOOL)  [+changed[],failed[]]
 //     NOTE the shape split the hook relies on: `staged` is an OBJECT in the
 //     search payload but a BOOL in every mutation payload; both are exercised.
+//     sync always reports staged=false,reboot_required=false (a def re-copy
+//     stages nothing) — see block 11.
 //
 // The hook maps a mutating command that hits the single-instance lock — whose
 // stderr contains "another kpm instance" — to its "kpm is busy" dialog
@@ -633,6 +635,48 @@ func TestUIContractConfigSet(t *testing.T) {
 	}
 	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "nickelclock" {
 		t.Errorf("changed = %v, want [nickelclock]", m["changed"])
+	}
+}
+
+// ---- 11. sync --json (KpmProcess::sync — mutating, no network) ----------
+//
+// CONTRACT: the browse footer's Sync button re-copies registry defs into
+// packages.d (propagating new [[configs]]/uninstall declarations to existing
+// installs). It reuses the §2.3 mutation shape; `staged`/`reboot_required` are
+// always false (a def re-copy stages nothing and needs no reboot). The hook
+// (browsedialog.cc onActionDone) reads exactly those two bools plus changed[]/
+// failed[], so a rename/type flip here would break the Sync flow.
+
+func TestUIContractSync(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.8.1")
+	seedRegistry(t, a, "main", syncDriftManifest)
+	// A registry-managed local def that predates the registry's config addition.
+	if err := config.Save(a.paths.PackageFile("samplemod"), &config.Package{
+		Name: "Sample Mod", Source: "codeberg.org/o/samplemod", Forge: config.ForgeForgejo,
+		Asset: "KoboRoot.tgz", Registry: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("samplemod").InstalledVersion = "v1.0.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdSync([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("sync --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	// sync stages nothing and never needs a reboot.
+	if wantBool(t, m, "staged") != false || wantBool(t, m, "reboot_required") != false {
+		t.Errorf("sync must report staged=false,reboot_required=false, got %v/%v",
+			m["staged"], m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "samplemod" {
+		t.Errorf("sync changed = %v, want [samplemod]", m["changed"])
 	}
 }
 
