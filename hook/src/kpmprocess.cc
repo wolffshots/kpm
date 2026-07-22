@@ -36,6 +36,11 @@ KpmProcess *KpmProcess::install(const QString &id) { return start({"install", id
 KpmProcess *KpmProcess::update(const QString &id) { return start({"update", id, "--json"}, true, true); }
 KpmProcess *KpmProcess::updateAll() { return start({"update", "--all", "--json"}, true, true); }
 KpmProcess *KpmProcess::uninstall(const QString &id) { return start({"uninstall", id, "--yes", "--json"}, false, true); }
+// sync re-copies registry defs into packages.d, propagating new [[configs]]/
+// uninstall declarations to existing installs. It is mutating (takes kpm's
+// single-instance lock) but needs no network — it reads only the local registry
+// cache and rewrites packages.d (JSON-OUTPUT.md §2.3), so needsNetwork is false.
+KpmProcess *KpmProcess::sync() { return start({"sync", "--json"}, false, true); }
 
 // Config editing (CONFIG.md §3.2). list/show are offline reads; set is mutating
 // (takes kpm's single-instance lock) but needs no network — a config edit is a

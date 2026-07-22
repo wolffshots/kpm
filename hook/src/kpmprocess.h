@@ -30,6 +30,7 @@ public:
   static KpmProcess *update(const QString &id);    // kpm update <id> --json (network, mutating; update has no --yes)
   static KpmProcess *updateAll();                  // kpm update --all --json (network, mutating)
   static KpmProcess *uninstall(const QString &id); // kpm uninstall <id> --yes --json (mutating)
+  static KpmProcess *sync();                        // kpm sync --json (mutating; no network — reads the registry cache)
 
   // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
   // are read-only offline reads (no lock, no network); set is mutating (rides the

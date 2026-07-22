@@ -56,8 +56,8 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
 
   QHBoxLayout *footer = new QHBoxLayout();
   footer->setContentsMargins(14, 6, 14, 6);
-  footer->setSpacing(16); // gap between the two action buttons
-  // Right-align: the leading stretch pushes both buttons to the trailing edge.
+  footer->setSpacing(16); // gap between the action buttons
+  // Right-align: the leading stretch pushes the buttons to the trailing edge.
   footer->addStretch(1);
   // primaryButton: Nickel's dark-filled button style (light text on dark), the
   // same property NickelHardcover's journal buttons use.
@@ -65,12 +65,19 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   refreshButton->setProperty("primaryButton", true);
   refreshButton->setText("Refresh");
   footer->addWidget(refreshButton);
+  // Sync: re-copy registry defs into packages.d so an existing install picks up
+  // new [[configs]]/uninstall declarations without SSH (JSON-OUTPUT.md §2.3).
+  syncButton = construct_N3ButtonLabel(this);
+  syncButton->setProperty("primaryButton", true);
+  syncButton->setText("Sync");
+  footer->addWidget(syncButton);
   updateAllButton = construct_N3ButtonLabel(this);
   updateAllButton->setProperty("primaryButton", true);
   updateAllButton->setText("Update all");
   footer->addWidget(updateAllButton);
   layout->addLayout(footer);
   QObject::connect(refreshButton, SIGNAL(tapped(bool)), this, SLOT(refresh()));
+  QObject::connect(syncButton, SIGNAL(tapped(bool)), this, SLOT(sync()));
   QObject::connect(updateAllButton, SIGNAL(tapped(bool)), this, SLOT(updateAll()));
 
   buildKeyboardFrame(lineEdit, "Search");
@@ -202,6 +209,23 @@ void BrowseDialog::refresh() {
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
 }
 
+void BrowseDialog::sync() {
+  if (kpmMissing) {
+    return;
+  }
+  KpmProcess *p = KpmProcess::sync();
+  if (!p) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
+    return;
+  }
+  setActionsEnabled(false);
+  // Reuse onActionDone: sync's payload reports staged=false/reboot_required=false,
+  // so it just re-runs search to repaint rows (has_config may have changed) with
+  // no reboot prompt — the same chain-back-into-search Update-all uses.
+  QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onActionDone);
+  QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
+}
+
 void BrowseDialog::updateAll() {
   if (kpmMissing) {
     return;
@@ -286,6 +310,9 @@ void BrowseDialog::setActionsEnabled(bool enabled) {
   }
   if (refreshButton) {
     refreshButton->setEnabled(enabled);
+  }
+  if (syncButton) {
+    syncButton->setEnabled(enabled);
   }
   if (updateAllButton) {
     updateAllButton->setEnabled(enabled);

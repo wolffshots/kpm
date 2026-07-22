@@ -2,7 +2,7 @@
 
 // NICKEL-UI.md §5 — BrowseDialog: the full-screen package list opened from the
 // More-menu entry row. Search box + client-side filter, paged PackageRows,
-// staged/stale banners, and Refresh / Update-all actions. Built on the Dialog
+// staged/stale banners, and Refresh / Sync / Update-all actions. Built on the Dialog
 // base (with NH's ReadingView auto-close removed).
 
 #include <QJsonArray>
@@ -33,6 +33,7 @@ public Q_SLOTS:
   void onProcessFailure(QString reason);
 
   void refresh();
+  void sync();
   void updateAll();
   void rebootConfirm();
   void openDetail(QString id);
@@ -50,6 +51,7 @@ private:
   PagedStack *pages = nullptr;
   TouchLineEdit *lineEdit = nullptr;
   N3ButtonLabel *refreshButton = nullptr;
+  N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;
 
   QJsonArray allPackages;
