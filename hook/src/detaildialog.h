@@ -30,6 +30,7 @@ public Q_SLOTS:
   void install();
   void update();
   void uninstall();
+  void openConfig(); // Settings → ConfigDialog (CONFIG.md §4)
 
   void onResponse(int exitCode, QJsonObject payload);
   void onInstallRegistered(int exitCode, QJsonObject payload);

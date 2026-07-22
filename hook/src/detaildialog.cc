@@ -7,6 +7,7 @@
 
 #include <NickelHook.h>
 
+#include "configdialog.h"
 #include "detaildialog.h"
 #include "files.h"
 #include "nkpm.h"
@@ -41,6 +42,9 @@ DetailDialog::DetailDialog(QJsonObject package)
   bool isKpm = id == QStringLiteral("kpm"); // §6: never offer to uninstall kpm itself
   // min_kpm gate (§2.1): don't offer an Install/Update kpm itself would refuse.
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
+  // Settings opens the config editor; shown only when installed and the package
+  // declares an editable config (has_config, from the search payload — CONFIG.md §4).
+  bool hasConfig = !installed.isEmpty() && pkg.value("has_config").toBool();
 
   QVBoxLayout *layout = new QVBoxLayout(this);
   // 30px padding, plus the home-screen chrome insets on top/bottom (base Dialog).
@@ -113,6 +117,13 @@ DetailDialog::DetailDialog(QJsonObject package)
     }
   }
 
+  // Settings is independent of the install/update branch above: editing an
+  // already-installed mod's config needs no min_kpm gate and no update state, so
+  // it is offered whenever the package is installed and declares a config (§4.1).
+  if (hasConfig) {
+    addButton("Settings", SLOT(openConfig()));
+  }
+
   layout->addStretch(1);
   layout->addLayout(actions);
 }
@@ -166,6 +177,17 @@ void DetailDialog::onInstallRegistered(int exitCode, QJsonObject payload) {
 }
 
 void DetailDialog::update() { run(KpmProcess::update(id)); }
+
+// openConfig pushes the ConfigDialog over this detail view (CONFIG.md §4). Its
+// back arrow returns here; its close X chains up through closeRequested so the
+// whole package manager dismisses (browse closes underneath — see BrowseDialog).
+void DetailDialog::openConfig() {
+  ConfigDialog *c = ConfigDialog::show(id, pkg.value("name").toString().isEmpty() ? id : pkg.value("name").toString());
+  QObject::connect(c, &ConfigDialog::closeRequested, this, [this] {
+    closeRequested();      // propagate up: browse closes too
+    dialog->deleteLater(); // and this detail view
+  });
+}
 
 void DetailDialog::uninstall() {
   QString name = pkg.value("name").toString();

@@ -31,6 +31,19 @@ public:
   static KpmProcess *updateAll();                  // kpm update --all --json (network, mutating)
   static KpmProcess *uninstall(const QString &id); // kpm uninstall <id> --yes --json (mutating)
 
+  // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
+  // are read-only offline reads (no lock, no network); set is mutating (rides the
+  // single-instance lock) but never touches the network — configs are local files.
+  static KpmProcess *configList(const QString &id);                  // kpm config list <id> --json
+  static KpmProcess *configShow(const QString &id, const QString &selector); // kpm config show <id> <sel> --json
+  // set variants map 1:1 to the CLI's ini (--key/--section) and text
+  // (--line/--append/--delete) edit forms (cmd_config.go applyEdit).
+  static KpmProcess *configSetKey(const QString &id, const QString &selector, const QString &section,
+                                  const QString &key, const QString &value);
+  static KpmProcess *configSetLine(const QString &id, const QString &selector, int line, const QString &value);
+  static KpmProcess *configAppendLine(const QString &id, const QString &selector, const QString &value);
+  static KpmProcess *configDeleteLine(const QString &id, const QString &selector, int line);
+
   // busy reports whether a mutating kpm is currently running (§4).
   static bool busy();
 

@@ -37,6 +37,32 @@ KpmProcess *KpmProcess::update(const QString &id) { return start({"update", id, 
 KpmProcess *KpmProcess::updateAll() { return start({"update", "--all", "--json"}, true, true); }
 KpmProcess *KpmProcess::uninstall(const QString &id) { return start({"uninstall", id, "--yes", "--json"}, false, true); }
 
+// Config editing (CONFIG.md §3.2). list/show are offline reads; set is mutating
+// (takes kpm's single-instance lock) but needs no network — a config edit is a
+// local file write, so needsNetwork is false for every variant.
+KpmProcess *KpmProcess::configList(const QString &id) { return start({"config", "list", id, "--json"}, false, false); }
+KpmProcess *KpmProcess::configShow(const QString &id, const QString &selector) {
+  return start({"config", "show", id, selector, "--json"}, false, false);
+}
+KpmProcess *KpmProcess::configSetKey(const QString &id, const QString &selector, const QString &section,
+                                     const QString &key, const QString &value) {
+  QStringList args{"config", "set", id, selector, "--key", key};
+  if (!section.isEmpty()) {
+    args << "--section" << section;
+  }
+  args << "--value" << value << "--json";
+  return start(args, false, true);
+}
+KpmProcess *KpmProcess::configSetLine(const QString &id, const QString &selector, int line, const QString &value) {
+  return start({"config", "set", id, selector, "--line", QString::number(line), "--value", value, "--json"}, false, true);
+}
+KpmProcess *KpmProcess::configAppendLine(const QString &id, const QString &selector, const QString &value) {
+  return start({"config", "set", id, selector, "--append", "--value", value, "--json"}, false, true);
+}
+KpmProcess *KpmProcess::configDeleteLine(const QString &id, const QString &selector, int line) {
+  return start({"config", "set", id, selector, "--line", QString::number(line), "--delete", "--json"}, false, true);
+}
+
 bool KpmProcess::busy() { return s_mutatingInFlight; }
 
 KpmProcess *KpmProcess::start(QStringList arguments, bool needsNetwork, bool mutating) {
