@@ -388,6 +388,8 @@ kpm config show <id> <file> entries of one config file — ini keys or text line
                             (<file> = declared name, case-insensitive, or 1-based index)
 kpm config set <id> <file> (--key K [--section S] | --line N [--append|--delete]) --value V
                             edit one entry; surgical write, comments/layout preserved
+kpm config init <id> <file> [--force]  create a missing config file from the example
+                            template its registry entry ships (refuses to overwrite)
 kpm log [-n N]              print the last N log lines (default 12)
 kpm status                  print status.txt + any pending staging; fast/offline
 kpm ui                      signal the NickelKPM hook to open the graphical browser
@@ -401,7 +403,7 @@ If every selected `update` package fails and nothing stages, the exit is `1`.
 
 **Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
 `update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`,
-`config list`, `config show`, `config set`, and
+`config list`, `config show`, `config set`, `config init`, and
 `version` accept `--json`. Human/progress output streams as usual; the final
 stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
 object. This is what the graphical UI consumes; it also serves scripts.
