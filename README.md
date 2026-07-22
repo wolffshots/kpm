@@ -294,7 +294,11 @@ Launch it from the **NickelMenu** "kpm - Package manager" entry (see "NickelMenu
 usage"). It opens a full-screen browser that lists every package from your
 registries merged with what's installed, lets you filter with the on-screen
 keyboard, and drills into a per-package view with **Install**, **Update**,
-**Uninstall**, plus registry-wide **Refresh** and **Update all**. On the package
+**Uninstall**, plus registry-wide **Refresh**, **Sync**, and **Update all**.
+**Sync** re-copies registry defs into `packages.d` so an existing install picks
+up new config declarations and uninstall-recipe fixes without SSH — the offline
+UI equivalent of `kpm sync` (distinct from **Refresh**, which only refetches the
+registry list and re-checks versions). On the package
 list the title-bar **✕** closes the UI; in a package's detail view the **←**
 returns to the list and **✕** closes the whole UI. All real work is done by
 shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
@@ -396,7 +400,7 @@ without `--yes`).
 If every selected `update` package fails and nothing stages, the exit is `1`.
 
 **Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
-`update`, `uninstall`, `unstage`, `registry list`, `registry refresh`,
+`update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`,
 `config list`, `config show`, `config set`, and
 `version` accept `--json`. Human/progress output streams as usual; the final
 stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
