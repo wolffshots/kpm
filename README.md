@@ -257,6 +257,12 @@ Key behaviors:
   def (or kpm's own placeholder), writing the registry def while preserving your
   local pin and installed state — how kpm's own def gets a real source once a
   registry carries it.
+- **Firmware note.** If a registry def declares `tested_fw` (the newest firmware
+  it was confirmed working on) and your device is running a newer firmware, the
+  `kpm install` review prints an advisory note (`last confirmed on firmware …;
+  your device runs … — it may not work`). It is advisory only — it never blocks
+  the install or changes the exit code, the comparison is major.minor (a build
+  bump alone never warns), and an unknown firmware stays silent.
 
 Registries are configured in `/mnt/onboard/.adds/kpm/config.toml`
 (`[[registries]]` entries), managed by the CLI and hand-editable; unknown keys
@@ -370,6 +376,10 @@ kpm list                    offline table: id, installed, staged, latest, pin
 kpm check [--notify]        query forges for all packages; update state + status.txt
 kpm update [<id>...] [--all] [--reboot] [--notify]
                             download, verify, merge and stage updates; reboot to install
+                            (after a reboot promotes a staged install, kpm existence-checks
+                            the package's manifest and logs a WARN naming any files that
+                            never landed; the missing state shows in search/status --json
+                            and self-clears once the files reappear)
 kpm unstage                 cancel a pending staging (remove the kpm-staged tgz, clear staged state)
 kpm pin <id> <tag>          pin to an exact tag (downgrade allowed)
 kpm unpin <id>              track latest again
@@ -380,6 +390,8 @@ kpm registry list           name, url, ref, cache age, package count
 kpm registry refresh [<name>]  refetch registry.toml (all by default; the only registry
                             network call besides registry add's one-time forge probe)
 kpm search [<term>]         list/filter packages across cached registries
+kpm doctor [<id>]           diagnose whether installed Nickel plugins actually loaded
+                            (read-only; no lock, no network — see below)
 kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
                             copy a package def from a registry into packages.d
 kpm sync [<id>...] [--overwrite]  re-copy registry defs for registry-managed packages
@@ -403,10 +415,21 @@ If every selected `update` package fails and nothing stages, the exit is `1`.
 
 **Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
 `update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`,
-`config list`, `config show`, `config set`, `config init`, and
+`config list`, `config show`, `config set`, `config init`, `doctor`, and
 `version` accept `--json`. Human/progress output streams as usual; the final
 stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
 object. This is what the graphical UI consumes; it also serves scripts.
+
+`doctor` answers a question `status` cannot: an "installed / up to date" package
+may still do nothing. It checks each installed NickelHook plugin for a failsafe
+quarantine sibling, a fresh NickelHook crash dump-log, and whether the plugin is
+actually mapped into the running Nickel, reporting `loaded` / `not-loaded` /
+`crashed` / `load-failed` / `unknown`. This is how kpm can now explain cases like
+NickelNote installing cleanly on firmware 4.45 yet never rendering. It reads only
+files and `/proc` — no lock, no network — and a bad verdict is never a command
+failure (exit stays 0). A `loaded` verdict proves the plugin mapped in, not that
+the mod works; a hook that silently no-ops leaves no trace, so `tools/symcheck` is
+the static pre-install complement. See DOCTOR.md.
 
 `update` merges all pending packages into one staged `KoboRoot.tgz` (kpm's own
 entries are merged last so nothing can clobber the new binary). Re-running
@@ -419,8 +442,8 @@ manual install is never clobbered — and `kpm unstage` cancels a pending stagin
 Only one mutating kpm command runs at a time: it takes a lock at
 `.adds/kpm/lock`, and a second mutating command fails with "another kpm instance
 is running" (a lock older than 10 minutes is assumed stale and broken).
-Read-only commands (`list`/`status`/`log`/`version`/`search`/`registry list`/
-`config list`/`config show`)
+Read-only commands (`list`/`status`/`log`/`version`/`search`/`doctor`/
+`registry list`/`config list`/`config show`)
 don't take the lock and never write state.
 
 `KPM_ROOT` overrides the `/mnt/onboard` root (used by tests and for dev runs off
