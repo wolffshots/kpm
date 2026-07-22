@@ -2,6 +2,7 @@
 // per §0; simplified to a text-only, tappable row (no cover art / buttons).
 
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QVBoxLayout>
 
 #include "../nkpm.h"
@@ -10,6 +11,15 @@
 #include "packagerow.h"
 
 QString PackageRow::badgeText(const QJsonObject &json) {
+  // §A (post-install manifest verification): a non-empty missing_files array is
+  // the TOP-priority badge — the package promoted to installed but one or more
+  // of its manifest members never landed (an rcS failure or foreign tgz). It
+  // outranks staged/installed/update: those describe intent, this describes a
+  // broken install. missing_files is null/absent when the package verified clean
+  // (search --json, server-computed), so toArray() yields empty and this is skipped.
+  if (!json.value("missing_files").toArray().isEmpty()) {
+    return QStringLiteral("files missing");
+  }
   // §5 state table. installed is JSON null (→ empty string) when not installed;
   // latest/update are merged in from `kpm check --json` (absent until a check).
   if (json.value("staged").toBool()) {

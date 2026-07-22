@@ -114,6 +114,20 @@ void BrowseDialog::loadSearch(bool thenCheck) {
 void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
   (void)exitCode;
   allPackages = payload.value("packages").toArray();
+  // device_fw is a top-level search field (D), but PackageRow and DetailDialog
+  // only ever receive a single package object. Fold the device firmware into each
+  // one — mirroring how mergeCheck folds in per-package latest/update — so the
+  // detail page's firmware-compat line can pair it with the package's tested_fw.
+  QJsonValue deviceFw = payload.value("device_fw");
+  if (!allPackages.isEmpty()) {
+    QJsonArray withFw;
+    for (const QJsonValue &v : allPackages) {
+      QJsonObject o = v.toObject();
+      o.insert("device_fw", deviceFw);
+      withFw.append(o);
+    }
+    allPackages = withFw;
+  }
   stagedSummary = payload.value("staged").toObject();
   registries = payload.value("registries").toArray();
   dataReady = true;

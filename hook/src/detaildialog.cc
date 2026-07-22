@@ -1,6 +1,7 @@
 // NICKEL-UI.md §6 — DetailDialog + action flow.
 
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QLabel>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -11,6 +12,7 @@
 #include "detaildialog.h"
 #include "files.h"
 #include "nkpm.h"
+#include "widgets/elidedlabel.h"
 #include "widgets/label.h"
 
 DetailDialog *DetailDialog::show(QJsonObject package) { return new DetailDialog(package); }
@@ -76,6 +78,41 @@ DetailDialog::DetailDialog(QJsonObject package)
   addInfo("Pinned", pkg.value("pinned").toString());
   if (!installed.isEmpty() && !uninstallable && !isKpm) {
     addInfo("Uninstall", "not available for this package");
+  }
+
+  // §A (post-install manifest verification): name the absent manifest members on
+  // the detail page too, elided (paths run deep and the list can be long).
+  // missing_files is null/absent when the package verified clean, so an empty
+  // array skips this. device_fw/tested_fw values are registry/device-sourced;
+  // Label and ElidedLabel both render as plain text (no rich-text interpretation).
+  QJsonArray missing = pkg.value("missing_files").toArray();
+  if (!missing.isEmpty()) {
+    QString firstMissing = missing.first().toString();
+    QString missingLine = "Missing files: " + firstMissing;
+    if (missing.size() > 1) {
+      missingLine += QStringLiteral("…"); // more members absent than shown
+    }
+    layout->addWidget(new ElidedLabel(Label::Small, missingLine));
+  }
+
+  // §D (firmware-compat): fw_untested is server-computed and true only when both
+  // the def's tested_fw and the device firmware are known and the device is newer
+  // by major.minor. The copy says "untested", never "broken" — advisory only.
+  if (pkg.value("fw_untested").toBool()) {
+    Label *fwWarn = new Label(Label::Small, "Untested on your firmware");
+    fwWarn->setStyleSheet(fwWarn->styleSheet() + "\nLabel { font-weight: bold; }");
+    layout->addWidget(fwWarn);
+    QString testedFw = pkg.value("tested_fw").toString();
+    QString deviceFw = pkg.value("device_fw").toString(); // folded in by BrowseDialog::onSearch
+    QString fwDetail;
+    if (!testedFw.isEmpty() && !deviceFw.isEmpty()) {
+      fwDetail = "Last confirmed on " + testedFw + " · you run " + deviceFw;
+    } else if (!deviceFw.isEmpty()) {
+      fwDetail = "Your device runs " + deviceFw;
+    }
+    if (!fwDetail.isEmpty()) {
+      layout->addWidget(new Label(Label::Small, fwDetail));
+    }
   }
 
   layout->addSpacing(16);
