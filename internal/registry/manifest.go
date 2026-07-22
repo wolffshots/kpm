@@ -23,6 +23,11 @@ const SchemaVersion = 1
 // only: they are never copied into a local packages.d def and are deliberately
 // excluded from HashDef, so adding/changing them never registers as a def
 // update or local drift (the sync machinery ignores them).
+//
+// TestedFw is the newest firmware the curator has positively confirmed this
+// release working on. Advisory only — it never gates install/update. Like
+// Description/Homepage it is registry-only: excluded from HashDef and never
+// copied into packages.d, so a curator edit is never sync drift (REGISTRY.md §2).
 type PackageDef struct {
 	Name        string             `toml:"name"`
 	Source      string             `toml:"source"`
@@ -31,6 +36,7 @@ type PackageDef struct {
 	MinKpm      string             `toml:"min_kpm"`
 	Description string             `toml:"description,omitempty"` // JSON-OUTPUT.md §3
 	Homepage    string             `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
+	TestedFw    string             `toml:"tested_fw,omitempty"`   // REGISTRY.md §2
 	Uninstall   config.Uninstall   `toml:"uninstall"`
 	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
 }

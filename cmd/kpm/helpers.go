@@ -8,6 +8,7 @@ import (
 	"kpm/internal/device"
 	"kpm/internal/forge"
 	"kpm/internal/state"
+	"kpm/internal/uninstall"
 )
 
 // selfID is kpm's own package id.
@@ -115,6 +116,33 @@ func (a *App) persistDef(id string, pkg *config.Package, ps *state.PackageState)
 	pkg.Source = "" // keep kpm.toml sourceless, matching the shipped def
 	pkg.Forge = ""
 	pkg.Pin = "" // kpm's pin also lives in state.json (§10)
+}
+
+// verifyManifest checks that each manifest member exists on disk after an
+// install promotion, returning the members that are absent (A). It lives at the
+// cmd layer (not internal/state, whose tests do no filesystem access) and reuses
+// the uninstall path plumbing: each member is cleaned to an absolute device path
+// and mapped through HostPath, then Lstat'd.
+//
+// The check is deliberately weak: existence-only, never a checksum (mods rewrite
+// their own files), and Lstat not Stat (a member can legitimately be a relative
+// symlink). Manifest entries can't distinguish a directory from a file (the
+// normalizer strips the trailing slash), so existence is the only honest
+// assertion. An empty or nil manifest passes (nil result) — hand-added packages
+// and kpm itself carry none. A member that fails to clean (malformed state) is
+// skipped, not reported: that is a manifest-data problem, not a missing file.
+func verifyManifest(paths device.Paths, members []string) []string {
+	var missing []string
+	for _, m := range members {
+		abs, err := uninstall.CleanDeviceAbs("/" + m)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Lstat(paths.HostPath(abs)); err != nil {
+			missing = append(missing, m)
+		}
+	}
+	return missing
 }
 
 // notifier reports progress via NickelDBus toast when --notify is set and qndb

@@ -76,10 +76,12 @@ func Merge(mans []NamedManifest) (map[string]*Entry, []Conflict) {
 func HashDef(def *PackageDef) (string, error) {
 	norm := *def
 	// Description/Homepage are presentational registry-only metadata (JSON-
-	// OUTPUT.md §3): exclude them from the canonical hash so changing them never
-	// looks like a def update or local drift to install/sync.
+	// OUTPUT.md §3) and TestedFw is advisory firmware metadata (REGISTRY.md §2):
+	// exclude all three from the canonical hash so changing them never looks like
+	// a def update or local drift to install/sync.
 	norm.Description = ""
 	norm.Homepage = ""
+	norm.TestedFw = ""
 	u := norm.Uninstall
 	u.ExtraPaths = nilIfEmpty(u.ExtraPaths)
 	u.PurgePaths = nilIfEmpty(u.PurgePaths)
@@ -221,6 +223,39 @@ func compareVersions(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// FirmwareUntested reports whether a device running deviceFw is newer — by
+// major.minor ONLY — than the firmware a package was last confirmed working on
+// (testedFw): the advisory "untested on your firmware" signal (D). The third
+// version segment is a per-release build counter and is deliberately ignored;
+// comparing it would flip every package to "untested" on any firmware bump.
+// Non-numeric segments count as 0 (reusing versionParts, §9.8). A missing
+// deviceFw or missing testedFw never warns — firmware compatibility is advisory
+// and silence is the safe default.
+func FirmwareUntested(deviceFw, testedFw string) bool {
+	if strings.TrimSpace(deviceFw) == "" || strings.TrimSpace(testedFw) == "" {
+		return false
+	}
+	dMaj, dMin := majorMinor(deviceFw)
+	tMaj, tMin := majorMinor(testedFw)
+	if dMaj != tMaj {
+		return dMaj > tMaj
+	}
+	return dMin > tMin
+}
+
+// majorMinor returns the first two dotted-numeric segments of v (missing
+// segments = 0), the granularity FirmwareUntested compares at.
+func majorMinor(v string) (major, minor int) {
+	p := versionParts(v)
+	if len(p) > 0 {
+		major = p[0]
+	}
+	if len(p) > 1 {
+		minor = p[1]
+	}
+	return major, minor
 }
 
 func versionParts(v string) []int {

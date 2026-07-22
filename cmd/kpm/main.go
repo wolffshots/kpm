@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"kpm/internal/device"
@@ -446,11 +447,20 @@ func (a *App) migrateSelfSource() error {
 // filesystem hiccup can never falsely promote. An uncommitted staging that
 // vanished (a crash before the tgz went live) is rolled back, never promoted.
 func (a *App) reconcile() error {
+	// Self-clearing pass (A): re-verify ONLY packages currently flagged with
+	// missing files — never a blanket sweep, whose false-positive hazard (mods
+	// that legitimately move or delete their own files later) the design rejects.
+	// A package whose files have reappeared clears here on the next mutating run.
+	changed := a.reverifyMissing()
+
 	pending, err := a.stagedTgzPending()
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 	if pending {
+		if changed {
+			return a.state.Save()
+		}
 		return nil // reboot hasn't happened yet
 	}
 	if !a.state.StagedCommitted {
@@ -458,6 +468,9 @@ func (a *App) reconcile() error {
 		// (interrupted stage). Nothing was installed: discard the intent.
 		if a.stateHasStaged() {
 			a.state.RollbackStaged()
+			changed = true
+		}
+		if changed {
 			if serr := a.state.Save(); serr != nil {
 				return fmt.Errorf("reconcile: save state: %w", serr)
 			}
@@ -471,13 +484,67 @@ func (a *App) reconcile() error {
 		a.state.RollbackStaged()
 		return a.state.Save()
 	}
-	if serr := a.state.Save(); serr != nil {
+	// Post-install manifest verification (A): the staged->installed flip inferred
+	// "installed" purely from the tgz vanishing, so an rcS failure or foreign tgz
+	// could promote without the files landing. Existence-check each promoted
+	// package's manifest, stamp VerifiedAt, and record any missing members. Never
+	// refuse the promotion (the tgz IS consumed) and never change the exit code.
+	now := time.Now().UTC().Format(state.TimeFormat)
+	var warnings []string
+	for _, pr := range promos {
+		ps := a.state.Get(pr.ID)
+		ps.VerifiedAt = now
+		ps.MissingFiles = verifyManifest(a.paths, ps.Manifest)
+		if len(ps.MissingFiles) > 0 {
+			warnings = append(warnings, fmt.Sprintf("%s  missing: %s", pr.ID, strings.Join(ps.MissingFiles, ", ")))
+		}
+	}
+	if serr := a.state.Save(); serr != nil { // save before logging (B5)
 		return fmt.Errorf("reconcile: save state: %w", serr)
 	}
 	for _, pr := range promos {
 		a.paths.Log("INSTALLED", fmt.Sprintf("%s  %s", pr.ID, pr.Version))
 	}
+	for _, w := range warnings {
+		a.paths.Log("WARN", "files missing after install: "+w)
+	}
 	return nil
+}
+
+// reverifyMissing re-runs manifest verification for every package that currently
+// carries missing files, updating its state when the set changes (files
+// reappeared, or more went missing) and stamping VerifiedAt. It reports whether
+// any package's state changed so the caller can save. It never logs (self-clear
+// is not a WARN) and never touches clean packages, keeping the common reconcile
+// path allocation-free (A).
+func (a *App) reverifyMissing() bool {
+	changed := false
+	now := time.Now().UTC().Format(state.TimeFormat)
+	for _, ps := range a.state.Packages {
+		if len(ps.MissingFiles) == 0 {
+			continue
+		}
+		missing := verifyManifest(a.paths, ps.Manifest)
+		if !equalStrings(missing, ps.MissingFiles) {
+			ps.MissingFiles = missing
+			ps.VerifiedAt = now
+			changed = true
+		}
+	}
+	return changed
+}
+
+// equalStrings reports whether two string slices are element-wise equal.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // stagedTgzPending reports whether kpm's staged tgz is still awaiting the boot

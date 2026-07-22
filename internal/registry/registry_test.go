@@ -211,6 +211,58 @@ func TestHashDefStableAndPinAgnostic(t *testing.T) {
 	}
 }
 
+// D: the major.minor firmware comparator. Warn iff the device is newer than the
+// tested firmware by major or minor; the third (build) segment is ignored, and
+// any unknown firmware never warns.
+func TestFirmwareUntested(t *testing.T) {
+	cases := []struct {
+		name               string
+		deviceFw, testedFw string
+		want               bool
+	}{
+		{"equal", "4.45.23697", "4.45.23697", false},
+		{"same minor, newer build", "4.45.23697", "4.45.10000", false}, // build counter ignored
+		{"same minor, older build", "4.45.10000", "4.45.23697", false},
+		{"newer minor warns", "4.45.23697", "4.38.23429", true},
+		{"newer major warns", "5.0.1", "4.45.23697", true},
+		{"older device no warn", "4.38.23429", "4.45.23697", false},
+		{"older minor no warn", "4.44.99999", "4.45.1", false},
+		{"missing device fw", "", "4.45.23697", false},
+		{"missing tested fw", "4.45.23697", "", false},
+		{"both missing", "", "", false},
+		{"garbage device", "garbage", "4.45.23697", false}, // parses to 0.0 -> not newer
+		{"garbage tested", "4.45.23697", "garbage", true},  // tested 0.0 -> device newer
+		{"partial tested (major only)", "4.45.1", "4", true},
+	}
+	for _, c := range cases {
+		if got := FirmwareUntested(c.deviceFw, c.testedFw); got != c.want {
+			t.Errorf("%s: FirmwareUntested(%q, %q) = %v, want %v", c.name, c.deviceFw, c.testedFw, got, c.want)
+		}
+	}
+}
+
+// D: tested_fw is advisory registry-only metadata, excluded from HashDef like
+// description/homepage — two defs differing only in tested_fw hash identically,
+// so a curator edit never registers as a def update or local drift.
+func TestHashDefExcludesTestedFw(t *testing.T) {
+	base := PackageDef{Name: "X", Source: "h/o/r", Forge: "forgejo", Asset: "KoboRoot.tgz"}
+	a := base
+	a.TestedFw = "4.45.23697"
+	b := base
+	b.TestedFw = "4.38.23429"
+	ha, err := HashDef(&a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hb, err := HashDef(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ha != hb {
+		t.Errorf("tested_fw must be excluded from HashDef: %q != %q", ha, hb)
+	}
+}
+
 // CONFIG.md §2: a well-formed [[configs]] block parses and projects through
 // ToPackage/DefFromPackage, and a bad format or unsafe path drops the whole def.
 func TestParseManifestConfigs(t *testing.T) {

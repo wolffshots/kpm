@@ -340,6 +340,62 @@ func TestInstallConfirmAndWrite(t *testing.T) {
 	}
 }
 
+// D: the install confirm renders an advisory firmware note only when the device
+// is newer than the def's tested_fw by major.minor. printInstallDef is pure, so
+// presence/absence is asserted directly; the exit code is untouched (the note is
+// only a printed line, never control flow).
+func TestPrintInstallDefFirmwareNote(t *testing.T) {
+	pkg := &config.Package{Name: "X", Source: "h/o/r", Forge: "github", Asset: "KoboRoot.tgz"}
+
+	var b strings.Builder
+	printInstallDef(&b, "x", "main", pkg, "", "4.45.23697", "4.38.23429")
+	got := b.String()
+	if !strings.Contains(got, "it may not work") ||
+		!strings.Contains(got, "4.38.23429") || !strings.Contains(got, "4.45.23697") {
+		t.Errorf("device newer than tested should render the firmware note, got:\n%s", got)
+	}
+
+	// Equal, older-device, and unknown firmwares must all stay silent.
+	for _, c := range []struct{ dev, tested string }{
+		{"4.45.23697", "4.45.23697"}, // equal
+		{"4.45.99999", "4.45.10000"}, // same minor, newer build only
+		{"4.44.1", "4.45.23697"},     // older device
+		{"", "4.45.23697"},           // unknown device firmware
+		{"4.45.23697", ""},           // def carries no tested_fw
+	} {
+		var bb strings.Builder
+		printInstallDef(&bb, "x", "main", pkg, "", c.dev, c.tested)
+		if strings.Contains(bb.String(), "it may not work") {
+			t.Errorf("dev=%q tested=%q should emit no note, got:\n%s", c.dev, c.tested, bb.String())
+		}
+	}
+}
+
+// D: tested_fw is registry-only advisory metadata — installing a package must
+// not project it into the packages.d snapshot (ToPackage drops it, like
+// description/homepage), so a curator's firmware edit is never local sync drift.
+func TestInstallDoesNotProjectTestedFw(t *testing.T) {
+	a := newTestApp(t)
+	seedRegistry(t, a, "main", `schema_version = 1
+[packages.nickelmenu]
+name = "NickelMenu"
+source = "github.com/pgaskin/NickelMenu"
+forge = "github"
+asset = "KoboRoot.tgz"
+tested_fw = "4.45.23697"
+`)
+	if code := a.cmdInstall([]string{"nickelmenu", "--yes"}); code != exitOK {
+		t.Fatalf("install --yes exit %d", code)
+	}
+	b, err := os.ReadFile(a.paths.PackageFile("nickelmenu"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "tested_fw") {
+		t.Errorf("packages.d def must not carry tested_fw:\n%s", b)
+	}
+}
+
 // M1: re-installing a registry package whose local def is unchanged is an
 // idempotent SUCCESS (exit 0), so the UI's install->update chain can't dead-end
 // after a failed update. A drifted local def still routes to sync (exit 1).

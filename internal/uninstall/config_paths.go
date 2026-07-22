@@ -14,6 +14,15 @@ import (
 	"kpm/internal/device"
 )
 
+// CleanDeviceAbs normalizes a raw (tar-style or absolute) device path into a
+// cleaned absolute device path, rejecting ".." traversal, WITHOUT applying the
+// deletable-allowlist policy. Post-install manifest verification (A) uses it to
+// map each manifest member to a host path for an existence check: members land
+// anywhere the tarball placed them (firmware-adjacent imageformats, /opt, …), so
+// classify would wrongly reject legitimate members — only the traversal guard
+// applies here.
+func CleanDeviceAbs(raw string) (string, error) { return cleanDeviceAbs(raw) }
+
 // ConfigPath validates a declared config path against the uninstall path policy
 // and returns the cleaned absolute device path. It is called both when a def is
 // parsed/synced and immediately before every read/write (defense in depth — the

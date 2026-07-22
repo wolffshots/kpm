@@ -14,13 +14,17 @@ package main
 //
 //   search  --json  (KpmProcess::search, browse call; read-only, no lock):
 //     top-level: packages[] (array), staged{} (OBJECT: .count int),
-//                registries[] (array; each .refreshed = string|null)
+//                registries[] (array; each .refreshed = string|null),
+//                device_fw(str|null) — the device firmware, reference for
+//                fw_untested (D)
 //     packages[i]: id(str), name(str), description(str|null), source(str),
 //                registry(str|null), installed(str|null), pinned(str|null),
 //                staged(BOOL), uninstallable(bool), min_kpm(str|null),
-//                min_kpm_ok(bool).  latest/update are DELIBERATELY ABSENT here
-//                (registry defs carry no versions) — the hook merges them in
-//                from check (browsedialog.cc mergeCheck).
+//                min_kpm_ok(bool), tested_fw(str|null), fw_untested(BOOL) (D),
+//                missing_files(array|null) — absent members after post-install
+//                verification, null when clean (A).  latest/update are
+//                DELIBERATELY ABSENT here (registry defs carry no versions) —
+//                the hook merges them in from check (browsedialog.cc mergeCheck).
 //   check   --json  (KpmProcess::check; takes the lock):
 //     packages[i]: id(str), latest(str|null), update(BOOL)  [+installed,pinned,error]
 //   registry refresh --json (KpmProcess::registryRefresh):
@@ -120,6 +124,19 @@ func wantArray(t *testing.T, m map[string]any, key string) []any {
 	return a
 }
 
+// wantArrayOrNull asserts an array-or-null field (missing_files — null/absent
+// when the package verified clean, a JSON array naming absent members otherwise).
+func wantArrayOrNull(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	v := present(t, m, key)
+	if v == nil {
+		return
+	}
+	if _, ok := v.([]any); !ok {
+		t.Fatalf("field %q must be array or null, got %T (%v)", key, v, v)
+	}
+}
+
 func wantObject(t *testing.T, m map[string]any, key string) map[string]any {
 	t.Helper()
 	v := present(t, m, key)
@@ -163,7 +180,10 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantBool(t, pkg, "uninstallable")
 	wantStrOrNull(t, pkg, "min_kpm")
 	wantBool(t, pkg, "min_kpm_ok")
-	wantBool(t, pkg, "has_config") // drives the DetailDialog Settings button (CONFIG.md §4)
+	wantBool(t, pkg, "has_config")           // drives the DetailDialog Settings button (CONFIG.md §4)
+	wantStrOrNull(t, pkg, "tested_fw")       // advisory firmware-compat metadata (D)
+	wantBool(t, pkg, "fw_untested")          // server-computed "untested on your firmware" (D)
+	wantArrayOrNull(t, pkg, "missing_files") // post-install verification state (A)
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")
 }
@@ -271,9 +291,11 @@ func TestUIContractSearch(t *testing.T) {
 	}
 	m := decodeJSON(t, lastJSON(t, out))
 
-	// top-level: staged is an OBJECT (with .count), registries carry .refreshed.
+	// top-level: staged is an OBJECT (with .count), registries carry .refreshed,
+	// device_fw is the device firmware string-or-null (D).
 	staged := wantObject(t, m, "staged")
 	wantNumber(t, staged, "count")
+	wantStrOrNull(t, m, "device_fw")
 	regs := wantArray(t, m, "registries")
 	if len(regs) != 1 {
 		t.Fatalf("registries len = %d, want 1", len(regs))

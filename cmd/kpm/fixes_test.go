@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,78 @@ func TestReconcileRollsBackUncommitted(t *testing.T) {
 	}
 	if a.state.Get("nh").StagedVersion != "" {
 		t.Errorf("uncommitted staged fields should be rolled back: %+v", a.state.Get("nh"))
+	}
+}
+
+// A: verifyManifest existence-checks each manifest member against the sysroot,
+// returning those absent. An empty manifest passes (nil); a bare directory
+// member counts as present (existence only, never file-vs-dir).
+func TestVerifyManifest(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	mkfile(t, sysroot, "usr/local/pkg/lib.so")
+	mkfile(t, sysroot, "mnt/onboard/.adds/pkg/data")
+	if err := os.MkdirAll(filepath.Join(sysroot, "usr/local/pkg/sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := verifyManifest(a.paths, nil); got != nil {
+		t.Errorf("nil manifest must pass, got %v", got)
+	}
+	present := []string{"usr/local/pkg/lib.so", "usr/local/pkg/sub", "mnt/onboard/.adds/pkg/data"}
+	if got := verifyManifest(a.paths, present); got != nil {
+		t.Errorf("all members present (incl. a dir), want nil, got %v", got)
+	}
+	got := verifyManifest(a.paths, []string{"usr/local/pkg/lib.so", "usr/local/pkg/gone.so"})
+	if len(got) != 1 || got[0] != "usr/local/pkg/gone.so" {
+		t.Errorf("only the absent member should be reported, got %v", got)
+	}
+}
+
+// A: post-install manifest verification. A promoted package whose manifest
+// member never landed (an rcS failure or foreign tgz that still promoted)
+// records MissingFiles + a WARN naming the file, then self-clears on a later
+// mutating reconcile once the file appears. Promotion is never refused; the
+// reconcile keeps returning nil (no exit-code change).
+func TestReconcileVerifiesManifestAndSelfClears(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	mkfile(t, sysroot, "usr/local/pkg/present.so") // one member landed
+	ps := a.state.Get("nh")
+	ps.StagedVersion = "v1"
+	ps.StagedManifest = []string{"usr/local/pkg/present.so", "usr/local/pkg/missing.so"}
+	a.state.StagedSHA256 = "hash"
+	a.state.StagedSize = 10
+	a.state.StagedCommitted = true
+	// The tgz is gone (consumed by the boot installer) -> promote.
+	if err := a.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	ps = a.state.Get("nh")
+	if ps.InstalledVersion != "v1" {
+		t.Fatalf("package should have promoted, installed = %q", ps.InstalledVersion)
+	}
+	if len(ps.MissingFiles) != 1 || ps.MissingFiles[0] != "usr/local/pkg/missing.so" {
+		t.Errorf("MissingFiles = %v, want [usr/local/pkg/missing.so]", ps.MissingFiles)
+	}
+	if ps.VerifiedAt == "" {
+		t.Error("VerifiedAt should be stamped by verification")
+	}
+	warned := false
+	for _, l := range a.paths.TailLog(50) {
+		if strings.Contains(l, "files missing after install") && strings.Contains(l, "missing.so") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Error("a WARN naming the missing file should be logged")
+	}
+
+	// The file appears; a later mutating reconcile self-clears MissingFiles.
+	mkfile(t, sysroot, "usr/local/pkg/missing.so")
+	if err := a.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.state.Get("nh").MissingFiles; len(got) != 0 {
+		t.Errorf("MissingFiles should self-clear once the file appears, got %v", got)
 	}
 }
 

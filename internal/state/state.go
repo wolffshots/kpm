@@ -41,6 +41,14 @@ type PackageState struct {
 	// into this package's local TOML by install/sync (excluding pin/registry).
 	// It lets sync tell "up to date" from local drift (REGISTRY.md §9.7).
 	SyncedDefSHA256 string `json:"synced_def_sha256,omitempty"`
+	// VerifiedAt/MissingFiles record post-install manifest verification (A):
+	// after a staged->installed promotion kpm Lstats each manifest member and
+	// stamps VerifiedAt; MissingFiles lists any that were absent (an rcS failure
+	// or foreign tgz that promoted without landing the files). MissingFiles is
+	// re-checked on later mutating reconciles and self-clears when the files
+	// reappear. Both omitempty — additive; old state.json is unaffected.
+	VerifiedAt   string   `json:"verified_at,omitempty"`
+	MissingFiles []string `json:"missing_files,omitempty"`
 }
 
 // RegistryState records the cache freshness of one configured registry

@@ -101,6 +101,37 @@ func (p Paths) NmConfig() string { return filepath.Join(p.Root, ".adds", "nm", "
 // StagedTgz is the boot-time install slot rcS consumes.
 func (p Paths) StagedTgz() string { return filepath.Join(p.Root, ".kobo", "KoboRoot.tgz") }
 
+// VersionFile is the firmware descriptor Nickel writes at .kobo/version: one
+// comma-separated line whose third field is the firmware version (confirmed
+// against calibre + KOReader readers). kpm reads it advisorily for the
+// tested_fw compatibility note (D).
+func (p Paths) VersionFile() string { return filepath.Join(p.Root, ".kobo", "version") }
+
+// Firmware returns the device firmware version parsed from VersionFile() and
+// whether it was read. The file is one comma-separated line; the firmware is the
+// 3rd field (index 2), trimmed. Any failure — missing file, short/empty line,
+// blank field — yields ("", false). It never errors: firmware detection is
+// advisory and its absence must silence the note, never break a command (D).
+func (p Paths) Firmware() (string, bool) {
+	b, err := os.ReadFile(p.VersionFile())
+	if err != nil {
+		return "", false
+	}
+	line := string(b)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Split(line, ",")
+	if len(fields) < 3 {
+		return "", false
+	}
+	fw := strings.TrimSpace(fields[2])
+	if fw == "" {
+		return "", false
+	}
+	return fw, true
+}
+
 // EnsureDirs creates the directories kpm writes into.
 func (p Paths) EnsureDirs() error {
 	for _, d := range []string{p.PackagesDir(), p.CacheDir(), filepath.Dir(p.Bin())} {

@@ -137,8 +137,11 @@ func (a *App) cmdInstall(args []string) int {
 
 	pkg := entry.Def.ToPackage(id, entry.Registry, pinVal)
 
-	// Confirm pause: print the def and exit 3 unless --yes (§9.6).
-	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange)
+	// Confirm pause: print the def and exit 3 unless --yes (§9.6). The firmware
+	// note (D) reads the device firmware and the registry def's tested_fw — both
+	// advisory, so a missing/unreadable value simply omits the line.
+	deviceFw, _ := a.paths.Firmware()
+	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange, deviceFw, entry.Def.TestedFw)
 	if !*yes {
 		// Human line before the emit: BEGIN_JSON must be the final stdout
 		// line on every branch (JSON-OUTPUT.md §1).
@@ -217,8 +220,10 @@ func missingDefFields(d *registry.PackageDef) []string {
 // review the source, asset, min_kpm and full uninstall recipe (incl. hooks that
 // run as root) before it is committed (§6/§9.6). A non-empty provenanceChange is
 // disclosed as "provenance: <old> -> <new>" for an adopt that switches registry
-// (C5).
-func printInstallDef(w io.Writer, id, regName string, p *config.Package, provenanceChange string) {
+// (C5). When both the device firmware and the def's tested_fw are known and the
+// device is newer by major.minor, an advisory firmware note is appended — never
+// blocking, never changing the exit code (D).
+func printInstallDef(w io.Writer, id, regName string, p *config.Package, provenanceChange, deviceFw, testedFw string) {
 	fmt.Fprintf(w, "install %s from registry %s:\n", id, regName)
 	if provenanceChange != "" {
 		fmt.Fprintf(w, "  provenance: %s\n", provenanceChange)
@@ -251,6 +256,9 @@ func printInstallDef(w io.Writer, id, regName string, p *config.Package, provena
 		if u.RunAfter != "" {
 			fmt.Fprintf(w, "    run_after %s\n", u.RunAfter)
 		}
+	}
+	if registry.FirmwareUntested(deviceFw, testedFw) {
+		fmt.Fprintf(w, "  note     last confirmed on firmware %s; your device runs %s — it may not work\n", testedFw, deviceFw)
 	}
 }
 

@@ -39,6 +39,46 @@ func TestPathsHonorKpmRoot(t *testing.T) {
 	}
 }
 
+// D: Firmware() reads the 3rd comma-separated field of the first line of
+// .kobo/version, or ("", false) on any shortfall — it never errors.
+func TestFirmware(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		write   bool // false: no version file at all
+		wantFw  string
+		wantOK  bool
+	}{
+		{name: "real line", content: "N123456789,3.0,4.45.23697,...,...\n", write: true, wantFw: "4.45.23697", wantOK: true},
+		{name: "no trailing newline", content: "serial,rev,4.38.23429", write: true, wantFw: "4.38.23429", wantOK: true},
+		{name: "first line only", content: "serial,rev,4.40.12345\nsecond line ignored\n", write: true, wantFw: "4.40.12345", wantOK: true},
+		{name: "whitespace trimmed", content: "serial,rev,  4.41.1  ,x\n", write: true, wantFw: "4.41.1", wantOK: true},
+		{name: "too few fields", content: "serial,rev\n", write: true, wantFw: "", wantOK: false},
+		{name: "empty firmware field", content: "serial,rev,   ,x\n", write: true, wantFw: "", wantOK: false},
+		{name: "empty file", content: "", write: true, wantFw: "", wantOK: false},
+		{name: "missing file", write: false, wantFw: "", wantOK: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("KPM_ROOT", root)
+			p := New()
+			if c.write {
+				if err := os.MkdirAll(filepath.Dir(p.VersionFile()), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p.VersionFile(), []byte(c.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fw, ok := p.Firmware()
+			if fw != c.wantFw || ok != c.wantOK {
+				t.Errorf("Firmware() = (%q, %v), want (%q, %v)", fw, ok, c.wantFw, c.wantOK)
+			}
+		})
+	}
+}
+
 func TestLogAndStatusAndTail(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("KPM_ROOT", root)

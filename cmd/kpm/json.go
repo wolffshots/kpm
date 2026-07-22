@@ -117,6 +117,16 @@ type jsonSearchPkg struct {
 	MinKpm        *string `json:"min_kpm"`
 	MinKpmOK      bool    `json:"min_kpm_ok"`
 	HasConfig     bool    `json:"has_config"` // local snapshot declares >=1 config (CONFIG.md §4)
+	// TestedFw/FwUntested are the advisory firmware-compat signal (D). TestedFw is
+	// the def's curator-confirmed firmware (null when unset); FwUntested is
+	// server-computed (device newer than tested by major.minor) and is false
+	// whenever either firmware is unknown.
+	TestedFw   *string `json:"tested_fw"`
+	FwUntested bool    `json:"fw_untested"`
+	// MissingFiles names manifest members that were absent at the last post-install
+	// verification (A). Null when the package verified clean (or was never
+	// verified); a JSON array — possibly naming a dropped .so — when files are gone.
+	MissingFiles []string `json:"missing_files"`
 }
 
 type jsonRegistryFreshness struct {
@@ -128,6 +138,9 @@ type jsonSearchPayload struct {
 	Packages   []jsonSearchPkg         `json:"packages"`
 	Staged     jsonStagedSummary       `json:"staged"`
 	Registries []jsonRegistryFreshness `json:"registries"`
+	// DeviceFw is the firmware kpm read from the device (null off-device or when
+	// unreadable), the reference point for each package's fw_untested (D).
+	DeviceFw *string `json:"device_fw"`
 }
 
 // registryFreshness renders each configured registry's name + last-refreshed
@@ -172,6 +185,8 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 	}
 	sort.Strings(ids)
 
+	deviceFw, _ := a.paths.Firmware()
+
 	tl := strings.ToLower(term)
 	pkgs := make([]jsonSearchPkg, 0, len(ids))
 	for _, id := range ids {
@@ -179,7 +194,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		local := locals[id]
 		ps := a.state.Get(id)
 
-		var name, desc, home, source, regName, minKpm string
+		var name, desc, home, source, regName, minKpm, testedFw string
 		if e != nil {
 			name = e.Def.Name
 			desc = e.Def.Description
@@ -187,6 +202,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			source = e.Def.Source
 			regName = e.Registry
 			minKpm = e.Def.MinKpm
+			testedFw = e.Def.TestedFw
 		}
 		if local != nil {
 			if name == "" {
@@ -247,6 +263,9 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			MinKpm:        ptr(minKpm),
 			MinKpmOK:      registry.MinKpmSatisfied(version.Version, minKpm),
 			HasConfig:     hasConfig,
+			TestedFw:      ptr(testedFw),
+			FwUntested:    registry.FirmwareUntested(deviceFw, testedFw),
+			MissingFiles:  ps.MissingFiles,
 		})
 	}
 
@@ -254,10 +273,13 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		Packages:   pkgs,
 		Staged:     a.stagedSummary(),
 		Registries: a.registryFreshness(cfg),
+		DeviceFw:   ptr(deviceFw),
 	})
 	return exitOK
 }
 
+// ---- doctor (DOCTOR.md / JSON-OUTPUT.md §2.5) ---------------------------
+//
 // ---- config list / show (CONFIG.md §3.3) --------------------------------
 //
 // These payloads are the forward contract the Nickel ConfigDialog (Phase 2)
@@ -404,6 +426,10 @@ type jsonStatusPkg struct {
 	Latest    *string `json:"latest"`
 	Pinned    *string `json:"pinned"`
 	State     string  `json:"state"` // unconfigured|staged|update-available|up-to-date
+	// MissingFiles names manifest members absent at the last post-install
+	// verification (A): null when the package verified clean (or was never
+	// verified), a JSON array when files are gone. Same shape as jsonSearchPkg.
+	MissingFiles []string `json:"missing_files"`
 }
 
 type jsonStatusPayload struct {
@@ -446,12 +472,13 @@ func (a *App) statusJSON() int {
 			latest = ptr(ps.LatestSeen)
 		}
 		out = append(out, jsonStatusPkg{
-			ID:        p.ID,
-			Installed: ptr(ps.InstalledVersion),
-			Staged:    ptr(ps.StagedVersion),
-			Latest:    latest,
-			Pinned:    ptr(a.effectivePin(p)),
-			State:     st,
+			ID:           p.ID,
+			Installed:    ptr(ps.InstalledVersion),
+			Staged:       ptr(ps.StagedVersion),
+			Latest:       latest,
+			Pinned:       ptr(a.effectivePin(p)),
+			State:        st,
+			MissingFiles: ps.MissingFiles,
 		})
 	}
 	jsonLine(jsonStatusPayload{
