@@ -54,7 +54,7 @@ Offscreen screenshots (automated validation — needs `QT_QPA_PLATFORM=offscreen
 which run.sh sets automatically for these modes):
 
 ```sh
-./run.sh --screenshot out       # browse/detail + config-list/config-edit/config-files png's
+./run.sh --screenshot out       # browse/detail + config-list/config-edit/config-files/config-init png's
 ```
 
 Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall`):
@@ -75,6 +75,17 @@ Offscreen end-to-end config edit (drives DetailDialog -> Settings -> ConfigDialo
 # (exit 0 = PASS; a non-surgical rewrite or a missing button fails non-zero).
 ```
 
+Offscreen end-to-end config init (drives DetailDialog -> Settings -> the
+multi-file picker -> Open the un-created PIN template -> **Create from example** ->
+`kpm config init`):
+
+```sh
+./run.sh --exercise-init
+# taps "Create from example" on nickelnote's not-created pin.template, asserts the
+# seeded file equals the normalized template bytes EXACTLY, then edits one line and
+# Save and asserts the follow-up edit was surgical (exit 0 = PASS).
+```
+
 Offscreen end-to-end sync (drives the browse footer's **Sync** button ->
 `kpm sync`):
 
@@ -84,6 +95,18 @@ Offscreen end-to-end sync (drives the browse footer's **Sync** button ->
 # table the registry cache declares but its local def predated, and (b) a fresh
 # `kpm search --json` reports has_config=true for samplemod (exit 0 = PASS; a
 # missing button or an un-synced def fails non-zero).
+```
+
+Offscreen end-to-end sleep/wake chrome guard (drives the status bar + nav-bar
+hide/restore and the `ChromeGuard` that re-hides them after a wake re-show):
+
+```sh
+./run.sh --exercise-wake
+# opens browse then detail, asserts the fake status bar + MainNavView are hidden
+# (Dialog::hideChrome), simulates Nickel's wake re-show of both bars, asserts the
+# ChromeGuard re-hid them, then closes the UI and asserts both are restored
+# exactly once (exit 0 = PASS). The fake bars are zero-height, so this is visually
+# inert and screenshots are unaffected.
 ```
 
 The sandbox lives at `/tmp/kpm-sim-sandbox` (override with `SANDBOX=...`; keep an
@@ -102,9 +125,9 @@ uninstalls never touch the real filesystem.
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path) |
 | samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target |
 
-## Which of the eleven UI actions work end-to-end
+## Which of the twelve UI actions work end-to-end
 
-The eleven commands the hook issues (`hook/src/kpmprocess.cc`):
+The twelve commands the hook issues (`hook/src/kpmprocess.cc`):
 
 | action | works in sim | notes |
 |--------|:---:|-------|
@@ -113,6 +136,7 @@ The eleven commands the hook issues (`hook/src/kpmprocess.cc`):
 | **sync** | ✅ | offline mutation; reads the registry cache + rewrites packages.d; `--exercise-sync` verifies samplemod gains its config |
 | **config list / show** | ✅ | offline reads; drive the ConfigDialog file picker + entries |
 | **config set** | ✅ | offline mutation; confined to `KPM_SYSROOT`; `--exercise-config` byte-verifies the surgical write |
+| **config init** | ✅ | offline mutation; seeds a missing file from its template; `--exercise-init` asserts byte-exact seed + a surgical follow-up edit |
 | install | ⚠️ | `kpm install --yes` registers the def offline (works), but DetailDialog chains `kpm update`, which needs the network — the fetch fails and the error dialog shows |
 | check | ❌ | needs network |
 | registry refresh | ❌ | needs network |

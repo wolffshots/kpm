@@ -7,8 +7,15 @@
 //   --screenshot <dir>       offscreen: grab browse/detail/config png's, then exit
 //   --exercise-uninstall <id>  offscreen: drive the Uninstall flow end-to-end
 //   --exercise-config <id>     offscreen: drive Settings → edit → Save end-to-end
+//   --exercise-init            offscreen: drive Settings → Open the un-created PIN
+//                              template → "Create from example" → assert the file
+//                              equals the template bytes, then edit one line
 //   --exercise-sync            offscreen: tap Sync, assert samplemod's def gains
 //                              the registry's config table (has_config flips true)
+//   --exercise-wake            offscreen: open browse → detail, assert the fake
+//                              status bar + MainNavView are hidden, simulate a
+//                              sleep/wake re-show, assert the ChromeGuard re-hid
+//                              them, then close and assert both are restored
 //
 // Screenshot/exercise modes are designed for QT_QPA_PLATFORM=offscreen.
 
@@ -111,7 +118,25 @@ static void runScreenshot(const QString &dir) {
               ConfigDialog::show("nickelnote", "NickelNote");
               QTimer::singleShot(1800, qApp, [dir]() {
                 saveGrab(dir + "/config-files.png"); // multi-file picker
-                qApp->quit();
+                // Open the not-created PIN template to capture the "Create from
+                // example" affordance (CONFIG.md §3.x).
+                QLabel *open = nullptr;
+                for (ConfigFileRow *r : nickelstub_mainWindow()->findChildren<ConfigFileRow *>()) {
+                  if (r->fileData().value("name").toString() == QStringLiteral("PIN screen message")) {
+                    for (QLabel *l : r->findChildren<QLabel *>()) {
+                      if (l->text() == "Open") {
+                        open = l;
+                      }
+                    }
+                  }
+                }
+                if (open) {
+                  sendClick(open);
+                }
+                QTimer::singleShot(1500, qApp, [dir]() {
+                  saveGrab(dir + "/config-init.png"); // the "Create from example" button
+                  qApp->quit();
+                });
               });
             });
           });
@@ -283,6 +308,161 @@ static void runExerciseConfig(const QString &id) {
       });
 }
 
+// expectedPinTemplate is the normalized bytes `kpm config init` must write for
+// nickelnote's PIN template (fixture/seed.go's notePinTemplate, which already has
+// a single trailing newline and no CR — so SeedContent reproduces it verbatim).
+static QByteArray expectedPinTemplate() {
+  return QByteArray("<p style=\"font-size: 32px;\">\n"
+                    "This tablet is protected and belongs to <br/>\n"
+                    "<b>Your Name</b>\n"
+                    "<br/>\n"
+                    "<br/>\n"
+                    "If found, please return to <br/>\n"
+                    "US: +1 555 000 0000<br/>\n"
+                    "CA: +1 555 000 0000<br/>\n"
+                    "</p>\n");
+}
+
+// runExerciseInit drives the "Create from example" flow end to end, offline:
+// open detail (nickelnote) → Settings → the multi-file picker → Open the
+// not-created PIN template → tap "Create from example" (→ `kpm config init`,
+// which seeds the file from its template) → assert the on-disk file equals the
+// normalized template bytes EXACTLY → then edit one line and Save, asserting the
+// edit was surgical (exactly one line changed). Mirrors the seed's init target
+// (fixture/seed.go: pin.template is the only nickelnote config left un-created).
+static void runExerciseInit() {
+  const QString id = QStringLiteral("nickelnote");
+  const QString fileName = QStringLiteral("PIN screen message");
+  QString sysroot = QString::fromLocal8Bit(qgetenv("KPM_SYSROOT"));
+  QString host = sysroot + "/mnt/onboard/.adds/nickelnote/pin.template";
+
+  waitForRows(
+      [id, fileName, host]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        if (!browse) {
+          std::fprintf(stderr, "sim: no BrowseDialog found\n");
+          qApp->exit(4);
+          return;
+        }
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, id));
+        QTimer::singleShot(500, qApp, [fileName, host]() {
+          QLabel *settings = findLabelByText("Settings");
+          if (!settings) {
+            std::fprintf(stderr, "sim: no Settings button for nickelnote\n");
+            qApp->exit(5);
+            return;
+          }
+          sendClick(settings); // -> DetailDialog::openConfig() -> ConfigDialog (multi-file picker)
+          QTimer::singleShot(1500, qApp, [fileName, host]() {
+            // Locate the PIN template file row and tap its Open button.
+            QLabel *open = nullptr;
+            for (ConfigFileRow *r : nickelstub_mainWindow()->findChildren<ConfigFileRow *>()) {
+              if (r->fileData().value("name").toString() == fileName) {
+                for (QLabel *l : r->findChildren<QLabel *>()) {
+                  if (l->text() == "Open") {
+                    open = l;
+                  }
+                }
+              }
+            }
+            if (!open) {
+              std::fprintf(stderr, "sim: could not find the PIN template file row\n");
+              qApp->exit(6);
+              return;
+            }
+            sendClick(open); // -> ConfigDialog::openFile -> config show (exists:false, has_template:true)
+            QTimer::singleShot(1500, qApp, [host]() {
+              QLabel *create = findLabelByText("Create from example");
+              if (!create) {
+                std::fprintf(stderr, "sim: no 'Create from example' button for the un-created PIN template\n");
+                qApp->exit(7);
+                return;
+              }
+              std::fprintf(stderr, "sim: tapping 'Create from example'\n");
+              sendClick(create); // -> ConfigDialog::createFromTemplate -> KpmProcess::configInit
+              QTimer::singleShot(2500, qApp, [host]() {
+                QByteArray got = readBytes(host);
+                QByteArray want = expectedPinTemplate();
+                if (got != want) {
+                  std::fprintf(stderr, "sim: FAIL — seeded file does not match the template bytes\n got: %s\nwant: %s\n",
+                               got.constData(), want.constData());
+                  qApp->exit(8);
+                  return;
+                }
+                std::fprintf(stderr, "sim: PASS — pin.template seeded byte-for-byte from the template (%d bytes)\n",
+                             got.size());
+
+                // Now edit exactly one line and Save; assert the edit is surgical.
+                QByteArray *before = new QByteArray(got);
+                ConfigEntryRow *target = nullptr;
+                for (ConfigEntryRow *r : nickelstub_mainWindow()->findChildren<ConfigEntryRow *>()) {
+                  target = r; // the last-laid-out row is fine; any single line works
+                  break;
+                }
+                if (!target) {
+                  std::fprintf(stderr, "sim: FAIL — no editable line after seeding\n");
+                  delete before;
+                  qApp->exit(9);
+                  return;
+                }
+                int line = target->entryData().value("line").toInt();
+                QLabel *edit = nullptr;
+                for (QLabel *l : target->findChildren<QLabel *>()) {
+                  if (l->text() == "Edit") {
+                    edit = l;
+                  }
+                }
+                sendClick(edit); // -> beginEdit (editor shown)
+                QTimer::singleShot(500, qApp, [host, before, line]() {
+                  ConfigDialog *cfg = nickelstub_mainWindow()->findChild<ConfigDialog *>();
+                  QLineEdit *field = cfg ? cfg->findChild<QLineEdit *>() : nullptr;
+                  if (!field) {
+                    std::fprintf(stderr, "sim: FAIL — no edit field open after seeding\n");
+                    delete before;
+                    qApp->exit(10);
+                    return;
+                  }
+                  field->setText(QStringLiteral("<p>edited line</p>"));
+                  std::fprintf(stderr, "sim: editing seeded line %d\n", line);
+                  QMetaObject::invokeMethod(cfg, "commit"); // Save -> kpm config set
+                  QTimer::singleShot(2500, qApp, [host, before]() {
+                    QByteArray after = readBytes(host);
+                    QList<QByteArray> a = before->split('\n');
+                    QList<QByteArray> b = after.split('\n');
+                    int rc = 0;
+                    if (a.size() != b.size()) {
+                      std::fprintf(stderr, "sim: FAIL — line count changed (%d -> %d) after edit\n", a.size(), b.size());
+                      rc = 11;
+                    } else {
+                      int diffs = 0, at = -1;
+                      for (int i = 0; i < a.size(); i++) {
+                        if (a.at(i) != b.at(i)) {
+                          diffs++;
+                          at = i;
+                        }
+                      }
+                      if (diffs == 1) {
+                        std::fprintf(stderr, "sim: PASS — post-seed edit changed exactly 1 line (line %d)\n", at + 1);
+                      } else {
+                        std::fprintf(stderr, "sim: FAIL — %d lines changed after edit, expected exactly 1\n", diffs);
+                        rc = 11;
+                      }
+                    }
+                    delete before;
+                    qApp->exit(rc);
+                  });
+                });
+              });
+            });
+          });
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // runExerciseSync drives the Sync footer button end to end, offline: tap Sync ->
 // BrowseDialog::sync() -> KpmProcess::sync() runs `kpm sync --json`, which re-copies
 // the registry def (now carrying a config declaration the local def predated) into
@@ -355,6 +535,72 @@ static void runExerciseSync() {
       });
 }
 
+// ---- --exercise-wake ----------------------------------------------------
+//
+// Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
+// the fake status bar + MainNavView (nickelstub). Steps: browse already open ->
+// assert both bars hidden (pre-existing hideChrome behavior) -> open detail over
+// it -> assert still hidden -> re-show both bars in nav-then-status order
+// (mimicking Nickel's wake re-assert) -> process events -> assert the filter
+// re-hid both -> close the whole UI via the close-X path -> assert both restored
+// (exactly once: the filter is removed before ~Dialog restores).
+static bool barsHidden() { return !nickelstub_statusBar()->isVisible() && !nickelstub_navView()->isVisible(); }
+static bool barsVisible() { return nickelstub_statusBar()->isVisible() && nickelstub_navView()->isVisible(); }
+
+static void runExerciseWake() {
+  waitForRows(
+      []() {
+        if (!barsHidden()) {
+          std::fprintf(stderr, "sim: FAIL — opening browse did not hide both bars\n");
+          qApp->exit(5);
+          return;
+        }
+        std::fprintf(stderr, "sim: PASS — opening browse hid the status bar + nav view\n");
+
+        QList<PackageRow *> rows = nickelstub_mainWindow()->findChildren<PackageRow *>();
+        sendClick(rows.first()); // open DetailDialog over the recording BrowseDialog
+        QTimer::singleShot(500, qApp, []() {
+          if (!barsHidden()) {
+            std::fprintf(stderr, "sim: FAIL — bars reappeared when detail opened\n");
+            qApp->exit(6);
+            return;
+          }
+          std::fprintf(stderr, "sim: PASS — bars stay hidden with detail stacked on top\n");
+
+          // Mimic Nickel's wake teardown re-asserting the home chrome: re-show the
+          // nav (fires the ChromeGuard) then the status bar (caught by the guard's
+          // deferred re-assert).
+          nickelstub_navView()->show();
+          nickelstub_statusBar()->show();
+          std::fprintf(stderr, "sim: simulated wake — re-showed status bar + nav view\n");
+
+          QTimer::singleShot(50, qApp, []() {
+            if (!barsHidden()) {
+              std::fprintf(stderr, "sim: FAIL — ChromeGuard did not re-hide bars after wake\n");
+              qApp->exit(7);
+              return;
+            }
+            std::fprintf(stderr, "sim: PASS — ChromeGuard re-hid both bars after wake\n");
+
+            QMetaObject::invokeMethod(nickelstub_mainWindow(), "closeTop"); // close-X path
+            QTimer::singleShot(500, qApp, []() {
+              if (!barsVisible()) {
+                std::fprintf(stderr, "sim: FAIL — closing did not restore both bars\n");
+                qApp->exit(8);
+                return;
+              }
+              std::fprintf(stderr, "sim: PASS — closing restored both bars (exactly once)\n");
+              qApp->exit(0);
+            });
+          });
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 int main(int argc, char **argv) {
   QApplication app(argc, argv);
 
@@ -363,6 +609,8 @@ int main(int argc, char **argv) {
   QString uninstallId;
   QString configId;
   bool exerciseSync = false;
+  bool exerciseWake = false;
+  bool exerciseInit = false;
 
   QStringList args = app.arguments();
   for (int i = 1; i < args.size(); i++) {
@@ -381,6 +629,10 @@ int main(int argc, char **argv) {
       configId = args.at(++i);
     } else if (a == "--exercise-sync") {
       exerciseSync = true;
+    } else if (a == "--exercise-wake") {
+      exerciseWake = true;
+    } else if (a == "--exercise-init") {
+      exerciseInit = true;
     }
   }
 
@@ -397,6 +649,10 @@ int main(int argc, char **argv) {
     runExerciseConfig(configId);
   } else if (exerciseSync) {
     runExerciseSync();
+  } else if (exerciseWake) {
+    runExerciseWake();
+  } else if (exerciseInit) {
+    runExerciseInit();
   }
 
   return app.exec();

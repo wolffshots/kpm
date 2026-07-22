@@ -37,6 +37,41 @@ void nickelstub_install(int screenW, int screenH);
 // nickelstub_mainWindow returns the top-level widget the screenshot driver grabs.
 QWidget *nickelstub_mainWindow();
 
+// nickelstub_statusBar / nickelstub_navView expose the fake home-screen chrome so
+// the --exercise-wake driver can show()/inspect them (mimicking Nickel's wake
+// re-show). Both are zero-height, so hiding/showing them is visually inert.
+QWidget *nickelstub_statusBar();
+QWidget *nickelstub_navView();
+
+// ---- fake home-screen chrome (status bar + nav view) --------------------
+//
+// Backs the four optional StatusBarController symbols and gives
+// findWidgetByClassName (widgets/dialog.cc) a real widget whose Qt class name is
+// literally "MainNavView" to hide. This is what lets the sim exercise Dialog's
+// chrome hide/restore and the sleep/wake ChromeGuard (main.cc --exercise-wake).
+// The class is named MainNavView (not SimMainNavView) precisely so its
+// metaObject className matches the device widget the hook searches for.
+
+class MainNavView : public QWidget {
+  Q_OBJECT
+public:
+  explicit MainNavView(QWidget *parent);
+};
+
+// SimStatusBarController wraps the fake status-bar widget; hide/show/isVisible
+// drive its visibility, standing in for Nickel's StatusBarController (a QObject).
+class SimStatusBarController : public QObject {
+  Q_OBJECT
+public:
+  explicit SimStatusBarController(QWidget *statusBar);
+  void hide();
+  void show();
+  bool isVisible() const;
+
+private:
+  QWidget *m_statusBar;
+};
+
 // ---- tappable label (TouchLabel / N3ButtonLabel) ------------------------
 
 class SimTouchLabel : public QLabel {
@@ -150,12 +185,19 @@ public:
   void pushView(QWidget *view);
   QWidget *currentView();
 
+  // The fake home-screen bars (zero-height): a persistent status bar (top) and a
+  // MainNavView (bottom), present regardless of the pushed dialog stack.
+  QWidget *statusBar() const { return m_statusBar; }
+  MainNavView *navView() const { return m_navView; }
+
 public Q_SLOTS:
   void closeTop();
 
 private:
   void refreshChrome();
 
+  QWidget *m_statusBar;
+  MainNavView *m_navView;
   QStackedWidget *m_stack;
   QLabel *m_titleLabel;
   SimTouchLabel *m_closeButton;

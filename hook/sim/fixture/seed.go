@@ -123,6 +123,46 @@ const noteStyle = `p { font-size: 30px; color: #202020; }
 body { margin: 40px; }
 `
 
+// Seed templates for the three NickelNote config files, matching the registry
+// shape (PII scrubbed). content/style are also written to disk (so they exist);
+// pin.template is left absent so its template drives the "Create from example"
+// path in the ConfigDialog and the `kpm config init` exercise (main.cc).
+const noteContentTemplate = `<span>Your Name</span><br />
+<span style="font-size: 32px">If found, Please return at</span><br />
+<span style="font-size: 32px;">+1 555 000 0000</span>
+`
+
+const noteStyleTemplate = `#infoWidget {
+  color: black;
+  background-color: rgba(255,255,255,170);
+  min-height: 290px;
+  max-height: 290px;
+
+  margin-top: 200px;
+  margin-left: -30px;
+}
+
+#infoWidget[powerOffView=true]{
+  background-color: rgba(0,0,0,170);
+}
+
+QLabel{
+	min-width: 400px;
+	min-height: 300px;
+}
+`
+
+const notePinTemplate = `<p style="font-size: 32px;">
+This tablet is protected and belongs to <br/>
+<b>Your Name</b>
+<br/>
+<br/>
+If found, please return to <br/>
+US: +1 555 000 0000<br/>
+CA: +1 555 000 0000<br/>
+</p>
+`
+
 const registryConfig = `[[registries]]
 name = "main"
 url = "codeberg.org/o/kpm-registry"
@@ -221,9 +261,9 @@ func main() {
 		Forge:  config.ForgeGitHub,
 		Asset:  "KoboRoot.tgz",
 		Configs: []config.ModConfig{
-			{Name: "Note content", Path: "/mnt/onboard/.adds/nickelnote/content.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Rich text shown on the sleep screen. Needs Style too."},
-			{Name: "Style", Path: "/mnt/onboard/.adds/nickelnote/style.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Stylesheet for the sleep-screen note."},
-			{Name: "PIN screen message", Path: "/mnt/onboard/.adds/nickelnote/pin.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Message shown on the lock-PIN screen."},
+			{Name: "Note content", Path: "/mnt/onboard/.adds/nickelnote/content.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Rich text shown on the sleep screen. Needs Style too.", Template: noteContentTemplate},
+			{Name: "Style", Path: "/mnt/onboard/.adds/nickelnote/style.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Stylesheet for the sleep-screen note.", Template: noteStyleTemplate},
+			{Name: "PIN screen message", Path: "/mnt/onboard/.adds/nickelnote/pin.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Message shown on the lock-PIN screen.", Template: notePinTemplate},
 		},
 	}))
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/content.template", noteContent)

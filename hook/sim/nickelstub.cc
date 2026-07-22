@@ -16,6 +16,7 @@
 static SimMainWindow *g_mainWindow = nullptr;
 static SimWireless *g_wireless = nullptr;
 static QObject *g_controller = nullptr;
+static SimStatusBarController *g_statusBarController = nullptr;
 SimConfirmationDialog *g_lastConfirmation = nullptr;
 
 static const int kChromeHeight = 52;
@@ -163,6 +164,13 @@ SimMainWindow::SimMainWindow(int w, int h) : QWidget(nullptr) {
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(0);
 
+  // Fake home-screen status bar (top) — zero-height so it is visually inert, but
+  // a real visible widget so Dialog::hideChrome() records hiding it and the wake
+  // exercise can re-show it. See nickelstub.h.
+  m_statusBar = new QWidget(this);
+  m_statusBar->setFixedHeight(0);
+  layout->addWidget(m_statusBar, 0);
+
   QWidget *chrome = new QWidget(this);
   chrome->setFixedHeight(kChromeHeight);
   chrome->setStyleSheet("QWidget { border-bottom: 2px solid #000000; }");
@@ -183,6 +191,12 @@ SimMainWindow::SimMainWindow(int w, int h) : QWidget(nullptr) {
 
   m_stack = new QStackedWidget(this);
   layout->addWidget(m_stack, 1);
+
+  // Fake bottom nav bar — a widget whose Qt class name is literally "MainNavView"
+  // (zero-height), so findWidgetByClassName resolves it exactly as on device.
+  m_navView = new MainNavView(this);
+  m_navView->setFixedHeight(0);
+  layout->addWidget(m_navView, 0);
 
   QObject::connect(m_closeButton, &SimTouchLabel::tapped, this, &SimMainWindow::closeTop);
   refreshChrome();
@@ -232,6 +246,15 @@ void SimMainWindow::refreshChrome() {
   m_closeButton->show();
 }
 
+// ---- fake home-screen chrome --------------------------------------------
+
+MainNavView::MainNavView(QWidget *parent) : QWidget(parent) {}
+
+SimStatusBarController::SimStatusBarController(QWidget *statusBar) : QObject(nullptr), m_statusBar(statusBar) {}
+void SimStatusBarController::hide() { m_statusBar->hide(); }
+void SimStatusBarController::show() { m_statusBar->show(); }
+bool SimStatusBarController::isVisible() const { return m_statusBar->isVisible(); }
+
 // ---- nkpm.h function-pointer definitions --------------------------------
 //
 // These mirror nkpm.cc's declarations (nkpm.cc is NOT compiled into the sim).
@@ -240,12 +263,15 @@ MainWindowController *(*MainWindowController__sharedInstance)();
 QWidget *(*MainWindowController__currentView)(MainWindowController *mwc);
 QWidget *(*MainWindowController__pushView)(MainWindowController *mwc, QWidget *view);
 
-// Optional device-only symbols (chrome hiding, full-view mode, the title-bar back
-// button). On device nkpm.cc resolves these via dlsym; the sim leaves them null,
-// exactly the "firmware lacks the symbol" state their call sites already null-check
-// (dialog.cc canHideChrome / enableFullViewMode; detaildialog.cc + configdialog.cc
-// enableBackButton). Defining them here is what lets the sim link those sources
-// unmodified — nkpm.cc, which defines them on device, is not compiled into the sim.
+// Optional device-only symbols. The four StatusBarController pointers ARE backed
+// in the sim (by SimStatusBarController + the fake status bar / MainNavView) so
+// Dialog::hideChrome() is active here and the sleep/wake ChromeGuard can be
+// exercised (main.cc --exercise-wake). The remaining ones (full-view mode, the
+// title-bar back button) stay null, exactly the "firmware lacks the symbol" state
+// their call sites already null-check (dialog.cc enableFullViewMode; detaildialog
+// + configdialog enableBackButton). Defining them here lets the sim link those
+// device sources unmodified — nkpm.cc, which defines them on device, is not
+// compiled into the sim.
 StatusBarController *(*MainWindowController__statusBarController)(MainWindowController *mwc);
 void (*StatusBarController__hideStatusBar)(StatusBarController *sbc);
 void (*StatusBarController__showStatusBar)(StatusBarController *sbc);
@@ -286,6 +312,11 @@ static QWidget *sim_mwc_pushView(MainWindowController *, QWidget *view) {
   g_mainWindow->pushView(view);
   return view;
 }
+
+static StatusBarController *sim_mwc_statusBarController(MainWindowController *) { return g_statusBarController; }
+static void sim_sbc_hide(StatusBarController *sbc) { static_cast<SimStatusBarController *>(sbc)->hide(); }
+static void sim_sbc_show(StatusBarController *sbc) { static_cast<SimStatusBarController *>(sbc)->show(); }
+static bool sim_sbc_isVisible(StatusBarController *sbc) { return static_cast<SimStatusBarController *>(sbc)->isVisible(); }
 
 static void sim_showErrorDialog(QString const &title, QString const &body) { simShowMessage(title, body); }
 static ConfirmationDialog *sim_getConfirmationDialog(QWidget *parent) {
@@ -348,10 +379,18 @@ void nickelstub_install(int screenW, int screenH) {
   g_controller = new QObject();
   g_wireless = new SimWireless();
   g_mainWindow = new SimMainWindow(screenW, screenH);
+  g_statusBarController = new SimStatusBarController(g_mainWindow->statusBar());
 
   MainWindowController__sharedInstance = &sim_mwc_sharedInstance;
   MainWindowController__currentView = &sim_mwc_currentView;
   MainWindowController__pushView = &sim_mwc_pushView;
+
+  // Back the chrome-hiding symbols so hideChrome() + the wake ChromeGuard run in
+  // the sim (device-inert bars keep screenshots unchanged). See nickelstub.h.
+  MainWindowController__statusBarController = &sim_mwc_statusBarController;
+  StatusBarController__hideStatusBar = &sim_sbc_hide;
+  StatusBarController__showStatusBar = &sim_sbc_show;
+  StatusBarController__isVisible = &sim_sbc_isVisible;
 
   ConfirmationDialogFactory__showErrorDialog = &sim_showErrorDialog;
   ConfirmationDialogFactory__getConfirmationDialog = &sim_getConfirmationDialog;
@@ -380,3 +419,6 @@ void nickelstub_install(int screenW, int screenH) {
 }
 
 QWidget *nickelstub_mainWindow() { return g_mainWindow; }
+
+QWidget *nickelstub_statusBar() { return g_mainWindow->statusBar(); }
+QWidget *nickelstub_navView() { return g_mainWindow->navView(); }

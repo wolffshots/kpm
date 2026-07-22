@@ -16,9 +16,12 @@ MOC      := moc
 QT_CFLAGS := $(shell pkg-config --cflags Qt5Widgets)
 QT_LIBS   := $(shell pkg-config --libs Qt5Widgets)
 
+# -MMD -MP emit per-object header-dependency files (build/*.d), pulled in below so
+# a device-header change (e.g. widgets/dialog.h) recompiles every dependent .cc.
+# Without this, incremental builds keep stale objects with mismatched class layouts.
 CXXFLAGS := -std=gnu++11 -fPIC -DNKPM_SIM $(QT_CFLAGS) \
             -Wall -Wextra -Wno-deprecated-declarations -Wno-missing-field-initializers \
-            -I. -I../src
+            -MMD -MP -I. -I../src
 
 vpath %.cc ../src ../src/widgets .
 vpath %.h  ../src ../src/widgets .
@@ -56,6 +59,8 @@ $(BUILD)/moc_%.o: $(BUILD)/moc_%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 .SECONDARY:
+
+-include $(OBJS:.o=.d) $(MOC_OBJS:.o=.d)
 
 clean:
 	rm -rf $(BUILD) $(TARGET)

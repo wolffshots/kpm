@@ -6,7 +6,9 @@
 #   ./run.sh --screenshot out        offscreen: write browse/detail/config png's
 #   ./run.sh --exercise-uninstall samplemod   offscreen: drive the uninstall flow
 #   ./run.sh --exercise-config nickelclock    offscreen: drive the config-edit flow
+#   ./run.sh --exercise-init         offscreen: drive the "Create from example" flow (nickelnote pin)
 #   ./run.sh --exercise-sync         offscreen: drive the Sync flow (samplemod)
+#   ./run.sh --exercise-wake         offscreen: drive the sleep/wake chrome guard
 #   ./run.sh --size 600x800          override the Kobo-portrait window size
 #
 # Env: SANDBOX (default /tmp/kpm-sim-sandbox), RESEED=0 to keep an existing
@@ -69,7 +71,7 @@ export NKPM_KPM="$BUILD/kpm"
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-sync "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="
