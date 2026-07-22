@@ -17,7 +17,7 @@ static const QString kMasked = QStringLiteral("••••"); // ••••
 
 // ---- ConfigFileRow ------------------------------------------------------
 
-ConfigFileRow::ConfigFileRow(QJsonObject file, int idx, QWidget *parent) : QFrame(parent), index(idx) {
+ConfigFileRow::ConfigFileRow(QJsonObject file, int idx, QWidget *parent) : QFrame(parent), file(file), index(idx) {
   setStyleSheet(R"(
     ConfigFileRow {
       border-top: 1px solid #666666;

@@ -37,6 +37,9 @@ public:
   // single-instance lock) but never touches the network — configs are local files.
   static KpmProcess *configList(const QString &id);                  // kpm config list <id> --json
   static KpmProcess *configShow(const QString &id, const QString &selector); // kpm config show <id> <sel> --json
+  // configInit seeds a missing file from its declared template (CONFIG.md §3.x).
+  // Mutating (rides the single-instance lock), no network — a local file write.
+  static KpmProcess *configInit(const QString &id, const QString &selector); // kpm config init <id> <sel> --json
   // set variants map 1:1 to the CLI's ini (--key/--section) and text
   // (--line/--append/--delete) edit forms (cmd_config.go applyEdit).
   static KpmProcess *configSetKey(const QString &id, const QString &selector, const QString &section,

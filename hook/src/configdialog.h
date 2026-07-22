@@ -46,6 +46,7 @@ public Q_SLOTS:
   void openFile(int index);            // file picker → open one file
   void beginEdit(QJsonObject entry);   // entry row → edit its value
   void beginAppend();                  // "Add line" → append a new text line
+  void createFromTemplate();           // "Create from example" → seed from template
   void deleteCurrentLine();            // edit-mode "Delete line"
   void maybePromptReboot();            // on leaving, if a reboot file changed
 
@@ -72,6 +73,9 @@ private:
   TouchLineEdit *editLineEdit = nullptr;
   N3ButtonLabel *deleteButton = nullptr;
   N3ButtonLabel *addLineButton = nullptr;
+  // "Create from example": shown when the open file is missing but declares a
+  // seed template (CONFIG.md §3.x). Tapping it runs `kpm config init`.
+  N3ButtonLabel *createButton = nullptr;
 
   // Data. In FileList mode `configs` drives the picker; once a file is open,
   // `entries` drives the rows and the current* fields describe it.
@@ -82,6 +86,8 @@ private:
   QString currentSelector; // the file's declared name, the `config set` selector
   QString currentFormat;   // "ini" | "text"
   QString currentReload;   // "auto" | "reboot"
+  bool currentExists = false;      // the open file exists on disk
+  bool currentHasTemplate = false; // the open file declares a seed template
 
   // Edit state: what commit() will write.
   enum EditMode { EditNone, EditIniKey, EditTextLine, EditTextAppend };

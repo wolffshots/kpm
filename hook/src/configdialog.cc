@@ -80,6 +80,15 @@ ConfigDialog::ConfigDialog(const QString &pkgId, const QString &pkgName)
   buttons->setContentsMargins(14, 6, 14, 6);
   buttons->setSpacing(16);
   buttons->addStretch(1);
+  // "Create from example" seeds a missing, template-bearing file (CONFIG.md §3.x).
+  // Same footer-button pattern as Add line; hidden until a not-created file with a
+  // template is shown.
+  createButton = construct_N3ButtonLabel(this);
+  createButton->setProperty("primaryButton", true);
+  createButton->setText("Create from example");
+  buttons->addWidget(createButton);
+  createButton->hide();
+  QObject::connect(createButton, SIGNAL(tapped(bool)), this, SLOT(createFromTemplate()));
   addLineButton = construct_N3ButtonLabel(this);
   addLineButton->setProperty("primaryButton", true);
   addLineButton->setText("Add line");
@@ -154,6 +163,8 @@ void ConfigDialog::showEntries(const QJsonObject &fileObj, const QJsonArray &fil
   entries = fileEntries;
   currentFormat = fileObj.value("format").toString();
   currentReload = fileObj.value("reload").toString();
+  currentExists = fileObj.value("exists").toBool();
+  currentHasTemplate = fileObj.value("has_template").toBool();
   if (currentSelector.isEmpty()) {
     currentSelector = fileObj.value("name").toString();
   }
@@ -169,6 +180,11 @@ void ConfigDialog::showEntries(const QJsonObject &fileObj, const QJsonArray &fil
 
   // "Add line" is a text-file affordance only (§4.3); ini keys are edited in place.
   addLineButton->setVisible(currentFormat == QStringLiteral("text"));
+
+  // "Create from example" is offered only when the file is missing but declares a
+  // seed template (CONFIG.md §3.x). A missing file with no template keeps today's
+  // behavior (the "not created" status / create-on-first-edit path).
+  createButton->setVisible(!currentExists && currentHasTemplate);
 
   endEdit();
   if (laidOut) {
@@ -267,6 +283,20 @@ void ConfigDialog::beginAppend() {
   editLineEdit->setFocus();
 }
 
+// createFromTemplate seeds a missing file from its declared example via
+// `kpm config init`. On success onSetDone re-reads the file, so the seeded lines
+// render for editing and the button hides (the file now exists) — CONFIG.md §3.x.
+void ConfigDialog::createFromTemplate() {
+  KpmProcess *p = KpmProcess::configInit(id, currentSelector);
+  if (!p) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
+    return;
+  }
+  setActionsEnabled(false);
+  QObject::connect(p, &KpmProcess::response, this, &ConfigDialog::onSetDone);
+  QObject::connect(p, &KpmProcess::failure, this, &ConfigDialog::onProcessFailure);
+}
+
 void ConfigDialog::commit() {
   if (editMode == EditNone) {
     return; // a stray keyboard commit with nothing being edited
@@ -340,6 +370,9 @@ void ConfigDialog::endEdit() {
 void ConfigDialog::setActionsEnabled(bool enabled) {
   if (addLineButton) {
     addLineButton->setEnabled(enabled);
+  }
+  if (createButton) {
+    createButton->setEnabled(enabled);
   }
   if (deleteButton) {
     deleteButton->setEnabled(enabled);

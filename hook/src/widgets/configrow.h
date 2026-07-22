@@ -20,6 +20,10 @@ class ConfigFileRow : public QFrame {
 public:
   ConfigFileRow(QJsonObject file, int index, QWidget *parent = nullptr);
 
+  // fileData exposes the payload file object so the offscreen sim driver can
+  // locate a specific file row (main.cc --exercise-init).
+  const QJsonObject &fileData() const { return file; }
+
 Q_SIGNALS:
   void selected(int index);
 
@@ -27,6 +31,7 @@ private Q_SLOTS:
   void openTapped();
 
 private:
+  QJsonObject file;
   int index;
 };
 

@@ -49,6 +49,11 @@ KpmProcess *KpmProcess::configList(const QString &id) { return start({"config", 
 KpmProcess *KpmProcess::configShow(const QString &id, const QString &selector) {
   return start({"config", "show", id, selector, "--json"}, false, false);
 }
+// configInit creates a missing file from its declared template. Mutating (takes
+// kpm's single-instance lock), no network — a local file write (CONFIG.md §3.x).
+KpmProcess *KpmProcess::configInit(const QString &id, const QString &selector) {
+  return start({"config", "init", id, selector, "--json"}, false, true);
+}
 KpmProcess *KpmProcess::configSetKey(const QString &id, const QString &selector, const QString &section,
                                      const QString &key, const QString &value) {
   QStringList args{"config", "set", id, selector, "--key", key};
