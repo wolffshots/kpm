@@ -3,8 +3,11 @@
 // entirely offline. It seeds packages in mixed states:
 //
 //   koreader     not installed        (registry def, rich description)
-//   nickelclock  installed v0.4.0     (registry def, marker-remove uninstall)
+//   nickelclock  installed v0.4.0     (packages.d def + settings.ini on disk —
+//                                       the ini config-editing target)
 //   nickelmenu   not installed        (registry def)
+//   nickelnote   installed v1.2.0     (packages.d def + three text templates;
+//                                       pin.template absent — the create path)
 //   samplemod    installed v1.0.0     (packages.d def + manifest + a real file
 //                                       under KPM_SYSROOT — the uninstall target)
 //
@@ -62,6 +65,44 @@ forge = "github"
 asset = "KoboRoot.tgz"
 description = "A launcher that adds custom menu items to the Kobo home screen."
 homepage = "https://github.com/pgaskin/NickelMenu"
+
+[packages.nickelnote]
+name = "NickelNote"
+source = "github.com/kbanh/NickelNote"
+forge = "github"
+asset = "KoboRoot.tgz"
+description = "Show a custom note and stylesheet on the sleep and PIN screens."
+homepage = "https://github.com/kbanh/NickelNote"
+`
+
+// clockSettings is a realistic NickelClock settings.ini with comments and three
+// sections, written to the sandbox so a surgical `config set` visibly rewrites
+// only the one target line (comments/blank lines/other keys byte-preserved).
+const clockSettings = `; NickelClock settings — edited on-device by kpm config.
+; Comment lines (starting with ; or #) must survive edits untouched.
+
+[General]
+Margin = 10
+
+[Clock]
+Enabled = true
+Placement = Footer
+Position = Right
+
+[Battery]
+Enabled = false
+ShowPercentage = true
+`
+
+// NickelNote's short text templates (Qt rich text + a QSS stylesheet). pin.template
+// is deliberately NOT written, so it exercises the "not created / create on first
+// save" path in both the CLI and the ConfigDialog file picker.
+const noteContent = `<p>Good night.</p>
+<p>Sweet dreams from your Kobo.</p>
+`
+
+const noteStyle = `p { font-size: 30px; color: #202020; }
+body { margin: 40px; }
 `
 
 const registryConfig = `[[registries]]
@@ -77,6 +118,14 @@ func must(err error) {
 		fmt.Fprintln(os.Stderr, "seed: fatal:", err)
 		os.Exit(1)
 	}
+}
+
+// writeDev writes content at a device-absolute path (e.g. /mnt/onboard/...) into
+// the KPM_SYSROOT sandbox — the same host mapping `kpm config` reads/writes.
+func writeDev(sysroot, devPath, content string) {
+	host := filepath.Join(sysroot, filepath.FromSlash(devPath))
+	must(os.MkdirAll(filepath.Dir(host), 0o755))
+	must(os.WriteFile(host, []byte(content), 0o644))
 }
 
 func main() {
@@ -109,11 +158,54 @@ func main() {
 	must(os.MkdirAll(filepath.Dir(hostFile), 0o755))
 	must(os.WriteFile(hostFile, []byte("sample payload\n"), 0o644))
 
+	// nickelclock: a packages.d def carrying its ini config declaration (so
+	// has_config is true and `kpm config` can edit it), plus the marker-remove
+	// uninstall recipe from the registry, and the real settings.ini on disk. This
+	// is the single-file / ini ConfigDialog target (--exercise-config nickelclock).
+	must(config.Save(p.PackageFile("nickelclock"), &config.Package{
+		Name:   "NickelClock",
+		Source: "github.com/shermp/NickelClock",
+		Forge:  config.ForgeGitHub,
+		Asset:  "NickelClock-*.zip",
+		MinKpm: "0.4.0",
+		Uninstall: config.Uninstall{
+			Method:     config.MethodMarkerRemove,
+			MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall",
+		},
+		Configs: []config.ModConfig{{
+			Name:        "Settings",
+			Path:        "/mnt/onboard/.adds/nickelclock/settings.ini",
+			Format:      config.FormatINI,
+			Reload:      config.ReloadReboot,
+			Description: "Clock and battery display options.",
+		}},
+	}))
+	writeDev(sysroot, "/mnt/onboard/.adds/nickelclock/settings.ini", clockSettings)
+
+	// nickelnote: an installed package declaring three text templates (create=true).
+	// content/style are written; pin.template is left absent to exercise the
+	// not-created + create-on-first-save path. This is the multi-file / text
+	// ConfigDialog target (the file-picker page + text editor).
+	must(config.Save(p.PackageFile("nickelnote"), &config.Package{
+		Name:   "NickelNote",
+		Source: "github.com/kbanh/NickelNote",
+		Forge:  config.ForgeGitHub,
+		Asset:  "KoboRoot.tgz",
+		Configs: []config.ModConfig{
+			{Name: "Note content", Path: "/mnt/onboard/.adds/nickelnote/content.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Rich text shown on the sleep screen. Needs Style too."},
+			{Name: "Style", Path: "/mnt/onboard/.adds/nickelnote/style.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Stylesheet for the sleep-screen note."},
+			{Name: "PIN screen message", Path: "/mnt/onboard/.adds/nickelnote/pin.template", Format: config.FormatText, Reload: config.ReloadAuto, Create: true, Description: "Message shown on the lock-PIN screen."},
+		},
+	}))
+	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/content.template", noteContent)
+	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/style.template", noteStyle)
+
 	// State: installed versions, samplemod's manifest, and the registry's
 	// last-refreshed timestamp (recent, so the browse view isn't all "stale").
 	st, err := state.Load(p.StateFile())
 	must(err)
 	st.Get("nickelclock").InstalledVersion = "v0.4.0"
+	st.Get("nickelnote").InstalledVersion = "v1.2.0"
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
@@ -123,6 +215,7 @@ func main() {
 	fmt.Println("seed: sandbox ready")
 	fmt.Println("  KPM_ROOT    =", os.Getenv("KPM_ROOT"))
 	fmt.Println("  KPM_SYSROOT =", sysroot)
-	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) samplemod(v1.0.0)")
+	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0)")
 	fmt.Println("  uninstall target: samplemod ->", hostFile)
+	fmt.Println("  config targets: nickelclock(settings.ini, ini) nickelnote(3 templates, text)")
 }

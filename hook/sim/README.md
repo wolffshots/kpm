@@ -1,9 +1,9 @@
 # NickelKPM desktop simulator (Tier-3 off-device UI testing)
 
 Runs the **real** NickelKPM dialog sources (`hook/src/browsedialog.cc`,
-`detaildialog.cc`, `kpmprocess.cc`, `widgets/*.cc`) on a PC against a host-built
-`kpm` binary, so the on-device UI flows can be exercised without the
-build-copy-reboot device loop.
+`detaildialog.cc`, `configdialog.cc`, `kpmprocess.cc`, `widgets/*.cc`) on a PC
+against a host-built `kpm` binary, so the on-device UI flows can be exercised
+without the build-copy-reboot device loop.
 
 This is possible because the dialog code never includes a Nickel header: every
 Nickel touchpoint goes through function pointers declared in `hook/src/nkpm.h`.
@@ -54,7 +54,7 @@ Offscreen screenshots (automated validation — needs `QT_QPA_PLATFORM=offscreen
 which run.sh sets automatically for these modes):
 
 ```sh
-./run.sh --screenshot out       # writes out/browse.png and out/detail.png
+./run.sh --screenshot out       # browse/detail + config-list/config-edit/config-files png's
 ```
 
 Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall`):
@@ -63,6 +63,16 @@ Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall
 ./run.sh --exercise-uninstall samplemod
 # then: state.json no longer lists samplemod, its packages.d def and its file
 #       under $KPM_SYSROOT are gone.
+```
+
+Offscreen end-to-end config edit (drives DetailDialog -> Settings -> ConfigDialog
+-> edit a row -> Save -> `kpm config set`):
+
+```sh
+./run.sh --exercise-config nickelclock
+# opens the ini editor, flips [Clock] Enabled, then byte-compares settings.ini
+# before/after and asserts the edit was SURGICAL — exactly one line changed
+# (exit 0 = PASS; a non-surgical rewrite or a missing button fails non-zero).
 ```
 
 The sandbox lives at `/tmp/kpm-sim-sandbox` (override with `SANDBOX=...`; keep an
@@ -76,18 +86,21 @@ uninstalls never touch the real filesystem.
 | id | state | detail action |
 |----|-------|---------------|
 | koreader | not installed | Install |
-| nickelclock | installed v0.4.0 | Uninstall (marker-remove) |
+| nickelclock | installed v0.4.0 | Uninstall (marker-remove) + Settings (ini config — the config-edit target) |
 | nickelmenu | not installed | Install |
-| samplemod | installed v1.0.0 | Uninstall (manifest delete — the exercise target) |
+| nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path) |
+| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall exercise target) |
 
-## Which of the seven UI actions work end-to-end
+## Which of the ten UI actions work end-to-end
 
-The seven commands the hook issues (`hook/src/kpmprocess.cc`):
+The ten commands the hook issues (`hook/src/kpmprocess.cc`):
 
 | action | works in sim | notes |
 |--------|:---:|-------|
 | **search** (browse) | ✅ | offline, read-only; drives the whole browse/detail view |
 | **uninstall** | ✅ | offline mutation; confined to `KPM_SYSROOT`; validated end-to-end |
+| **config list / show** | ✅ | offline reads; drive the ConfigDialog file picker + entries |
+| **config set** | ✅ | offline mutation; confined to `KPM_SYSROOT`; `--exercise-config` byte-verifies the surgical write |
 | install | ⚠️ | `kpm install --yes` registers the def offline (works), but DetailDialog chains `kpm update`, which needs the network — the fetch fails and the error dialog shows |
 | check | ❌ | needs network |
 | registry refresh | ❌ | needs network |
