@@ -532,6 +532,28 @@ func TestLoadAllSkipsAppleDoubleAndHidden(t *testing.T) {
 	}
 }
 
+func TestIsSidecar(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"._nickeldbus.toml", true}, // AppleDouble sidecar
+		{".DS_Store", true},         // Finder metadata
+		{".hidden.toml", true},      // any dotfile
+		{".", true},
+		{"nickeldbus.toml", false},
+		{"nickel-home", false},
+		{"Bad_Name.toml", false}, // invalid id but not a dotfile
+		{"a._b", false},          // dot not at the start
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := IsSidecar(c.name); got != c.want {
+			t.Errorf("IsSidecar(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestLoadAllSkipsBadAndInvalidId(t *testing.T) {
 	dir := t.TempDir()
 	// A valid def.

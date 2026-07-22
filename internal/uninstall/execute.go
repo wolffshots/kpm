@@ -187,8 +187,15 @@ func removeTree(host, dev string, kept func(string) bool, allowExtra []string, r
 		return true, nil
 	}
 	if classify(dev, allowExtra) != vAllowed {
-		// A denied/unlisted descendant is preserved and recorded as a safety
-		// skip so it blocks clean unregistration (C1).
+		// An AppleDouble sidecar (._foo the FAT partition collects from Finder, or
+		// any dotfile) is inert metadata, never real package payload: removing it
+		// with the tree it sits in is safe and must never record a policy skip that
+		// blocks a clean directory removal (SELF-SOURCE §3a / B). Every other
+		// denied/unlisted descendant is preserved and recorded as a safety skip so
+		// it blocks clean unregistration (C1).
+		if config.IsSidecar(filepath.Base(host)) {
+			return false, os.Remove(host)
+		}
 		r.Skipped = append(r.Skipped, Skipped{dev, "policy"})
 		return true, nil
 	}

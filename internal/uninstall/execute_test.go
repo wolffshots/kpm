@@ -61,6 +61,34 @@ func TestExecuteSharedDirSurvival(t *testing.T) {
 	}
 }
 
+// B: an AppleDouble sidecar (._plugin.so) the FAT partition collected from
+// Finder, left inside a package's install dir, must never block a clean
+// recursive removal — it is inert metadata, removed with the tree, no policy
+// skip (SELF-SOURCE §3a).
+func TestExecuteRemovesAppleDoubleSidecar(t *testing.T) {
+	p, sysroot := sandbox(t)
+	mkfile(t, sysroot, "opt/pkg/plugin.so")
+	// Finder litter alongside the real payload.
+	if err := os.WriteFile(filepath.Join(sysroot, "opt/pkg/._plugin.so"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sysroot, "opt/pkg/.DS_Store"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := Plan{
+		Method:  config.MethodManifest,
+		Deletes: []Delete{{Path: "/opt/pkg", Recursive: true}},
+	}
+	res := Execute(p, plan)
+	if !res.OK() {
+		t.Fatalf("a Finder sidecar must not block uninstall: skipped=%+v failed=%+v", res.Skipped, res.Failed)
+	}
+	if exists(filepath.Join(sysroot, "opt/pkg")) {
+		t.Error("package dir should be fully removed (no sidecar left to keep it alive)")
+	}
+}
+
 // Defense-in-depth for the CRITICAL: even if a recursive delete of a shared
 // root reached Execute (Compute now refuses it), removeTree re-applies the path
 // policy at every node, so a denied descendant — the firmware's own libnickel.so

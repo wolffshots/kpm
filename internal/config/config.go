@@ -268,6 +268,14 @@ var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 // alphanumerics and dashes, starting with an alphanumeric.
 func ValidID(id string) bool { return idRE.MatchString(id) }
 
+// IsSidecar reports whether name is a filesystem sidecar kpm must never treat
+// as package data: AppleDouble files (._foo the Kobo's FAT partition collects
+// from macOS/Finder), .DS_Store, and any other dotfile. A valid package id is
+// [a-z0-9-]+, which can never start with '.', so a dot-prefixed entry is never a
+// real def and never a payload file — it is inert metadata to skip or sweep
+// (SELF-SOURCE §3a).
+func IsSidecar(name string) bool { return strings.HasPrefix(name, ".") }
+
 // Load reads and parses a single package TOML at path, setting ID from filename.
 func Load(path, id string) (*Package, error) {
 	var p Package
@@ -491,7 +499,7 @@ func LoadAll(dir string) (pkgs []*Package, unreadable []string, err error) {
 		// macOS/Finder) and any other dotfile are never package defs — a valid id
 		// is [a-z0-9-]+, which can't start with '.'. Skip silently so they don't
 		// masquerade as unreadable definitions (SELF-SOURCE §3a).
-		if strings.HasPrefix(e.Name(), ".") {
+		if IsSidecar(e.Name()) {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".toml")
