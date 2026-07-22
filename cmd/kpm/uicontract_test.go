@@ -742,6 +742,48 @@ func TestUIContractSync(t *testing.T) {
 	}
 }
 
+// ---- doctor --json (FORWARD contract — no hook consumes it yet) ---------
+//
+// CONTRACT: `kpm doctor` is CLI + --json only in 0.9.0 (no UI badge — Open
+// Decision 3). This block pins the payload shape a Wave 3 "did it load?" badge
+// would be built against, so a later kpm change cannot silently reshape it before
+// the hook exists. Doctor is read-only (no lock).
+//
+//   doctor --json:
+//     top-level: device_fw(str|null), packages[] (array)
+//     packages[i]: id(str), verdict(str: loaded|not-loaded|crashed|load-failed|
+//                  unknown), detail(str|null), plugin(str|null),
+//                  tested_fw(str|null), fw_untested(BOOL)
+
+func TestUIContractDoctor(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	setVersion(t, "0.9.0")
+	installNotePkg(t, a, sysroot, "2026-07-20T00:00:00Z")
+	withMaps(a, "7f00 libnickelnote.so\n", true)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdDoctor([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("doctor --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	wantStrOrNull(t, m, "device_fw")
+	pkgs := wantArray(t, m, "packages")
+	if len(pkgs) != 1 {
+		t.Fatalf("doctor packages len = %d, want 1", len(pkgs))
+	}
+	p0 := pkgs[0].(map[string]any)
+	wantStr(t, p0, "id")
+	wantStr(t, p0, "verdict")
+	wantStrOrNull(t, p0, "detail")
+	wantStrOrNull(t, p0, "plugin")
+	wantStrOrNull(t, p0, "tested_fw")
+	wantBool(t, p0, "fw_untested")
+	if p0["id"] != "nickelnote" || p0["verdict"] != "loaded" {
+		t.Errorf("unexpected doctor fields: %v", p0)
+	}
+}
+
 // ---- busy: the "another kpm instance" dialog trigger --------------------
 
 // A second MUTATING command against a held single-instance lock must fail with

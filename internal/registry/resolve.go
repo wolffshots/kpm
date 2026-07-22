@@ -76,12 +76,14 @@ func Merge(mans []NamedManifest) (map[string]*Entry, []Conflict) {
 func HashDef(def *PackageDef) (string, error) {
 	norm := *def
 	// Description/Homepage are presentational registry-only metadata (JSON-
-	// OUTPUT.md §3) and TestedFw is advisory firmware metadata (REGISTRY.md §2):
-	// exclude all three from the canonical hash so changing them never looks like
-	// a def update or local drift to install/sync.
+	// OUTPUT.md §3), TestedFw is advisory firmware metadata (REGISTRY.md §2), and
+	// NhName is doctor's dump-log key (DOCTOR.md): exclude all four from the
+	// canonical hash so changing them never looks like a def update or local drift
+	// to install/sync.
 	norm.Description = ""
 	norm.Homepage = ""
 	norm.TestedFw = ""
+	norm.NhName = ""
 	u := norm.Uninstall
 	u.ExtraPaths = nilIfEmpty(u.ExtraPaths)
 	u.PurgePaths = nilIfEmpty(u.PurgePaths)

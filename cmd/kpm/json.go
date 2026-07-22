@@ -280,6 +280,29 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 
 // ---- doctor (DOCTOR.md / JSON-OUTPUT.md §2.5) ---------------------------
 //
+// This payload is a FORWARD contract: no hook consumes it yet (doctor is CLI +
+// --json only in 0.9.0). It is pinned by json_test.go's golden and a shape block
+// in uicontract_test.go so a Wave 3 badge can be built against a stable shape.
+
+type jsonDoctorPkg struct {
+	ID      string  `json:"id"`
+	Verdict string  `json:"verdict"` // loaded|not-loaded|crashed|load-failed|unknown
+	Detail  *string `json:"detail"`  // human sentence, null when none
+	Plugin  *string `json:"plugin"`  // diagnosed plugin .so device path, null when non-diagnosable
+	// TestedFw/FwUntested mirror search (D): the def's curator-confirmed firmware
+	// and whether the device is newer by major.minor. FwUntested drives the
+	// likely-cause clause appended to a bad verdict's detail.
+	TestedFw   *string `json:"tested_fw"`
+	FwUntested bool    `json:"fw_untested"`
+}
+
+type jsonDoctorPayload struct {
+	// DeviceFw is the firmware kpm read (null off-device or unreadable), the
+	// reference point for each package's fw_untested (D).
+	DeviceFw *string         `json:"device_fw"`
+	Packages []jsonDoctorPkg `json:"packages"`
+}
+
 // ---- config list / show (CONFIG.md §3.3) --------------------------------
 //
 // These payloads are the forward contract the Nickel ConfigDialog (Phase 2)

@@ -28,6 +28,13 @@ const SchemaVersion = 1
 // release working on. Advisory only — it never gates install/update. Like
 // Description/Homepage it is registry-only: excluded from HashDef and never
 // copied into packages.d, so a curator edit is never sync drift (REGISTRY.md §2).
+//
+// NhName is the NickelHook info name (`nh_info.name`) — the string NickelHook
+// stamps into its crash dump-log filename `/mnt/onboard/<nh_name>_<date>.log`.
+// It is NOT the package id or display name, so `kpm doctor` needs it to find a
+// package's load-failure dump. Optional and registry-only (excluded from HashDef,
+// never projected to packages.d) exactly like TestedFw; doctor falls back to the
+// display Name with spaces stripped when it is absent (DOCTOR.md).
 type PackageDef struct {
 	Name        string             `toml:"name"`
 	Source      string             `toml:"source"`
@@ -37,6 +44,7 @@ type PackageDef struct {
 	Description string             `toml:"description,omitempty"` // JSON-OUTPUT.md §3
 	Homepage    string             `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
 	TestedFw    string             `toml:"tested_fw,omitempty"`   // REGISTRY.md §2
+	NhName      string             `toml:"nh_name,omitempty"`     // DOCTOR.md
 	Uninstall   config.Uninstall   `toml:"uninstall"`
 	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
 }

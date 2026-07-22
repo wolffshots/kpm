@@ -33,6 +33,7 @@ Usage:
   kpm registry list
   kpm registry refresh [<name>]
   kpm search [<term>]
+  kpm doctor [<id>]            (diagnose whether installed Nickel plugins actually loaded)
   kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
   kpm sync [<id>...] [--overwrite]
   kpm config list <id>
@@ -150,6 +151,8 @@ func run(argv []string) int {
 		return app.cmdConfig(args)
 	case "search":
 		return app.cmdSearch(args)
+	case "doctor":
+		return app.cmdDoctor(args)
 	case "install":
 		return app.cmdInstall(args)
 	case "sync":
@@ -210,6 +213,11 @@ type App struct {
 	locked     bool          // holds the single-instance lock (mutating commands)
 	lockStop   chan struct{} // closed by releaseLock to stop the heartbeat
 	unreadable []string      // package defs skipped this run (E2), for the status line
+
+	// nickelMaps is the seam `kpm doctor` reads the running Nickel process's
+	// memory map through (signal 3). Nil in normal use — mapsReader() falls back
+	// to readNickelMaps, which reads /proc; tests inject a fake (DOCTOR.md).
+	nickelMaps func() (string, bool)
 }
 
 // newApp resolves paths, ensures directories, loads state, and — for mutating
