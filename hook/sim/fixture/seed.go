@@ -2,14 +2,17 @@
 // simulator (hook/sim) can drive real `kpm search`/`kpm uninstall` against it,
 // entirely offline. It seeds packages in mixed states:
 //
-//   koreader     not installed        (registry def, rich description)
-//   nickelclock  installed v0.4.0     (packages.d def + settings.ini on disk —
-//                                       the ini config-editing target)
-//   nickelmenu   not installed        (registry def)
-//   nickelnote   installed v1.2.0     (packages.d def + three text templates;
-//                                       pin.template absent — the create path)
-//   samplemod    installed v1.0.0     (packages.d def + manifest + a real file
-//                                       under KPM_SYSROOT — the uninstall target)
+//	koreader     not installed        (registry def, rich description)
+//	nickelclock  installed v0.4.0     (packages.d def + settings.ini on disk —
+//	                                    the ini config-editing target)
+//	nickelmenu   not installed        (registry def)
+//	nickelnote   installed v1.2.0     (packages.d def + three text templates;
+//	                                    pin.template absent — the create path)
+//	samplemod    installed v1.0.0     (packages.d def + manifest + a real file
+//	                                    under KPM_SYSROOT — the uninstall target;
+//	                                    also registry-managed with a STALE local
+//	                                    def missing the registry's [[configs]] —
+//	                                    the sync exercise target)
 //
 // It imports kpm's own internal packages (it lives inside module kpm) to write
 // state exactly the way the real commands and the UI-contract tests do, so the
@@ -30,6 +33,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/device"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 )
 
@@ -73,6 +77,20 @@ forge = "github"
 asset = "KoboRoot.tgz"
 description = "Show a custom note and stylesheet on the sleep and PIN screens."
 homepage = "https://github.com/kbanh/NickelNote"
+
+[packages.samplemod]
+name = "Sample Mod"
+source = "codeberg.org/o/samplemod"
+forge = "forgejo"
+asset = "KoboRoot.tgz"
+description = "A demo mod that recently gained an editable config — the sync target."
+
+  [[packages.samplemod.configs]]
+  name = "Settings"
+  path = "/mnt/onboard/.adds/samplemod/settings.ini"
+  format = "ini"
+  reload = "reboot"
+  description = "Sample mod options."
 `
 
 // clockSettings is a realistic NickelClock settings.ini with comments and three
@@ -145,14 +163,25 @@ func main() {
 
 	// samplemod: an installed, manifest-uninstallable package (the uninstall
 	// target). Written as a packages.d def + state manifest + a real file under
-	// KPM_SYSROOT, exactly like the uicontract uninstall test.
-	must(config.Save(p.PackageFile("samplemod"), &config.Package{
+	// KPM_SYSROOT, exactly like the uicontract uninstall test. It is ALSO
+	// registry-managed (Registry="main") with a STALE local def: the registry
+	// cache above has since added an [[configs]] declaration this local def lacks,
+	// so `kpm sync` re-copies the def and has_config flips true — the sync
+	// exercise target.
+	sampleLocal := &config.Package{
 		Name:      "Sample Mod",
 		Source:    "codeberg.org/o/samplemod",
 		Forge:     config.ForgeForgejo,
 		Asset:     "KoboRoot.tgz",
+		Registry:  "main",
 		Uninstall: config.Uninstall{}, // default "manifest" method
-	}))
+	}
+	must(config.Save(p.PackageFile("samplemod"), sampleLocal))
+	// Baseline the sync at the OLD (config-less) def hash so sync sees a clean
+	// upstream change (decision-tree case 3) and applies, rather than treating the
+	// mismatch as local drift.
+	oldSampleHash, err := registry.HashDef(registry.DefFromPackage(sampleLocal))
+	must(err)
 	manifestPath := "usr/local/samplemod/app"
 	hostFile := filepath.Join(sysroot, filepath.FromSlash(manifestPath))
 	must(os.MkdirAll(filepath.Dir(hostFile), 0o755))
@@ -209,6 +238,7 @@ func main() {
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
+	sm.SyncedDefSHA256 = oldSampleHash
 	st.Registry("main").LastFetched = time.Now().UTC().Format(time.RFC3339)
 	must(st.Save())
 
@@ -218,4 +248,5 @@ func main() {
 	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0)")
 	fmt.Println("  uninstall target: samplemod ->", hostFile)
 	fmt.Println("  config targets: nickelclock(settings.ini, ini) nickelnote(3 templates, text)")
+	fmt.Println("  sync target: samplemod (local def missing the registry's [[configs]])")
 }

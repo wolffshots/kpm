@@ -7,6 +7,8 @@
 //   --screenshot <dir>       offscreen: grab browse/detail/config png's, then exit
 //   --exercise-uninstall <id>  offscreen: drive the Uninstall flow end-to-end
 //   --exercise-config <id>     offscreen: drive Settings → edit → Save end-to-end
+//   --exercise-sync            offscreen: tap Sync, assert samplemod's def gains
+//                              the registry's config table (has_config flips true)
 //
 // Screenshot/exercise modes are designed for QT_QPA_PLATFORM=offscreen.
 
@@ -17,10 +19,14 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPixmap>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -277,6 +283,78 @@ static void runExerciseConfig(const QString &id) {
       });
 }
 
+// runExerciseSync drives the Sync footer button end to end, offline: tap Sync ->
+// BrowseDialog::sync() -> KpmProcess::sync() runs `kpm sync --json`, which re-copies
+// the registry def (now carrying a config declaration the local def predated) into
+// packages.d. It then asserts, from the sandbox, that (a) samplemod's packages.d
+// def gained the [[configs]] table and (b) a fresh `kpm search --json` reports
+// has_config=true for samplemod (exit 0 = PASS; a missing button or an un-synced
+// def fails non-zero). Mirrors the seed's sync target (fixture/seed.go).
+static void runExerciseSync() {
+  QString kpmRoot = QString::fromLocal8Bit(qgetenv("KPM_ROOT"));
+  QString defPath = kpmRoot + "/.adds/kpm/packages.d/samplemod.toml";
+
+  waitForRows(
+      [defPath]() {
+        QLabel *btn = findLabelByText("Sync");
+        if (!btn) {
+          std::fprintf(stderr, "sim: no Sync button in the browse footer\n");
+          qApp->exit(5);
+          return;
+        }
+        std::fprintf(stderr, "sim: tapping Sync\n");
+        sendClick(btn); // -> BrowseDialog::sync() -> KpmProcess::sync() runs `kpm sync`
+        // Give kpm time to take the lock, re-copy the def, and release, then assert.
+        QTimer::singleShot(4000, qApp, [defPath]() {
+          int rc = 0;
+          // (a) the local def now carries the registry's config table.
+          QByteArray def = readBytes(defPath);
+          if (!def.contains("[[configs]]")) {
+            std::fprintf(stderr, "sim: FAIL — samplemod def has no [[configs]] after sync:\n%s\n", def.constData());
+            rc = 8;
+          } else {
+            std::fprintf(stderr, "sim: PASS — samplemod def gained the [[configs]] table\n");
+          }
+          // (b) a fresh `kpm search --json` reports has_config=true for samplemod.
+          QProcess sp;
+          sp.start(QString::fromLocal8Bit(qgetenv("NKPM_KPM")), QStringList{"search", "--json"});
+          if (!sp.waitForFinished(15000)) {
+            std::fprintf(stderr, "sim: FAIL — `kpm search --json` did not finish\n");
+            qApp->exit(9);
+            return;
+          }
+          QByteArray out = sp.readAllStandardOutput();
+          int idx = out.indexOf("BEGIN_JSON");
+          QJsonObject payload;
+          if (idx >= 0) {
+            payload = QJsonDocument::fromJson(out.mid(idx + static_cast<int>(sizeof("BEGIN_JSON") - 1))).object();
+          }
+          bool found = false, hasConfig = false;
+          for (const QJsonValue &v : payload.value("packages").toArray()) {
+            QJsonObject o = v.toObject();
+            if (o.value("id").toString() == "samplemod") {
+              found = true;
+              hasConfig = o.value("has_config").toBool();
+            }
+          }
+          if (!found) {
+            std::fprintf(stderr, "sim: FAIL — samplemod missing from `kpm search --json`\n");
+            rc = 10;
+          } else if (!hasConfig) {
+            std::fprintf(stderr, "sim: FAIL — samplemod has_config=false after sync\n");
+            rc = 10;
+          } else {
+            std::fprintf(stderr, "sim: PASS — search --json reports samplemod has_config=true\n");
+          }
+          qApp->exit(rc);
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 int main(int argc, char **argv) {
   QApplication app(argc, argv);
 
@@ -284,6 +362,7 @@ int main(int argc, char **argv) {
   QString screenshotDir;
   QString uninstallId;
   QString configId;
+  bool exerciseSync = false;
 
   QStringList args = app.arguments();
   for (int i = 1; i < args.size(); i++) {
@@ -300,6 +379,8 @@ int main(int argc, char **argv) {
       uninstallId = args.at(++i);
     } else if (a == "--exercise-config" && i + 1 < args.size()) {
       configId = args.at(++i);
+    } else if (a == "--exercise-sync") {
+      exerciseSync = true;
     }
   }
 
@@ -314,6 +395,8 @@ int main(int argc, char **argv) {
     runExerciseUninstall(uninstallId);
   } else if (!configId.isEmpty()) {
     runExerciseConfig(configId);
+  } else if (exerciseSync) {
+    runExerciseSync();
   }
 
   return app.exec();

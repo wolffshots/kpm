@@ -75,6 +75,17 @@ Offscreen end-to-end config edit (drives DetailDialog -> Settings -> ConfigDialo
 # (exit 0 = PASS; a non-surgical rewrite or a missing button fails non-zero).
 ```
 
+Offscreen end-to-end sync (drives the browse footer's **Sync** button ->
+`kpm sync`):
+
+```sh
+./run.sh --exercise-sync
+# taps Sync, then asserts (a) samplemod's packages.d def gained the [[configs]]
+# table the registry cache declares but its local def predated, and (b) a fresh
+# `kpm search --json` reports has_config=true for samplemod (exit 0 = PASS; a
+# missing button or an un-synced def fails non-zero).
+```
+
 The sandbox lives at `/tmp/kpm-sim-sandbox` (override with `SANDBOX=...`; keep an
 existing one with `RESEED=0`). `KPM_SYSROOT` points into it, so sim-driven
 uninstalls never touch the real filesystem.
@@ -89,16 +100,17 @@ uninstalls never touch the real filesystem.
 | nickelclock | installed v0.4.0 | Uninstall (marker-remove) + Settings (ini config — the config-edit target) |
 | nickelmenu | not installed | Install |
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path) |
-| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall exercise target) |
+| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target |
 
-## Which of the ten UI actions work end-to-end
+## Which of the eleven UI actions work end-to-end
 
-The ten commands the hook issues (`hook/src/kpmprocess.cc`):
+The eleven commands the hook issues (`hook/src/kpmprocess.cc`):
 
 | action | works in sim | notes |
 |--------|:---:|-------|
 | **search** (browse) | ✅ | offline, read-only; drives the whole browse/detail view |
 | **uninstall** | ✅ | offline mutation; confined to `KPM_SYSROOT`; validated end-to-end |
+| **sync** | ✅ | offline mutation; reads the registry cache + rewrites packages.d; `--exercise-sync` verifies samplemod gains its config |
 | **config list / show** | ✅ | offline reads; drive the ConfigDialog file picker + entries |
 | **config set** | ✅ | offline mutation; confined to `KPM_SYSROOT`; `--exercise-config` byte-verifies the surgical write |
 | install | ⚠️ | `kpm install --yes` registers the def offline (works), but DetailDialog chains `kpm update`, which needs the network — the fetch fails and the error dialog shows |
