@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QScreen>
+#include <QTimer>
 
 #include <NickelHook.h>
 
@@ -109,9 +110,78 @@ void Dialog::hideChrome(MainWindowController *mwc) {
 
   nh_log("NickelKPM: chrome hidden (status bar: %s, nav view: %s)", hidStatusBar ? "yes" : "no",
          hiddenNavView ? "yes" : (nav ? "already hidden" : "not found"));
+
+  // Sleep/wake tears down the power view and re-asserts the home chrome
+  // (showStatusBar + re-show MainNavView), clobbering the hide above. Install an
+  // app-wide filter that reacts to that symptom and re-hides. Only the recording
+  // dialog (which actually hid something) installs one; stacked dialogs that
+  // recorded nothing skip it and their handler never runs.
+  if (hidStatusBar || hiddenNavView) {
+    chromeGuard = new ChromeGuard(this);
+    QApplication::instance()->installEventFilter(chromeGuard);
+    nh_log("NickelKPM: chrome guard installed (app event filter)");
+  }
+}
+
+// reassertChrome re-hides the home-screen chrome Nickel re-showed behind our
+// back. `shownNav` is the MainNavView whose Show event just fired. It never
+// calls show() — only re-hides (idempotent) — and refreshes hiddenNavView so
+// ~Dialog restores the live widget even if Nickel recreated it. hidStatusBar
+// semantics are unchanged: the handler re-hides the bar but does not touch the
+// recorded flag.
+void Dialog::reassertChrome(QWidget *shownNav) {
+  bool navRefound = (hiddenNavView != shownNav);
+  hiddenNavView = shownNav; // Nickel may have recreated it; aim ~Dialog's restore here
+
+  bool navReHidden = false;
+  if (hiddenNavView->isVisible()) {
+    hiddenNavView->hide();
+    navReHidden = true;
+  }
+  bool statusReHidden = reassertStatusBar();
+
+  // Two fragilities the immediate re-hide above does not fully cover: re-hiding
+  // inside the Show delivery can be clobbered by the completing show(), and wake
+  // re-shows the bar and the nav in either order (a status bar re-shown just AFTER
+  // this nav Show is missed). Queue a re-assert for the end of the event-loop turn
+  // as a safety net; `this` cancels it if the dialog closes first.
+  QTimer::singleShot(0, this, [this] {
+    if (hiddenNavView && hiddenNavView->isVisible()) {
+      hiddenNavView->hide();
+    }
+    reassertStatusBar();
+  });
+
+  nh_log("NickelKPM: chrome guard fired — nav %s (%s), status bar %s",
+         navRefound ? "re-found (recreated)" : "same widget", navReHidden ? "re-hidden" : "already hidden",
+         statusReHidden ? "re-hidden" : "already hidden");
+}
+
+// reassertStatusBar re-hides the status bar iff we recorded hiding it. Symbol-
+// guarded and idempotent (isVisible short-circuits). Returns whether it hid.
+bool Dialog::reassertStatusBar() {
+  if (!hidStatusBar || !MainWindowController__statusBarController || !StatusBarController__hideStatusBar ||
+      !StatusBarController__isVisible) {
+    return false;
+  }
+  MainWindowController *mwc = MainWindowController__sharedInstance();
+  StatusBarController *sbc = MainWindowController__statusBarController(mwc);
+  if (sbc && StatusBarController__isVisible(sbc)) {
+    StatusBarController__hideStatusBar(sbc);
+    return true;
+  }
+  return false;
 }
 
 Dialog::~Dialog() {
+  // Remove the guard FIRST, before restoring — otherwise the nav->show() /
+  // showStatusBar() below would re-trigger the filter and re-hide what we are
+  // restoring. Dropping ownership here makes the restore fire exactly once.
+  if (chromeGuard) {
+    QApplication::instance()->removeEventFilter(chromeGuard);
+    delete chromeGuard;
+    chromeGuard = nullptr;
+  }
   if (hidStatusBar) {
     MainWindowController *mwc = MainWindowController__sharedInstance();
     if (StatusBarController *sbc = MainWindowController__statusBarController(mwc)) {
@@ -121,6 +191,19 @@ Dialog::~Dialog() {
   if (hiddenNavView) {
     hiddenNavView->show();
   }
+}
+
+ChromeGuard::ChromeGuard(Dialog *owner) : QObject(owner), owner(owner) {}
+
+bool ChromeGuard::eventFilter(QObject *obj, QEvent *event) {
+  if (event->type() == QEvent::Show || event->type() == QEvent::ShowToParent) {
+    if (QWidget *w = qobject_cast<QWidget *>(obj)) {
+      if (!qstrcmp(w->metaObject()->className(), "MainNavView")) {
+        owner->reassertChrome(w);
+      }
+    }
+  }
+  return QObject::eventFilter(obj, event);
 }
 
 void Dialog::showKeyboard() { N3Dialog__showKeyboard(dialog); }

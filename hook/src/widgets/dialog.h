@@ -6,12 +6,15 @@
 // ReadingView-only auto-close (currentViewChanged / SyncController) is dropped;
 // the dialog closes only when the user taps its close button (closeTapped).
 
+#include <QEvent>
 #include <QFrame>
 #include <QMargins>
 #include <QPointer>
 #include <QTextEdit>
 
 #include "../nkpm.h"
+
+class ChromeGuard;
 
 class Dialog : public QFrame {
   Q_OBJECT
@@ -41,8 +44,36 @@ private:
 
   void hideChrome(MainWindowController *mwc);
 
+  // reassertChrome re-hides chrome Nickel re-shows behind our back (sleep/wake).
+  // Called by the ChromeGuard app-wide event filter; see dialog.cc.
+  void reassertChrome(QWidget *shownNav);
+  bool reassertStatusBar(); // re-hide the status bar if we recorded hiding it
+  friend class ChromeGuard;
+
   // What hideChrome() actually hid, so ~Dialog restores exactly that. The nav
   // view is a QPointer: Nickel owns it and could delete it under us.
   bool hidStatusBar = false;
   QPointer<QWidget> hiddenNavView;
+
+  // App-wide event filter that re-hides chrome after sleep/wake re-asserts it.
+  // Installed only by the recording dialog (the one that actually hid chrome);
+  // removed at the very start of ~Dialog before the restore. See dialog.cc.
+  ChromeGuard *chromeGuard = nullptr;
+};
+
+// ChromeGuard watches every widget Show in the process for a MainNavView Nickel
+// re-shows out from under us (the wake/power-view teardown re-asserts the home
+// chrome), and tells the owning Dialog to re-hide it. Installed on the
+// QApplication, mirroring the app-wide filter idiom in widgets/pagedstack.cc.
+class ChromeGuard : public QObject {
+  Q_OBJECT
+
+public:
+  explicit ChromeGuard(Dialog *owner);
+
+protected:
+  bool eventFilter(QObject *obj, QEvent *event) override;
+
+private:
+  Dialog *owner = nullptr;
 };
