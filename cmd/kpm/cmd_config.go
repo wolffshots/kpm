@@ -28,7 +28,7 @@ const maxShowEntries = 2000
 // set mutates (holds the single-instance lock, writes atomically).
 func (a *App) cmdConfig(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm config list|show|set")
+		fmt.Fprintln(os.Stderr, "usage: kpm config list|show|set|init")
 		return exitError
 	}
 	sub, rest := args[0], args[1:]
@@ -39,6 +39,8 @@ func (a *App) cmdConfig(args []string) int {
 		return a.cmdConfigShow(rest)
 	case "set":
 		return a.cmdConfigSet(rest)
+	case "init":
+		return a.cmdConfigInit(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "kpm config: unknown subcommand %q\n", sub)
 		return exitError
@@ -82,6 +84,7 @@ func (a *App) cmdConfigList(args []string) int {
 			Exists:      exists,
 			CanCreate:   c.Create,
 			Editable:    editable,
+			HasTemplate: c.Template != "",
 			Description: ptr(c.Description),
 		})
 	}
@@ -168,6 +171,7 @@ func (a *App) cmdConfigShow(args []string) int {
 			ID: id,
 			File: jsonConfigShowFile{
 				Name: decl.Name, Format: decl.Format, Reload: decl.EffectiveReload(), Exists: exists,
+				HasTemplate: decl.Template != "",
 			},
 			Entries:   out,
 			Truncated: truncated,
@@ -319,6 +323,109 @@ func (a *App) cmdConfigSet(args []string) int {
 	if jsonMode {
 		// Reuse the mutation shape the hook already parses; a config edit stages
 		// nothing (CONFIG.md §3.3).
+		emitMutation([]string{id}, nil, false, decl.RebootRequired(), "")
+	}
+	return exitOK
+}
+
+// cmdConfigInit creates a declared config file from its example template
+// (CONFIG.md §3.x). Mutating: it uses the identical write path as `config set`
+// (sysroot write guard, path-policy re-check, symlinked-parent refusal, atomic
+// write, Guard on the bytes). It refuses a declaration with no template, and
+// refuses to overwrite an existing file unless --force is given.
+func (a *App) cmdConfigInit(args []string) int {
+	fs := flag.NewFlagSet("config init", flag.ContinueOnError)
+	forceF := fs.Bool("force", false, "overwrite the file if it already exists")
+	flags, pos := splitArgs(args, nil)
+	flags, jsonMode := takeJSON(flags)
+	if err := fs.Parse(flags); err != nil {
+		return exitError
+	}
+	if len(pos) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: kpm config init <id> <name-or-index> [--force] [--json]")
+		return exitError
+	}
+	id, sel := pos[0], pos[1]
+
+	failJSON := func(msg string) {
+		if jsonMode {
+			emitMutation(nil, []jsonFailure{{ID: id, Error: msg}}, false, false, msg)
+		}
+	}
+
+	// Off-device write guard, identical to cmd_config.go set / cmd_uninstall.go:
+	// writes resolve against KPM_SYSROOT, so a KPM_ROOT sandbox without KPM_SYSROOT
+	// would land on the real rootfs. On a real device both are unset (G5).
+	if os.Getenv("KPM_SYSROOT") == "" {
+		if os.Getenv("KPM_ROOT") != "" {
+			fmt.Fprintln(os.Stderr, "kpm config init: KPM_ROOT is set but KPM_SYSROOT is not — refusing to write against the real rootfs; set KPM_SYSROOT")
+			return exitError
+		}
+		if runtime.GOOS != "linux" {
+			fmt.Fprintln(os.Stderr, "kpm config init: set KPM_SYSROOT when running off-device")
+			return exitError
+		}
+	}
+
+	decl, code := a.resolveConfig(id, sel, jsonMode, "init")
+	if code != exitOK {
+		return code
+	}
+	if decl.Template == "" {
+		msg := fmt.Sprintf("%q declares no example template to create from", decl.Name)
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm config init:", msg)
+		return exitError
+	}
+
+	// Re-validate the path immediately before writing (defense in depth: the local
+	// packages.d snapshot is user-editable), returning the cleaned device path.
+	abs, err := uninstall.ConfigPath(decl.Path)
+	if err != nil {
+		failJSON(err.Error())
+		fmt.Fprintln(os.Stderr, "kpm config init:", err)
+		return exitError
+	}
+
+	_, exists, err := a.readConfigFile(decl)
+	if err != nil {
+		failJSON(err.Error())
+		fmt.Fprintln(os.Stderr, "kpm config init:", err)
+		return exitError
+	}
+	if exists && !*forceF {
+		msg := fmt.Sprintf("%q already exists — use --force to overwrite it from the template", decl.Name)
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm config init:", msg)
+		return exitError
+	}
+
+	newRaw, err := modconfig.SeedContent(decl)
+	if err != nil {
+		failJSON(err.Error())
+		fmt.Fprintln(os.Stderr, "kpm config init:", err)
+		return exitError
+	}
+
+	// Never write through a symlinked parent (C7), the same guard set/uninstall apply.
+	if bad, ok := uninstall.SymlinkedConfigParent(a.paths, abs); ok {
+		msg := fmt.Sprintf("refusing to write %s: symlinked parent %s", decl.Path, bad)
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm config init:", msg)
+		return exitError
+	}
+	if err := device.WriteFileAtomic(a.paths.HostPath(abs), newRaw); err != nil {
+		failJSON(err.Error())
+		fmt.Fprintln(os.Stderr, "kpm config init:", err)
+		return exitError
+	}
+
+	a.paths.Log("CONFIG", fmt.Sprintf("%s  %s  init from template", id, decl.Name))
+	fmt.Printf("kpm: created %s (%s) from its example\n", decl.Name, id)
+	if decl.RebootRequired() {
+		fmt.Println("Reboot required for the change to take effect.")
+	}
+	if jsonMode {
 		emitMutation([]string{id}, nil, false, decl.RebootRequired(), "")
 	}
 	return exitOK

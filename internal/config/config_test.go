@@ -266,6 +266,43 @@ func TestModConfigValidate(t *testing.T) {
 	}
 }
 
+// CONFIG.md §2: a seed template is bounded and text — an oversized or NUL-bearing
+// template is rejected by Validate (so ParseManifest drops the def), while a
+// modestly-sized text template passes.
+func TestModConfigValidateTemplate(t *testing.T) {
+	ok := ModConfig{Name: "N", Path: "/mnt/onboard/.adds/x/c.template", Format: FormatText, Template: "hello\nworld\n"}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("a normal template must be accepted: %v", err)
+	}
+	oversize := ModConfig{Name: "N", Path: "/mnt/onboard/.adds/x/c.template", Format: FormatText, Template: strings.Repeat("A", MaxTemplate+1)}
+	if err := oversize.Validate(); err == nil {
+		t.Error("a template over MaxTemplate must be rejected")
+	}
+	binary := ModConfig{Name: "N", Path: "/mnt/onboard/.adds/x/c.template", Format: FormatText, Template: "a\x00b"}
+	if err := binary.Validate(); err == nil {
+		t.Error("a template with a NUL byte must be rejected")
+	}
+}
+
+// CONFIG.md §2: Createable is true when create=true OR a template is declared —
+// either lets `config init`/`config set` create a missing file.
+func TestModConfigCreateable(t *testing.T) {
+	cases := []struct {
+		c    ModConfig
+		want bool
+	}{
+		{ModConfig{}, false},
+		{ModConfig{Create: true}, true},
+		{ModConfig{Template: "x\n"}, true},
+		{ModConfig{Create: true, Template: "x\n"}, true},
+	}
+	for i, tc := range cases {
+		if got := tc.c.Createable(); got != tc.want {
+			t.Errorf("case %d Createable() = %v, want %v", i, got, tc.want)
+		}
+	}
+}
+
 func TestSaveFreshHasNoUninstallNoise(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fresh.toml")

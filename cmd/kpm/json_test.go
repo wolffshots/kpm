@@ -125,7 +125,7 @@ func TestConfigListJSONGolden(t *testing.T) {
 	writeDeviceFile(t, sysroot, clockPath, clockBody)
 	out := captureStdout(t, func() { a.cmdConfig([]string{"list", "nickelclock", "--json"}) })
 	got := lastJSON(t, out)
-	want := `{"id":"nickelclock","configs":[{"name":"Settings","path":"/mnt/onboard/.adds/nickelclock/settings.ini","format":"ini","reload":"reboot","exists":true,"can_create":false,"editable":true,"description":"Clock and battery display options."}]}`
+	want := `{"id":"nickelclock","configs":[{"name":"Settings","path":"/mnt/onboard/.adds/nickelclock/settings.ini","format":"ini","reload":"reboot","exists":true,"can_create":false,"editable":true,"has_template":false,"description":"Clock and battery display options."}]}`
 	if got != want {
 		t.Errorf("config list --json\n got: %s\nwant: %s", got, want)
 	}
@@ -137,7 +137,7 @@ func TestConfigShowJSONGolden(t *testing.T) {
 	writeDeviceFile(t, sysroot, clockPath, clockBody)
 	out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelclock", "Settings", "--json"}) })
 	got := lastJSON(t, out)
-	want := `{"id":"nickelclock","file":{"name":"Settings","format":"ini","reload":"reboot","exists":true},"entries":[{"section":"General","key":"Margin","line":2,"value":"10","sensitive":false},{"section":"Clock","key":"Enabled","line":5,"value":"true","sensitive":false},{"section":"Clock","key":"Placement","line":6,"value":"Footer","sensitive":false}],"truncated":false}`
+	want := `{"id":"nickelclock","file":{"name":"Settings","format":"ini","reload":"reboot","exists":true,"has_template":false},"entries":[{"section":"General","key":"Margin","line":2,"value":"10","sensitive":false},{"section":"Clock","key":"Enabled","line":5,"value":"true","sensitive":false},{"section":"Clock","key":"Placement","line":6,"value":"Footer","sensitive":false}],"truncated":false}`
 	if got != want {
 		t.Errorf("config show --json\n got: %s\nwant: %s", got, want)
 	}
@@ -154,6 +154,43 @@ func TestConfigSetJSONGolden(t *testing.T) {
 	// Reuses the mutation shape; reboot_required tracks reload == "reboot".
 	if want := `{"changed":["nickelclock"],"failed":[],"staged":false,"reboot_required":true}`; got != want {
 		t.Errorf("config set --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// CONFIG.md §3.x: a template-bearing declaration reports has_template:true in
+// both list and show, and `config init` seeds it — the mutation-shape golden.
+
+func TestConfigListHasTemplateJSONGolden(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	out := captureStdout(t, func() { a.cmdConfig([]string{"list", "nickelnote", "--json"}) })
+	got := lastJSON(t, out)
+	want := `{"id":"nickelnote","configs":[{"name":"Note content","path":"/mnt/onboard/.adds/nickelnote/content.template","format":"text","reload":"auto","exists":false,"can_create":false,"editable":true,"has_template":true,"description":null}]}`
+	if got != want {
+		t.Errorf("config list --json (template)\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigShowHasTemplateJSONGolden(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	// The file does not exist yet: show reports exists:false, has_template:true.
+	out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelnote", "Note content", "--json"}) })
+	got := lastJSON(t, out)
+	want := `{"id":"nickelnote","file":{"name":"Note content","format":"text","reload":"auto","exists":false,"has_template":true},"entries":[],"truncated":false}`
+	if got != want {
+		t.Errorf("config show --json (template)\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigInitJSONGolden(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	out := captureStdout(t, func() { a.cmdConfig([]string{"init", "nickelnote", "Note content", "--json"}) })
+	got := lastJSON(t, out)
+	// reboot_required false because reload == "auto"; init stages nothing.
+	if want := `{"changed":["nickelnote"],"failed":[],"staged":false,"reboot_required":false}`; got != want {
+		t.Errorf("config init --json\n got: %s\nwant: %s", got, want)
 	}
 }
 

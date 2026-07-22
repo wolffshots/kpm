@@ -272,6 +272,7 @@ type jsonConfigFile struct {
 	Exists      bool    `json:"exists"`
 	CanCreate   bool    `json:"can_create"`
 	Editable    bool    `json:"editable"`
+	HasTemplate bool    `json:"has_template"` // a seed template is declared (`config init` — CONFIG.md §3.x)
 	Description *string `json:"description"`
 }
 
@@ -281,10 +282,11 @@ type jsonConfigListPayload struct {
 }
 
 type jsonConfigShowFile struct {
-	Name   string `json:"name"`
-	Format string `json:"format"`
-	Reload string `json:"reload"`
-	Exists bool   `json:"exists"`
+	Name        string `json:"name"`
+	Format      string `json:"format"`
+	Reload      string `json:"reload"`
+	Exists      bool   `json:"exists"`
+	HasTemplate bool   `json:"has_template"` // a seed template is declared (`config init` — CONFIG.md §3.x)
 }
 
 // jsonConfigEntry is one row of a show payload. key is null for text lines

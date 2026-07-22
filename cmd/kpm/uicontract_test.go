@@ -538,6 +538,10 @@ func assertMutationShape(t *testing.T, m map[string]any) {
 //   config set <id> <name> ... --json   (KpmProcess::configSet — mutating):
 //     the shared mutation shape: changed[], failed[], staged(BOOL),
 //     reboot_required(BOOL). reboot_required = (reload == "reboot").
+//   config init <id> <sel> --json   (KpmProcess::configInit — mutating):
+//     same mutation shape; seeds a missing file from its declared template.
+//     list/show gain has_template(bool) so configdialog.cc can offer the
+//     "Create from example" button without a second CLI call (CONFIG.md §3.x).
 
 func TestUIContractConfigList(t *testing.T) {
 	a, sysroot := newUninstallApp(t)
@@ -565,6 +569,7 @@ func TestUIContractConfigList(t *testing.T) {
 	wantBool(t, f0, "exists")
 	wantBool(t, f0, "can_create")
 	wantBool(t, f0, "editable")
+	wantBool(t, f0, "has_template") // drives the ConfigDialog "Create from example" button (CONFIG.md §3.x)
 	wantStrOrNull(t, f0, "description")
 }
 
@@ -586,6 +591,7 @@ func TestUIContractConfigShow(t *testing.T) {
 	wantStr(t, file, "format")
 	wantStr(t, file, "reload")
 	wantBool(t, file, "exists")
+	wantBool(t, file, "has_template") // drives the ConfigDialog "Create from example" button (CONFIG.md §3.x)
 	entries := wantArray(t, m, "entries")
 	if len(entries) == 0 {
 		t.Fatal("entries should be non-empty")
@@ -635,6 +641,40 @@ func TestUIContractConfigSet(t *testing.T) {
 	}
 	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "nickelclock" {
 		t.Errorf("changed = %v, want [nickelclock]", m["changed"])
+	}
+}
+
+// ---- 10b. config init <id> <sel> --json (CONFIG.md §3.x) ----------------
+//
+// CONTRACT: the ConfigDialog "Create from example" button (configdialog.cc,
+// KpmProcess::configInit) seeds a missing file from its declared template. It is
+// mutating and reuses the shared §2.3 mutation shape; staged is always false (a
+// local file write stages nothing), reboot_required tracks reload == "reboot".
+// The hook reads exactly changed[]/failed[]/staged/reboot_required, then re-reads
+// the file so the seeded lines render for editing.
+
+func TestUIContractConfigInit(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+
+	var code int
+	out := captureStdout(t, func() {
+		code = a.cmdConfig([]string{"init", "nickelnote", "Note content", "--json"})
+	})
+	if code != exitOK {
+		t.Fatalf("config init exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	if wantBool(t, m, "staged") != false {
+		t.Errorf("config init stages nothing, staged = %v", m["staged"])
+	}
+	// reload=auto → reboot_required false.
+	if wantBool(t, m, "reboot_required") != false {
+		t.Errorf("reload=auto init must report reboot_required false, got %v", m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "nickelnote" {
+		t.Errorf("init changed = %v, want [nickelnote]", m["changed"])
 	}
 }
 

@@ -370,3 +370,88 @@ func assertOnlyLineDiffers(t *testing.T, before, after string) {
 		t.Errorf("expected exactly 1 changed line, got %d", diffs)
 	}
 }
+
+// ---- SeedContent (CONFIG.md §3.x — `kpm config init`) -------------------
+
+// The three real NickelNote templates (PII scrubbed exactly as shipped in the
+// registry), used as golden fixtures: SeedContent must reproduce them byte for
+// byte with a single trailing newline.
+const seedContentTemplate = `<span>Your Name</span><br />
+<span style="font-size: 32px">If found, Please return at</span><br />
+<span style="font-size: 32px;">+1 555 000 0000</span>
+`
+
+const seedStyleTemplate = `#infoWidget {
+  color: black;
+  background-color: rgba(255,255,255,170);
+  min-height: 290px;
+  max-height: 290px;
+
+  margin-top: 200px;
+  margin-left: -30px;
+}
+
+#infoWidget[powerOffView=true]{
+  background-color: rgba(0,0,0,170);
+}
+
+QLabel{
+	min-width: 400px;
+	min-height: 300px;
+}
+`
+
+const seedPinTemplate = `<p style="font-size: 32px;">
+This tablet is protected and belongs to <br/>
+<b>Your Name</b>
+<br/>
+<br/>
+If found, please return to <br/>
+US: +1 555 000 0000<br/>
+CA: +1 555 000 0000<br/>
+</p>
+`
+
+func TestSeedContent(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		// Golden fixtures: already-normalized templates pass through unchanged.
+		{"nickelnote content", seedContentTemplate, seedContentTemplate},
+		{"nickelnote style (tabs preserved)", seedStyleTemplate, seedStyleTemplate},
+		{"nickelnote pin", seedPinTemplate, seedPinTemplate},
+		// Normalization: CRLF stripped to LF.
+		{"crlf stripped", "a\r\nb\r\n", "a\nb\n"},
+		// Normalization: a missing trailing newline is added.
+		{"adds trailing newline", "a\nb", "a\nb\n"},
+		// Normalization: multiple trailing newlines collapse to exactly one.
+		{"collapses trailing newlines", "a\nb\n\n\n", "a\nb\n"},
+		// A lone content line still gets its single terminator.
+		{"single line", "just one line", "just one line\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SeedContent(config.ModConfig{Name: "N", Path: "/mnt/onboard/.adds/x/c.template", Format: config.FormatText, Template: tc.template})
+			if err != nil {
+				t.Fatalf("SeedContent error: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("SeedContent\n got: %q\nwant: %q", got, tc.want)
+			}
+			// The seeded bytes must always end in exactly one newline.
+			if !bytes.HasSuffix(got, []byte("\n")) || bytes.HasSuffix(got, []byte("\n\n")) {
+				t.Errorf("seeded bytes must end in exactly one newline: %q", got)
+			}
+		})
+	}
+}
+
+// A NUL byte in a template is refused by SeedContent's Guard (defense in depth —
+// ParseManifest already drops such a def via config.Validate).
+func TestSeedContentRefusesBinary(t *testing.T) {
+	if _, err := SeedContent(config.ModConfig{Name: "N", Path: "/p", Format: config.FormatText, Template: "a\x00b"}); err == nil {
+		t.Error("SeedContent must refuse a NUL-bearing template")
+	}
+}

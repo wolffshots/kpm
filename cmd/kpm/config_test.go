@@ -76,7 +76,7 @@ func TestConfigListExistsAndNotCreated(t *testing.T) {
 		}
 	})
 	got := lastJSON(t, out)
-	want := `{"id":"nickelclock","configs":[{"name":"Settings","path":"/mnt/onboard/.adds/nickelclock/settings.ini","format":"ini","reload":"reboot","exists":true,"can_create":false,"editable":true,"description":"Clock and battery display options."}]}`
+	want := `{"id":"nickelclock","configs":[{"name":"Settings","path":"/mnt/onboard/.adds/nickelclock/settings.ini","format":"ini","reload":"reboot","exists":true,"can_create":false,"editable":true,"has_template":false,"description":"Clock and battery display options."}]}`
 	if got != want {
 		t.Errorf("config list --json\n got: %s\nwant: %s", got, want)
 	}
@@ -99,7 +99,7 @@ func TestConfigShowINIByNameAndIndex(t *testing.T) {
 	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
 	writeDeviceFile(t, sysroot, clockPath, clockBody)
 
-	want := `{"id":"nickelclock","file":{"name":"Settings","format":"ini","reload":"reboot","exists":true},"entries":[{"section":"General","key":"Margin","line":2,"value":"10","sensitive":false},{"section":"Clock","key":"Enabled","line":5,"value":"true","sensitive":false},{"section":"Clock","key":"Placement","line":6,"value":"Footer","sensitive":false}],"truncated":false}`
+	want := `{"id":"nickelclock","file":{"name":"Settings","format":"ini","reload":"reboot","exists":true,"has_template":false},"entries":[{"section":"General","key":"Margin","line":2,"value":"10","sensitive":false},{"section":"Clock","key":"Enabled","line":5,"value":"true","sensitive":false},{"section":"Clock","key":"Placement","line":6,"value":"Footer","sensitive":false}],"truncated":false}`
 
 	for _, sel := range []string{"Settings", "settings", "1"} {
 		out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelclock", sel, "--json"}) })
@@ -115,7 +115,7 @@ func TestConfigShowTextKeyNull(t *testing.T) {
 	writeDeviceFile(t, sysroot, notePath, "line one\nline two")
 	out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelnote", "Note content", "--json"}) })
 	got := lastJSON(t, out)
-	want := `{"id":"nickelnote","file":{"name":"Note content","format":"text","reload":"auto","exists":true},"entries":[{"section":"","key":null,"line":1,"value":"line one","sensitive":false},{"section":"","key":null,"line":2,"value":"line two","sensitive":false}],"truncated":false}`
+	want := `{"id":"nickelnote","file":{"name":"Note content","format":"text","reload":"auto","exists":true,"has_template":false},"entries":[{"section":"","key":null,"line":1,"value":"line one","sensitive":false},{"section":"","key":null,"line":2,"value":"line two","sensitive":false}],"truncated":false}`
 	if got != want {
 		t.Errorf("show text\n got: %s\nwant: %s", got, want)
 	}
@@ -245,6 +245,133 @@ func TestConfigSetRefusesOversizeResult(t *testing.T) {
 	}
 	if got := readDeviceFile(t, sysroot, clockPath); got != clockBody {
 		t.Errorf("file must be untouched after a rejected oversize write, got %d bytes", len(got))
+	}
+}
+
+// ---- init: create from template (CONFIG.md §3.x) -----------------------
+
+// noteTemplate is a realistic multi-line text template; the on-disk seed must be
+// this content normalized to a single trailing newline (SeedContent).
+const noteTemplate = "<span>Your Name</span><br />\n<span style=\"font-size: 32px;\">+1 555 000 0000</span>\n"
+
+func noteTemplateConfig() config.ModConfig {
+	return config.ModConfig{Name: "Note content", Path: notePath, Format: config.FormatText, Reload: config.ReloadAuto, Template: noteTemplate}
+}
+
+// init on a missing file writes the normalized template bytes exactly.
+func TestConfigInitSeedsFromTemplate(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+
+	out := captureStdout(t, func() {
+		if code := a.cmdConfig([]string{"init", "nickelnote", "Note content", "--json"}); code != exitOK {
+			t.Fatalf("init exit %d", code)
+		}
+	})
+	got := lastJSON(t, out)
+	if want := `{"changed":["nickelnote"],"failed":[],"staged":false,"reboot_required":false}`; got != want {
+		t.Errorf("init --json\n got: %s\nwant: %s", got, want)
+	}
+	// The seeded bytes must equal SeedContent(decl) exactly.
+	wantBytes, err := modconfig.SeedContent(noteTemplateConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := readDeviceFile(t, sysroot, notePath); after != string(wantBytes) {
+		t.Errorf("seeded file mismatch\n got: %q\nwant: %q", after, string(wantBytes))
+	}
+}
+
+// init selects by 1-based index too.
+func TestConfigInitByIndex(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	if code := a.cmdConfig([]string{"init", "nickelnote", "1"}); code != exitOK {
+		t.Fatalf("init by index exit %d", code)
+	}
+	wantBytes, _ := modconfig.SeedContent(noteTemplateConfig())
+	if after := readDeviceFile(t, sysroot, notePath); after != string(wantBytes) {
+		t.Errorf("seeded file mismatch by index: %q", after)
+	}
+}
+
+// init refuses to clobber an existing file unless --force is given.
+func TestConfigInitExistsRefusedThenForce(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	writeDeviceFile(t, sysroot, notePath, "user's own edits\n")
+
+	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content"}); code != exitError {
+		t.Errorf("init over an existing file must refuse without --force, exit %d", code)
+	}
+	if after := readDeviceFile(t, sysroot, notePath); after != "user's own edits\n" {
+		t.Errorf("refused init must leave the file untouched: %q", after)
+	}
+	// --force overwrites it from the template.
+	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content", "--force"}); code != exitOK {
+		t.Fatalf("init --force exit %d", code)
+	}
+	wantBytes, _ := modconfig.SeedContent(noteTemplateConfig())
+	if after := readDeviceFile(t, sysroot, notePath); after != string(wantBytes) {
+		t.Errorf("--force must overwrite from the template: %q", after)
+	}
+}
+
+// init refuses a declaration that carries no template.
+func TestConfigInitNoTemplateRefused(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteConfig()}) // create=true, no template
+	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content"}); code != exitError {
+		t.Errorf("init of a template-less declaration must refuse, exit %d", code)
+	}
+}
+
+// init honors the path policy: a declared path outside the writable allowlist is
+// refused and nothing is written.
+func TestConfigInitPathPolicyRejection(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "bad", []config.ModConfig{
+		{Name: "Evil", Path: "/etc/evil.template", Format: config.FormatText, Template: "x\n"},
+	})
+	if code := a.cmdConfig([]string{"init", "bad", "Evil"}); code != exitError {
+		t.Errorf("init of a denied path must fail, exit %d", code)
+	}
+	host := filepath.Join(sysroot, "etc", "evil.template")
+	if _, err := os.Stat(host); err == nil {
+		t.Error("init must not write to a denied path")
+	}
+}
+
+// init respects the symlinked-parent guard (C7).
+func TestConfigInitSymlinkParentRefused(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	realDir := filepath.Join(sysroot, "opt", "outside")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(sysroot, filepath.FromSlash("mnt/onboard/.adds"))
+	if err := os.MkdirAll(linkParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(linkParent, "nickelnote")); err != nil {
+		t.Skipf("symlink unsupported on this host: %v", err)
+	}
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content"}); code != exitError {
+		t.Errorf("symlinked-parent init must be refused, exit %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "content.template")); err == nil {
+		t.Error("init must not land through the symlink")
+	}
+}
+
+// init obeys the KPM_SYSROOT write guard (KPM_ROOT set, KPM_SYSROOT unset).
+func TestConfigInitSysrootGuard(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
+	t.Setenv("KPM_SYSROOT", "") // KPM_ROOT stays set
+	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content"}); code != exitError {
+		t.Errorf("KPM_ROOT-without-KPM_SYSROOT must refuse init, exit %d", code)
 	}
 }
 

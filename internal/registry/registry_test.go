@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,5 +317,81 @@ func TestStaleness(t *testing.T) {
 	threeDaysAgo := now.Add(-3 * 24 * time.Hour).Format(time.RFC3339)
 	if got := Staleness(threeDaysAgo, now); got != "cached 3d ago" {
 		t.Errorf("staleness = %q, want cached 3d ago", got)
+	}
+}
+
+// CONFIG.md §2: a seed template on a [[configs]] block parses, is functional
+// (part of HashDef), and survives the ToPackage/DefFromPackage projection.
+func TestParseManifestConfigTemplate(t *testing.T) {
+	man := `schema_version = 1
+[packages.nickelnote]
+name = "NickelNote"
+
+  [[packages.nickelnote.configs]]
+  name = "Note content"
+  path = "/mnt/onboard/.adds/nickelnote/content.template"
+  format = "text"
+  create = true
+  template = '''
+<span>Your Name</span><br />
+'''
+`
+	m, err := ParseManifest([]byte(man))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, ok := m.Packages["nickelnote"]
+	if !ok {
+		t.Fatal("nickelnote should parse")
+	}
+	if len(def.Configs) != 1 || def.Configs[0].Template != "<span>Your Name</span><br />\n" {
+		t.Fatalf("template not parsed: %+v", def.Configs)
+	}
+}
+
+// A template is functional metadata: adding/changing it changes the def hash, and
+// the change round-trips through a local package projection.
+func TestHashDefIncludesTemplate(t *testing.T) {
+	base := &PackageDef{Name: "X", Source: "h/o/r", Forge: "forgejo", Asset: "KoboRoot.tgz",
+		Configs: []config.ModConfig{{Name: "C", Path: "/mnt/onboard/.adds/x/c.template", Format: config.FormatText}}}
+	withTpl := *base
+	withTpl.Configs = []config.ModConfig{{Name: "C", Path: "/mnt/onboard/.adds/x/c.template", Format: config.FormatText, Template: "hello\n"}}
+	hBase, _ := HashDef(base)
+	hTpl, _ := HashDef(&withTpl)
+	if hBase == hTpl {
+		t.Error("adding a template must change the def hash")
+	}
+	// Round trip through a local package preserves the template + its hash.
+	pkg := withTpl.ToPackage("x", "main", "v1")
+	if len(pkg.Configs) != 1 || pkg.Configs[0].Template != "hello\n" {
+		t.Fatalf("ToPackage lost the template: %+v", pkg.Configs)
+	}
+	hBack, _ := HashDef(DefFromPackage(pkg))
+	if hTpl != hBack {
+		t.Errorf("template hash not stable across projection: %q != %q", hTpl, hBack)
+	}
+}
+
+// A [[configs]] block whose template is oversized drops the whole def, exactly
+// like a bad format or unsafe path (config.Validate rejects it). A NUL byte is
+// not representable in a TOML string at all, so ParseManifest never sees one —
+// the NUL guard is defense-in-depth for programmatic defs, covered by
+// config.TestModConfigValidateTemplate and modconfig.TestSeedContentRefusesBinary.
+func TestParseManifestDropsOversizeTemplate(t *testing.T) {
+	oversize := `schema_version = 1
+[packages.bad]
+name = "Bad"
+
+  [[packages.bad.configs]]
+  name = "X"
+  path = "/mnt/onboard/.adds/bad/x.template"
+  format = "text"
+  template = "` + strings.Repeat("A", config.MaxTemplate+1) + "\"\n"
+	m, err := ParseManifest([]byte(oversize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Packages["bad"]; ok {
+		t.Error("def with an oversized template must be dropped")
 	}
 }

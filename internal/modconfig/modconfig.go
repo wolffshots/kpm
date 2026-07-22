@@ -59,6 +59,24 @@ func guardValue(value string) error {
 	return nil
 }
 
+// SeedContent normalizes a declaration's template into the exact bytes to write
+// when creating the file from its example (CONFIG.md §3.x — `kpm config init`).
+// It is pure over the template: strip every \r (so a registry authored on Windows
+// still lands as LF on the device), then ensure the content ends in exactly one
+// trailing \n (registry authors need not be precise about the closing newline),
+// and finally run the read/write Guard so an oversized or binary template is
+// refused before it can be written. An empty template yields a lone "\n" — but
+// `config init` refuses a declaration with no template before ever calling this.
+func SeedContent(decl config.ModConfig) ([]byte, error) {
+	s := strings.ReplaceAll(decl.Template, "\r", "")
+	s = strings.TrimRight(s, "\n") + "\n"
+	out := []byte(s)
+	if err := Guard(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // List returns the editable entries of raw for the declared format. A nil/empty
 // raw yields no entries (an empty or not-yet-created file). Errors only on the
 // size/binary guards or an unsupported format.

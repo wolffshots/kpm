@@ -38,6 +38,7 @@ Usage:
   kpm config show <id> <name-or-index>
   kpm config set <id> <name> --key K [--section S] --value V
   kpm config set <id> <name> --line N --value V [--append|--delete]
+  kpm config init <id> <name-or-index> [--force]   (create a file from its example template)
   kpm log [-n N]
   kpm status
   kpm ui                       (open the graphical package manager; used by NickelMenu)
@@ -74,7 +75,7 @@ func isMutating(cmd string, args []string) bool {
 	case "registry":
 		return sub == "add" || sub == "remove" || sub == "refresh"
 	case "config":
-		return sub == "set"
+		return sub == "set" || sub == "init"
 	}
 	return mutatingCmds[cmd]
 }

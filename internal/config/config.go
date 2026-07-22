@@ -96,6 +96,11 @@ const (
 	ReloadReboot = "reboot"
 )
 
+// MaxTemplate caps a config declaration's seed template (16 KiB). A template is
+// starter content a mod ships so `kpm config init` can create the file from an
+// example; these are short hand-authored files, not data blobs (CONFIG.md §2).
+const MaxTemplate = 16 * 1024
+
 // ModConfig is one [[configs]] entry: a config file a package declares so kpm
 // can view and edit it on-device (CONFIG.md §2). All fields are optional except
 // name/path/format. Like Uninstall, a bad block only surfaces errors when
@@ -108,7 +113,13 @@ type ModConfig struct {
 	Create        bool     `toml:"create,omitempty"`         // create the file on first edit when missing
 	SensitiveKeys []string `toml:"sensitive_keys,omitempty"` // keys whose values are masked in human output/logs
 	Description   string   `toml:"description,omitempty"`    // one-liner for the UI; presentational
+	Template      string   `toml:"template,omitempty"`       // starter content for `kpm config init` (CONFIG.md §2)
 }
+
+// Createable reports whether `kpm config init`/`config set` may create this
+// file when it is missing: either create=true (seed from empty) or a template is
+// declared (seed from the example). Mirrors EffectiveReload's derived-getter style.
+func (c ModConfig) Createable() bool { return c.Create || c.Template != "" }
 
 // EffectiveReload returns Reload with the default ("auto") applied.
 func (c ModConfig) EffectiveReload() string {
@@ -165,6 +176,15 @@ func (c ModConfig) Validate() error {
 	case "", ReloadAuto, ReloadReboot:
 	default:
 		return fmt.Errorf("config %q has invalid reload %q (want %q or %q)", c.Name, c.Reload, ReloadAuto, ReloadReboot)
+	}
+	// A seed template is bounded and text: an oversized or NUL-bearing template is
+	// dropped at parse like a bad format/path, so it can never reach the seed
+	// engine (CONFIG.md §2). The 16 KiB cap keeps registry defs small.
+	if len(c.Template) > MaxTemplate {
+		return fmt.Errorf("config %q template is %d bytes, over the %d-byte limit", c.Name, len(c.Template), MaxTemplate)
+	}
+	if strings.IndexByte(c.Template, 0) >= 0 {
+		return fmt.Errorf("config %q template contains a NUL byte (binary), refusing", c.Name)
 	}
 	return nil
 }
