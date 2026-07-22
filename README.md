@@ -301,6 +301,13 @@ shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
 crash-isolated view layer. Staged changes prompt a **Reboot now / Later** dialog,
 matching kpm's stage-then-reboot install model.
 
+Installed packages whose registry entry declares config files (CONFIG.md) also
+get a **Settings** button: it lists the package's config files, shows their
+entries (ini keys or text lines), and edits values with the on-screen keyboard —
+each save is a surgical write through `kpm config set`, so comments and layout
+in the file survive untouched. Files marked `reload = "reboot"` prompt for a
+restart on the way out; others take effect on their own.
+
 While the browser is open it hides the home screen's status and nav bars so the
 dialog (and its keyboard) render full-screen, and restores them when you close
 it — so the launcher is a NickelMenu entry rather than an injected home-screen
@@ -372,6 +379,11 @@ kpm search [<term>]         list/filter packages across cached registries
 kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
                             copy a package def from a registry into packages.d
 kpm sync [<id>...] [--overwrite]  re-copy registry defs for registry-managed packages
+kpm config list <id>        declared config files for a package (offline)
+kpm config show <id> <file> entries of one config file — ini keys or text lines
+                            (<file> = declared name, case-insensitive, or 1-based index)
+kpm config set <id> <file> (--key K [--section S] | --line N [--append|--delete]) --value V
+                            edit one entry; surgical write, comments/layout preserved
 kpm log [-n N]              print the last N log lines (default 12)
 kpm status                  print status.txt + any pending staging; fast/offline
 kpm ui                      signal the NickelKPM hook to open the graphical browser
@@ -384,7 +396,8 @@ without `--yes`).
 If every selected `update` package fails and nothing stages, the exit is `1`.
 
 **Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
-`update`, `uninstall`, `unstage`, `registry list`, `registry refresh`, and
+`update`, `uninstall`, `unstage`, `registry list`, `registry refresh`,
+`config list`, `config show`, `config set`, and
 `version` accept `--json`. Human/progress output streams as usual; the final
 stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
 object. This is what the graphical UI consumes; it also serves scripts.
@@ -400,7 +413,8 @@ manual install is never clobbered — and `kpm unstage` cancels a pending stagin
 Only one mutating kpm command runs at a time: it takes a lock at
 `.adds/kpm/lock`, and a second mutating command fails with "another kpm instance
 is running" (a lock older than 10 minutes is assumed stale and broken).
-Read-only commands (`list`/`status`/`log`/`version`/`search`/`registry list`)
+Read-only commands (`list`/`status`/`log`/`version`/`search`/`registry list`/
+`config list`/`config show`)
 don't take the lock and never write state.
 
 `KPM_ROOT` overrides the `/mnt/onboard` root (used by tests and for dev runs off
