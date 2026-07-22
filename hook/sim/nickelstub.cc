@@ -240,6 +240,19 @@ MainWindowController *(*MainWindowController__sharedInstance)();
 QWidget *(*MainWindowController__currentView)(MainWindowController *mwc);
 QWidget *(*MainWindowController__pushView)(MainWindowController *mwc, QWidget *view);
 
+// Optional device-only symbols (chrome hiding, full-view mode, the title-bar back
+// button). On device nkpm.cc resolves these via dlsym; the sim leaves them null,
+// exactly the "firmware lacks the symbol" state their call sites already null-check
+// (dialog.cc canHideChrome / enableFullViewMode; detaildialog.cc + configdialog.cc
+// enableBackButton). Defining them here is what lets the sim link those sources
+// unmodified — nkpm.cc, which defines them on device, is not compiled into the sim.
+StatusBarController *(*MainWindowController__statusBarController)(MainWindowController *mwc);
+void (*StatusBarController__hideStatusBar)(StatusBarController *sbc);
+void (*StatusBarController__showStatusBar)(StatusBarController *sbc);
+bool (*StatusBarController__isVisible)(StatusBarController *sbc);
+void (*N3Dialog__enableFullViewMode)(N3Dialog *__this);
+void (*N3Dialog__enableBackButton)(N3Dialog *__this, bool enable);
+
 void (*ConfirmationDialogFactory__showErrorDialog)(QString const &title, QString const &body);
 ConfirmationDialog *(*ConfirmationDialogFactory__getConfirmationDialog)(QWidget *parent);
 void (*ConfirmationDialog__setTitle)(ConfirmationDialog *_this, QString const &);
