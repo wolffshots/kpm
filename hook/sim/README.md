@@ -54,8 +54,12 @@ Offscreen screenshots (automated validation — needs `QT_QPA_PLATFORM=offscreen
 which run.sh sets automatically for these modes):
 
 ```sh
-./run.sh --screenshot out       # browse/detail + config-list/config-edit/config-files/config-init png's
+./run.sh --screenshot out       # browse/detail + detail-fw-untested + config-list/config-edit/config-files/config-init png's
 ```
+
+`browse.png` shows samplemod's top-priority **files missing** badge (A) and
+`detail-fw-untested.png` shows nickelnote's **Untested on your firmware** warning
+line (D) — both driven by the seeded fixture below.
 
 Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall`):
 
@@ -97,6 +101,16 @@ Offscreen end-to-end sync (drives the browse footer's **Sync** button ->
 # missing button or an un-synced def fails non-zero).
 ```
 
+Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
+
+```sh
+./run.sh --exercise-badges
+# asserts the browse list shows samplemod's "files missing" badge (A, seeded
+# MissingFiles) and nickelnote's detail page shows "Untested on your firmware"
+# (D, an older registry tested_fw than the seeded .kobo/version). Read-only, so
+# the seeded MissingFiles never self-clears (exit 0 = PASS, missing label = fail).
+```
+
 Offscreen end-to-end sleep/wake chrome guard (drives the status bar + nav-bar
 hide/restore and the `ChromeGuard` that re-hides them after a wake re-show):
 
@@ -122,8 +136,8 @@ uninstalls never touch the real filesystem.
 | koreader | not installed | Install |
 | nickelclock | installed v0.4.0 | Uninstall (marker-remove) + Settings (ini config — the config-edit target) |
 | nickelmenu | not installed | Install |
-| nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path) |
-| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target |
+| nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path); registry def carries an old `tested_fw` (4.38) vs the seeded `.kobo/version` (4.45) → **firmware badge** ("Untested on your firmware") |
+| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge |
 
 ## Which of the twelve UI actions work end-to-end
 

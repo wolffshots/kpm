@@ -12,6 +12,9 @@
 //                              equals the template bytes, then edit one line
 //   --exercise-sync            offscreen: tap Sync, assert samplemod's def gains
 //                              the registry's config table (has_config flips true)
+//   --exercise-badges          offscreen: assert the "files missing" browse badge
+//                              (samplemod) and the "Untested on your firmware"
+//                              detail warning (nickelnote) render (A + D)
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -99,16 +102,21 @@ static void runScreenshot(const QString &dir) {
   QDir().mkpath(dir);
   waitForRows(
       [dir]() {
-        saveGrab(dir + "/browse.png");
+        saveGrab(dir + "/browse.png"); // shows samplemod's "files missing" badge (A)
         QList<PackageRow *> rows = nickelstub_mainWindow()->findChildren<PackageRow *>();
         sendClick(rows.first()); // opens DetailDialog for the first package
         QTimer::singleShot(700, qApp, [dir]() {
           saveGrab(dir + "/detail.png");
-          // ConfigDialog rendering: nickelclock is single-file/ini (entries page
-          // + editor), nickelnote is multi-file/text (the file picker). Open them
-          // directly — the detail → Settings wiring is covered by --exercise-config.
-          ConfigDialog::show("nickelclock", "NickelClock");
-          QTimer::singleShot(1800, qApp, [dir]() {
+          // D: nickelnote's registry def carries an older tested_fw than the seeded
+          // device firmware, so its detail page shows the "Untested on your
+          // firmware" warning. Open it over the current detail and grab that shot.
+          if (BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>()) {
+            QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+          }
+          QTimer::singleShot(700, qApp, [dir]() {
+            saveGrab(dir + "/detail-fw-untested.png"); // the firmware warning line
+            ConfigDialog::show("nickelclock", "NickelClock");
+            QTimer::singleShot(1800, qApp, [dir]() {
             saveGrab(dir + "/config-list.png"); // ini entries (Section · Key rows)
             if (QLabel *edit = findLabelByText("Edit")) {
               sendClick(edit); // raise the single-line editor for that entry
@@ -140,7 +148,8 @@ static void runScreenshot(const QString &dir) {
               });
             });
           });
-        });
+          }); // close the detail-fw-untested timer
+        });   // close the detail.png timer
       },
       [dir]() {
         std::fprintf(stderr, "sim: timed out waiting for packages\n");
@@ -535,6 +544,49 @@ static void runExerciseSync() {
       });
 }
 
+// runExerciseBadges asserts the two Wave-3 reliability badges render from the
+// seeded fixture (fixture/seed.go), by exact label text like the other exercises:
+//   (a) samplemod carries a seeded MissingFiles -> PackageRow's top-priority
+//       "files missing" badge appears in the browse list (packagerow.cc).
+//   (b) nickelnote's registry def has an older tested_fw than the seeded device
+//       firmware -> its detail page shows the "Untested on your firmware" warning
+//       line (detaildialog.cc, off the server-computed fw_untested).
+// Read-only: no mutation, so the seeded MissingFiles never self-clears here.
+static void runExerciseBadges() {
+  waitForRows(
+      []() {
+        // (a) the browse list shows samplemod's top-priority "files missing" badge.
+        if (!findLabelByText("files missing")) {
+          std::fprintf(stderr, "sim: FAIL — no 'files missing' badge in the browse list\n");
+          qApp->exit(5);
+          return;
+        }
+        std::fprintf(stderr, "sim: PASS — browse list shows the 'files missing' badge\n");
+
+        // (b) open nickelnote's detail; assert the firmware-untested warning line.
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        if (!browse) {
+          std::fprintf(stderr, "sim: no BrowseDialog found\n");
+          qApp->exit(4);
+          return;
+        }
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+        QTimer::singleShot(700, qApp, []() {
+          if (!findLabelByText("Untested on your firmware")) {
+            std::fprintf(stderr, "sim: FAIL — nickelnote detail missing the firmware-untested warning\n");
+            qApp->exit(6);
+            return;
+          }
+          std::fprintf(stderr, "sim: PASS — nickelnote detail shows 'Untested on your firmware'\n");
+          qApp->exit(0);
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -611,6 +663,7 @@ int main(int argc, char **argv) {
   bool exerciseSync = false;
   bool exerciseWake = false;
   bool exerciseInit = false;
+  bool exerciseBadges = false;
 
   QStringList args = app.arguments();
   for (int i = 1; i < args.size(); i++) {
@@ -633,6 +686,8 @@ int main(int argc, char **argv) {
       exerciseWake = true;
     } else if (a == "--exercise-init") {
       exerciseInit = true;
+    } else if (a == "--exercise-badges") {
+      exerciseBadges = true;
     }
   }
 
@@ -653,6 +708,8 @@ int main(int argc, char **argv) {
     runExerciseWake();
   } else if (exerciseInit) {
     runExerciseInit();
+  } else if (exerciseBadges) {
+    runExerciseBadges();
   }
 
   return app.exec();

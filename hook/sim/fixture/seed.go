@@ -7,12 +7,17 @@
 //	                                    the ini config-editing target)
 //	nickelmenu   not installed        (registry def)
 //	nickelnote   installed v1.2.0     (packages.d def + three text templates;
-//	                                    pin.template absent — the create path)
+//	                                    pin.template absent — the create path; its
+//	                                    registry def carries an OLD tested_fw vs the
+//	                                    seeded .kobo/version — search reports
+//	                                    fw_untested=true, the firmware-badge fixture)
 //	samplemod    installed v1.0.0     (packages.d def + manifest + a real file
 //	                                    under KPM_SYSROOT — the uninstall target;
 //	                                    also registry-managed with a STALE local
 //	                                    def missing the registry's [[configs]] —
-//	                                    the sync exercise target)
+//	                                    the sync exercise target; and carries a
+//	                                    seeded MissingFiles — the "files missing"
+//	                                    badge fixture)
 //
 // It imports kpm's own internal packages (it lives inside module kpm) to write
 // state exactly the way the real commands and the UI-contract tests do, so the
@@ -77,6 +82,11 @@ forge = "github"
 asset = "KoboRoot.tgz"
 description = "Show a custom note and stylesheet on the sleep and PIN screens."
 homepage = "https://github.com/kbanh/NickelNote"
+# tested_fw is advisory registry-only metadata (D): the newest firmware this
+# release was confirmed working on. Seeded OLDER than the sandbox's .kobo/version
+# firmware (below) so search reports fw_untested=true and the detail page shows
+# the "Untested on your firmware" warning — the firmware-badge fixture.
+tested_fw = "4.38.23429"
 
 [packages.samplemod]
 name = "Sample Mod"
@@ -269,6 +279,14 @@ func main() {
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/content.template", noteContent)
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/style.template", noteStyle)
 
+	// Device firmware descriptor (D): .kobo/version is one comma-separated line
+	// whose 3rd field is the firmware. Seeded NEWER (4.45) than nickelnote's
+	// tested_fw (4.38) so device.Firmware() reads it and search computes
+	// fw_untested=true for nickelnote. Written at p.VersionFile() — the exact path
+	// device.Firmware() reads (KPM_ROOT/.kobo/version).
+	must(os.MkdirAll(filepath.Dir(p.VersionFile()), 0o755))
+	must(os.WriteFile(p.VersionFile(), []byte("N418765432100,3.0.35,4.45.23697,kobo7,0000000000\n"), 0o644))
+
 	// State: installed versions, samplemod's manifest, and the registry's
 	// last-refreshed timestamp (recent, so the browse view isn't all "stale").
 	st, err := state.Load(p.StateFile())
@@ -279,6 +297,16 @@ func main() {
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
 	sm.SyncedDefSHA256 = oldSampleHash
+	// MissingFiles (A): seeded DIRECTLY — on-device kpm computes this at the
+	// staged->installed flip, but the sim never boots rcS, so seed the field the
+	// reconcile would have written. A non-empty list drives PackageRow's
+	// top-priority "files missing" badge and the detail page's "Missing files:"
+	// line. These members are absent from KPM_SYSROOT (only manifestPath exists),
+	// mirroring an rcS failure that promoted without landing every file.
+	sm.MissingFiles = []string{
+		"usr/local/Kobo/imageformats/libsamplemod.so",
+		"usr/local/samplemod/data.bin",
+	}
 	st.Registry("main").LastFetched = time.Now().UTC().Format(time.RFC3339)
 	must(st.Save())
 
@@ -289,4 +317,6 @@ func main() {
 	fmt.Println("  uninstall target: samplemod ->", hostFile)
 	fmt.Println("  config targets: nickelclock(settings.ini, ini) nickelnote(3 templates, text)")
 	fmt.Println("  sync target: samplemod (local def missing the registry's [[configs]])")
+	fmt.Println("  files-missing badge: samplemod (seeded MissingFiles)")
+	fmt.Println("  firmware badge: nickelnote (tested_fw 4.38 < device 4.45)")
 }
