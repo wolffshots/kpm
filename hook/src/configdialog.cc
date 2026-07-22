@@ -41,18 +41,13 @@ ConfigDialog::ConfigDialog(const QString &pkgId, const QString &pkgName)
   header->setContentsMargins(14, 10, 14, 6);
   layout->addWidget(header);
 
-  pages = new PagedStack(this);
-  layout->addWidget(pages, 1);
-  QObject::connect(pages, &PagedStack::requestPage, this, &ConfigDialog::requestPage);
-  QObject::connect(pages, &PagedStack::afterLayout, this, &ConfigDialog::onFirstLayout);
-
-  hint = new Label(Label::Small, "");
-  hint->setContentsMargins(14, 6, 14, 6);
-  hint->setProperty("style", "italic");
-  layout->addWidget(hint);
-
-  // Edit footer: the single-line editor + the text-only Delete affordance. Hidden
-  // until a row is tapped. The Nickel keyboard is built once and reused per edit.
+  // Edit footer sits in the TOP region, directly under the header — NOT at the
+  // bottom of the layout. Nickel's KeyboardFrame paints over the bottom band
+  // without reflowing our content, so an editRow placed after `pages` would be
+  // occluded by the on-screen keyboard (the donor's searchdialog.cc keeps its
+  // editable field up top for the same reason). The single-line editor + the
+  // text-only Delete affordance stay hidden until a row is tapped; the Nickel
+  // keyboard is built once and reused per edit.
   editRow = new QWidget(this);
   QVBoxLayout *editLayout = new QVBoxLayout(editRow);
   editLayout->setContentsMargins(14, 6, 14, 6);
@@ -70,6 +65,16 @@ ConfigDialog::ConfigDialog(const QString &pkgId, const QString &pkgName)
   layout->addWidget(editRow);
   editRow->hide();
   QObject::connect(deleteButton, SIGNAL(tapped(bool)), this, SLOT(deleteCurrentLine()));
+
+  pages = new PagedStack(this);
+  layout->addWidget(pages, 1);
+  QObject::connect(pages, &PagedStack::requestPage, this, &ConfigDialog::requestPage);
+  QObject::connect(pages, &PagedStack::afterLayout, this, &ConfigDialog::onFirstLayout);
+
+  hint = new Label(Label::Small, "");
+  hint->setContentsMargins(14, 6, 14, 6);
+  hint->setProperty("style", "italic");
+  layout->addWidget(hint);
 
   QHBoxLayout *buttons = new QHBoxLayout();
   buttons->setContentsMargins(14, 6, 14, 6);
