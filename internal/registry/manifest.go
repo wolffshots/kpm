@@ -8,6 +8,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"kpm/internal/config"
+	"kpm/internal/uninstall"
 )
 
 // SchemaVersion is the only registry.toml schema this kpm understands.
@@ -23,14 +24,15 @@ const SchemaVersion = 1
 // excluded from HashDef, so adding/changing them never registers as a def
 // update or local drift (the sync machinery ignores them).
 type PackageDef struct {
-	Name        string           `toml:"name"`
-	Source      string           `toml:"source"`
-	Forge       string           `toml:"forge"`
-	Asset       string           `toml:"asset"`
-	MinKpm      string           `toml:"min_kpm"`
-	Description string           `toml:"description,omitempty"` // JSON-OUTPUT.md §3
-	Homepage    string           `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
-	Uninstall   config.Uninstall `toml:"uninstall"`
+	Name        string             `toml:"name"`
+	Source      string             `toml:"source"`
+	Forge       string             `toml:"forge"`
+	Asset       string             `toml:"asset"`
+	MinKpm      string             `toml:"min_kpm"`
+	Description string             `toml:"description,omitempty"` // JSON-OUTPUT.md §3
+	Homepage    string             `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
+	Uninstall   config.Uninstall   `toml:"uninstall"`
+	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
 }
 
 // Manifest is a parsed registry.toml.
@@ -57,6 +59,15 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	for id := range m.Packages {
 		if !config.ValidID(id) {
 			delete(m.Packages, id)
+			continue
+		}
+		// A def whose config declarations are invalid (bad format, unsafe path, or
+		// duplicate name) is dropped, exactly like an invalid id — a malformed
+		// [[configs]] block must not reach the editor (CONFIG.md §2).
+		if def := m.Packages[id]; def != nil {
+			if err := uninstall.ValidateConfigDecls(def.Configs); err != nil {
+				delete(m.Packages, id)
+			}
 		}
 	}
 	if m.Packages == nil {

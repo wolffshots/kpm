@@ -116,6 +116,7 @@ type jsonSearchPkg struct {
 	Uninstallable bool    `json:"uninstallable"`
 	MinKpm        *string `json:"min_kpm"`
 	MinKpmOK      bool    `json:"min_kpm_ok"`
+	HasConfig     bool    `json:"has_config"` // local snapshot declares >=1 config (CONFIG.md §4)
 }
 
 type jsonRegistryFreshness struct {
@@ -227,6 +228,11 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			uninstallable = methodUninstallable(local.Uninstall, ps.Manifest)
 		}
 
+		// has_config is driven by the LOCAL snapshot only (like uninstallable): the
+		// UI's Settings button opens the offline packages.d declarations, so a
+		// registry-only package advertising configs is not yet editable (CONFIG.md §4).
+		hasConfig := local != nil && len(local.Configs) > 0
+
 		pkgs = append(pkgs, jsonSearchPkg{
 			ID:            id,
 			Name:          name,
@@ -240,6 +246,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			Uninstallable: uninstallable,
 			MinKpm:        ptr(minKpm),
 			MinKpmOK:      registry.MinKpmSatisfied(version.Version, minKpm),
+			HasConfig:     hasConfig,
 		})
 	}
 
@@ -249,6 +256,55 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		Registries: a.registryFreshness(cfg),
 	})
 	return exitOK
+}
+
+// ---- config list / show (CONFIG.md §3.3) --------------------------------
+//
+// These payloads are the forward contract the Nickel ConfigDialog (Phase 2)
+// will be built against — pinned here in json_test.go/uicontract_test.go so the
+// hook has a stable shape to render before the .cc code exists.
+
+type jsonConfigFile struct {
+	Name        string  `json:"name"`
+	Path        string  `json:"path"`
+	Format      string  `json:"format"`
+	Reload      string  `json:"reload"`
+	Exists      bool    `json:"exists"`
+	CanCreate   bool    `json:"can_create"`
+	Editable    bool    `json:"editable"`
+	Description *string `json:"description"`
+}
+
+type jsonConfigListPayload struct {
+	ID      string           `json:"id"`
+	Configs []jsonConfigFile `json:"configs"`
+}
+
+type jsonConfigShowFile struct {
+	Name   string `json:"name"`
+	Format string `json:"format"`
+	Reload string `json:"reload"`
+	Exists bool   `json:"exists"`
+}
+
+// jsonConfigEntry is one row of a show payload. key is null for text lines
+// (they are addressed by line, not key); section is "" for text and for global
+// ini keys. For a sensitive entry the real value IS included — the UI needs it to
+// edit and masks display itself; --json is the only surface a token appears on
+// (CONFIG.md §3.3).
+type jsonConfigEntry struct {
+	Section   string  `json:"section"`
+	Key       *string `json:"key"`
+	Line      int     `json:"line"`
+	Value     string  `json:"value"`
+	Sensitive bool    `json:"sensitive"`
+}
+
+type jsonConfigShowPayload struct {
+	ID        string             `json:"id"`
+	File      jsonConfigShowFile `json:"file"`
+	Entries   []jsonConfigEntry  `json:"entries"`
+	Truncated bool               `json:"truncated"`
 }
 
 // ---- check (§2.2) -------------------------------------------------------

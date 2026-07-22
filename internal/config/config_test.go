@@ -188,6 +188,84 @@ min_kpm = "0.3.0"
 	}
 }
 
+// CONFIG.md §2: config declarations round-trip through Save/Load, and a fresh
+// package with no configs never emits an empty configs array.
+func TestSaveLoadConfigsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nickelnote.toml")
+	p := &Package{
+		Name: "NickelNote", Source: "github.com/onatbas/nickelnote", Forge: ForgeGitHub, Asset: "KoboRoot.tgz",
+		Configs: []ModConfig{
+			{Name: "Note content", Path: "/mnt/onboard/.adds/nickelnote/content.template", Format: FormatText, Reload: ReloadAuto, Create: true},
+			{Name: "Style", Path: "/mnt/onboard/.adds/nickelnote/style.template", Format: FormatText, Reload: ReloadAuto, Create: true, Description: "Stylesheet."},
+		},
+	}
+	if err := Save(path, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path, "nickelnote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Configs) != 2 || got.Configs[0].Name != "Note content" || !got.Configs[0].Create {
+		t.Fatalf("configs round-trip mismatch: %+v", got.Configs)
+	}
+	if got.Configs[1].Description != "Stylesheet." {
+		t.Errorf("description lost: %+v", got.Configs[1])
+	}
+}
+
+// A1: SaveReplace drops a configs array the registry no longer declares.
+func TestSaveReplaceDropsConfigs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.toml")
+	withCfg := &Package{
+		Name: "X", Source: "codeberg.org/o/r", Forge: "forgejo", Asset: "KoboRoot.tgz",
+		Configs: []ModConfig{{Name: "C", Path: "/mnt/onboard/.adds/x/c.ini", Format: FormatINI}},
+	}
+	if err := Save(path, withCfg); err != nil {
+		t.Fatal(err)
+	}
+	// Re-save with no configs via replace-semantics: the array must vanish.
+	if err := SaveReplace(path, &Package{Name: "X", Source: "codeberg.org/o/r", Forge: "forgejo", Asset: "KoboRoot.tgz"}); err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	b, _ := os.ReadFile(path)
+	toml.Decode(string(b), &raw)
+	if _, ok := raw["configs"]; ok {
+		t.Errorf("SaveReplace must drop a removed configs array:\n%s", b)
+	}
+}
+
+func TestModConfigValidate(t *testing.T) {
+	ok := ModConfig{Name: "N", Path: "/mnt/onboard/.adds/x/c.ini", Format: FormatINI}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("valid decl rejected: %v", err)
+	}
+	bad := []ModConfig{
+		{Name: "", Path: "/p", Format: FormatINI},                // no name
+		{Name: "N", Path: "", Format: FormatINI},                 // no path
+		{Name: "N", Path: "/p", Format: "env"},                   // deferred format
+		{Name: "N", Path: "/p", Format: FormatText, Reload: "x"}, // bad reload
+		{Name: "2", Path: "/p", Format: FormatINI},               // numeric name collides with index selection
+		{Name: "-x", Path: "/p", Format: FormatINI},              // leading '-' is eaten by flag parsing
+	}
+	for i, c := range bad {
+		if err := c.Validate(); err == nil {
+			t.Errorf("case %d should be invalid: %+v", i, c)
+		}
+	}
+	// Duplicate names (case-insensitive) are rejected at the slice level.
+	dup := []ModConfig{
+		{Name: "Same", Path: "/mnt/onboard/.adds/x/a.ini", Format: FormatINI},
+		{Name: "same", Path: "/mnt/onboard/.adds/x/b.ini", Format: FormatINI},
+	}
+	if err := ValidateConfigs(dup); err == nil {
+		t.Error("duplicate config names must be rejected")
+	}
+}
+
 func TestSaveFreshHasNoUninstallNoise(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fresh.toml")

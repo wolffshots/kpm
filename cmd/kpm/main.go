@@ -34,6 +34,10 @@ Usage:
   kpm search [<term>]
   kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
   kpm sync [<id>...] [--overwrite]
+  kpm config list <id>
+  kpm config show <id> <name-or-index>
+  kpm config set <id> <name> --key K [--section S] --value V
+  kpm config set <id> <name> --line N --value V [--append|--delete]
   kpm log [-n N]
   kpm status
   kpm ui                       (open the graphical package manager; used by NickelMenu)
@@ -58,15 +62,19 @@ var mutatingCmds = map[string]bool{
 }
 
 // isMutating decides whether a command acquires the lock. Most commands are
-// classified by name; the "registry" group splits per subcommand: add/remove/
-// refresh mutate, list is read-only (REGISTRY.md §9.1).
+// classified by name; the "registry" and "config" groups split per subcommand:
+// registry add/remove/refresh and config set mutate, their list/show are
+// read-only (REGISTRY.md §9.1, CONFIG.md §3.2).
 func isMutating(cmd string, args []string) bool {
-	if cmd == "registry" {
-		sub := ""
-		if len(args) > 0 {
-			sub = args[0]
-		}
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch cmd {
+	case "registry":
 		return sub == "add" || sub == "remove" || sub == "refresh"
+	case "config":
+		return sub == "set"
 	}
 	return mutatingCmds[cmd]
 }
@@ -136,6 +144,8 @@ func run(argv []string) int {
 		return app.cmdUnpin(args)
 	case "registry":
 		return app.cmdRegistry(args)
+	case "config":
+		return app.cmdConfig(args)
 	case "search":
 		return app.cmdSearch(args)
 	case "install":

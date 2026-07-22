@@ -86,6 +86,11 @@ func HashDef(def *PackageDef) (string, error) {
 	u.KeepPaths = nilIfEmpty(u.KeepPaths)
 	u.AllowPaths = nilIfEmpty(u.AllowPaths)
 	norm.Uninstall = u
+	// Config declarations are functional (edits target them), so include them in
+	// the hash like Uninstall (CONFIG.md §2); normalize empty slices to nil so a
+	// def's `configs = []` or `sensitive_keys = []` hashes identically to omitting
+	// the key (A3).
+	norm.Configs = normConfigs(norm.Configs)
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(&norm); err != nil {
@@ -104,6 +109,21 @@ func nilIfEmpty(s []string) []string {
 	return s
 }
 
+// normConfigs returns a copy with an empty slice collapsed to nil and each
+// entry's sensitive_keys normalized the same way, so a def's config metadata
+// hashes stably regardless of empty-vs-omitted spelling (A3).
+func normConfigs(cfgs []config.ModConfig) []config.ModConfig {
+	if len(cfgs) == 0 {
+		return nil
+	}
+	out := make([]config.ModConfig, len(cfgs))
+	for i, c := range cfgs {
+		c.SensitiveKeys = nilIfEmpty(c.SensitiveKeys)
+		out[i] = c
+	}
+	return out
+}
+
 // DefFromPackage projects a local package def onto the syncable payload, dropping
 // pin/registry/id so its hash can be compared against a registry def (§9.7).
 func DefFromPackage(p *config.Package) *PackageDef {
@@ -114,6 +134,7 @@ func DefFromPackage(p *config.Package) *PackageDef {
 		Asset:     p.Asset,
 		MinKpm:    p.MinKpm,
 		Uninstall: p.Uninstall,
+		Configs:   p.Configs,
 	}
 }
 
@@ -130,6 +151,7 @@ func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 		Registry:  registry,
 		Pin:       pin,
 		Uninstall: d.Uninstall,
+		Configs:   d.Configs,
 	}
 }
 
@@ -151,6 +173,11 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	rh, _ := HashDef(&PackageDef{Uninstall: remote.Uninstall})
 	if lh != rh {
 		out = append(out, "uninstall: (changed)")
+	}
+	lc, _ := HashDef(&PackageDef{Configs: local.Configs})
+	rc, _ := HashDef(&PackageDef{Configs: remote.Configs})
+	if lc != rc {
+		out = append(out, "configs: (changed)")
 	}
 	return out
 }

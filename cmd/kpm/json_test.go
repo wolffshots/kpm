@@ -83,7 +83,7 @@ func TestSearchJSONGolden(t *testing.T) {
 	// nickelclock has a registry def and is installed (in state) but has NO local
 	// packages.d def, so kpm cannot uninstall it (cmdUninstall needs a local def):
 	// uninstallable is false, not driven by the registry's advertised recipe (M2).
-	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}]}`
+	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true,"has_config":false}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}]}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
 	}
@@ -109,9 +109,51 @@ func TestSearchJSONUnregisteredAndStaged(t *testing.T) {
 
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true}],"staged":{"count":1,"ids":["handmade"]},"registries":[]}`
+	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false}],"staged":{"count":1,"ids":["handmade"]},"registries":[]}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// CONFIG.md §3.3: config list/show/set goldens — the exact BEGIN_JSON lines the
+// Phase 2 hook will parse. Sandbox via newUninstallApp (KPM_SYSROOT); files and
+// the packages.d snapshot are seeded by config_test.go's helpers.
+
+func TestConfigListJSONGolden(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+	out := captureStdout(t, func() { a.cmdConfig([]string{"list", "nickelclock", "--json"}) })
+	got := lastJSON(t, out)
+	want := `{"id":"nickelclock","configs":[{"name":"Settings","path":"/mnt/onboard/.adds/nickelclock/settings.ini","format":"ini","reload":"reboot","exists":true,"can_create":false,"editable":true,"description":"Clock and battery display options."}]}`
+	if got != want {
+		t.Errorf("config list --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigShowJSONGolden(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+	out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelclock", "Settings", "--json"}) })
+	got := lastJSON(t, out)
+	want := `{"id":"nickelclock","file":{"name":"Settings","format":"ini","reload":"reboot","exists":true},"entries":[{"section":"General","key":"Margin","line":2,"value":"10","sensitive":false},{"section":"Clock","key":"Enabled","line":5,"value":"true","sensitive":false},{"section":"Clock","key":"Placement","line":6,"value":"Footer","sensitive":false}],"truncated":false}`
+	if got != want {
+		t.Errorf("config show --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+func TestConfigSetJSONGolden(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+	out := captureStdout(t, func() {
+		a.cmdConfig([]string{"set", "nickelclock", "Settings", "--section", "Clock", "--key", "Enabled", "--value", "false", "--json"})
+	})
+	got := lastJSON(t, out)
+	// Reuses the mutation shape; reboot_required tracks reload == "reboot".
+	if want := `{"changed":["nickelclock"],"failed":[],"staged":false,"reboot_required":true}`; got != want {
+		t.Errorf("config set --json\n got: %s\nwant: %s", got, want)
 	}
 }
 

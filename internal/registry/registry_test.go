@@ -210,6 +210,104 @@ func TestHashDefStableAndPinAgnostic(t *testing.T) {
 	}
 }
 
+// CONFIG.md §2: a well-formed [[configs]] block parses and projects through
+// ToPackage/DefFromPackage, and a bad format or unsafe path drops the whole def.
+func TestParseManifestConfigs(t *testing.T) {
+	man := `schema_version = 1
+[packages.nickelclock]
+name = "NickelClock"
+
+  [[packages.nickelclock.configs]]
+  name = "Settings"
+  path = "/mnt/onboard/.adds/nickelclock/settings.ini"
+  format = "ini"
+  reload = "reboot"
+`
+	m, err := ParseManifest([]byte(man))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, ok := m.Packages["nickelclock"]
+	if !ok {
+		t.Fatal("nickelclock should parse")
+	}
+	if len(def.Configs) != 1 || def.Configs[0].Name != "Settings" || def.Configs[0].Format != "ini" {
+		t.Fatalf("configs not parsed: %+v", def.Configs)
+	}
+}
+
+func TestParseManifestDropsBadConfigFormat(t *testing.T) {
+	man := `schema_version = 1
+[packages.bad]
+name = "Bad"
+
+  [[packages.bad.configs]]
+  name = "X"
+  path = "/mnt/onboard/.adds/bad/x.conf"
+  format = "yaml"
+`
+	m, err := ParseManifest([]byte(man))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Packages["bad"]; ok {
+		t.Error("def with an unsupported config format must be dropped")
+	}
+}
+
+func TestParseManifestDropsUnsafeConfigPath(t *testing.T) {
+	man := `schema_version = 1
+[packages.bad]
+name = "Bad"
+
+  [[packages.bad.configs]]
+  name = "Shadow"
+  path = "/etc/shadow"
+  format = "ini"
+`
+	m, err := ParseManifest([]byte(man))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Packages["bad"]; ok {
+		t.Error("def with a denylisted config path must be dropped")
+	}
+}
+
+// Config declarations are functional metadata: they are part of HashDef and
+// survive the ToPackage/DefFromPackage round trip.
+func TestHashDefIncludesConfigs(t *testing.T) {
+	base := &PackageDef{Name: "X", Source: "h/o/r", Forge: "forgejo", Asset: "KoboRoot.tgz"}
+	withCfg := *base
+	withCfg.Configs = []config.ModConfig{{
+		Name: "Settings", Path: "/mnt/onboard/.adds/x/settings.ini", Format: config.FormatINI,
+	}}
+	hBase, _ := HashDef(base)
+	hCfg, _ := HashDef(&withCfg)
+	if hBase == hCfg {
+		t.Error("adding a config declaration must change the def hash")
+	}
+	// Round trip through a local package preserves the config hash.
+	pkg := withCfg.ToPackage("x", "main", "v1")
+	if len(pkg.Configs) != 1 {
+		t.Fatalf("ToPackage lost configs: %+v", pkg.Configs)
+	}
+	hBack, _ := HashDef(DefFromPackage(pkg))
+	if hCfg != hBack {
+		t.Errorf("config hash not stable across projection: %q != %q", hCfg, hBack)
+	}
+}
+
+// A3: an empty configs slice hashes identically to omitting the key, so
+// `configs = []` never reads as drift.
+func TestHashDefConfigsEmptyEqualsAbsent(t *testing.T) {
+	absent, _ := HashDef(&PackageDef{Name: "X"})
+	empty, _ := HashDef(&PackageDef{Name: "X", Configs: []config.ModConfig{}})
+	if absent != empty {
+		t.Errorf("empty configs must hash like absent: %q != %q", absent, empty)
+	}
+}
+
 func TestStaleness(t *testing.T) {
 	now := time.Now()
 	if Staleness("", now) != "never refreshed" {

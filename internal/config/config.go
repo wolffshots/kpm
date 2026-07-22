@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -80,6 +81,112 @@ func (u Uninstall) Validate() error {
 	return nil
 }
 
+// Config formats (CONFIG.md §2). Only ini and text are editable in this
+// release; env/keyvalue are reserved for a future additive extension and are
+// deliberately rejected by Validate for now (forward-compat: bump min_kpm when a
+// new format is added).
+const (
+	FormatINI  = "ini"
+	FormatText = "text"
+)
+
+// Config reload modes (CONFIG.md §2). Empty means auto (see EffectiveReload).
+const (
+	ReloadAuto   = "auto"
+	ReloadReboot = "reboot"
+)
+
+// ModConfig is one [[configs]] entry: a config file a package declares so kpm
+// can view and edit it on-device (CONFIG.md §2). All fields are optional except
+// name/path/format. Like Uninstall, a bad block only surfaces errors when
+// "kpm config" runs, so registration/check/update never fail on it.
+type ModConfig struct {
+	Name          string   `toml:"name"`                     // display label + CLI/UI selector (unique per package)
+	Path          string   `toml:"path"`                     // device-absolute path; must pass the uninstall path policy
+	Format        string   `toml:"format"`                   // "ini" | "text" (env/keyvalue reserved)
+	Reload        string   `toml:"reload,omitempty"`         // "auto" (default) | "reboot"
+	Create        bool     `toml:"create,omitempty"`         // create the file on first edit when missing
+	SensitiveKeys []string `toml:"sensitive_keys,omitempty"` // keys whose values are masked in human output/logs
+	Description   string   `toml:"description,omitempty"`    // one-liner for the UI; presentational
+}
+
+// EffectiveReload returns Reload with the default ("auto") applied.
+func (c ModConfig) EffectiveReload() string {
+	if c.Reload == "" {
+		return ReloadAuto
+	}
+	return c.Reload
+}
+
+// RebootRequired reports whether an edit to this config needs a reboot to take
+// effect (reload == "reboot") — feeds the reboot_required JSON field (CONFIG.md §3).
+func (c ModConfig) RebootRequired() bool { return c.EffectiveReload() == ReloadReboot }
+
+// IsSensitive reports whether key is listed in sensitive_keys (case-insensitive);
+// such values are masked in human output and logs but never in --json (CONFIG.md §2).
+func (c ModConfig) IsSensitive(key string) bool {
+	for _, k := range c.SensitiveKeys {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks a single declaration's format and required fields. Path-policy
+// validation lives in internal/uninstall (it needs the denylist), mirroring how
+// Uninstall.Validate defers allow_paths policy. Called at parse/sync time and
+// before every read/write so a bad block never breaks other commands.
+func (c ModConfig) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("config declaration requires name")
+	}
+	// The name doubles as the CLI/UI selector, passed as a bare argv token. A name
+	// that parses as an integer would be hijacked by 1-based-index selection (so it
+	// could silently resolve to the wrong file), and a name starting with "-" would
+	// be eaten by flag parsing — same reasoning as ValidID for package ids. Reject
+	// both at declaration time so a def can never carry an unusable selector.
+	trimmedName := strings.TrimSpace(c.Name)
+	if _, err := strconv.Atoi(trimmedName); err == nil {
+		return fmt.Errorf("config name %q must not be a number (it would collide with index selection)", c.Name)
+	}
+	if strings.HasPrefix(trimmedName, "-") {
+		return fmt.Errorf("config name %q must not start with '-'", c.Name)
+	}
+	if strings.TrimSpace(c.Path) == "" {
+		return fmt.Errorf("config %q requires path", c.Name)
+	}
+	switch c.Format {
+	case FormatINI, FormatText:
+	default:
+		return fmt.Errorf("config %q has invalid format %q (want %q or %q)", c.Name, c.Format, FormatINI, FormatText)
+	}
+	switch c.Reload {
+	case "", ReloadAuto, ReloadReboot:
+	default:
+		return fmt.Errorf("config %q has invalid reload %q (want %q or %q)", c.Name, c.Reload, ReloadAuto, ReloadReboot)
+	}
+	return nil
+}
+
+// ValidateConfigs validates every declaration and enforces name uniqueness
+// (case-insensitive) across the slice — the name is the CLI/UI selector, so two
+// configs sharing a name are ambiguous (CONFIG.md §2).
+func ValidateConfigs(cfgs []ModConfig) error {
+	seen := map[string]bool{}
+	for _, c := range cfgs {
+		if err := c.Validate(); err != nil {
+			return err
+		}
+		key := strings.ToLower(strings.TrimSpace(c.Name))
+		if seen[key] {
+			return fmt.Errorf("duplicate config name %q", c.Name)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
 // Package is one packages.d/<id>.toml file.
 type Package struct {
 	Name     string `toml:"name"`
@@ -90,7 +197,8 @@ type Package struct {
 	Registry string `toml:"registry"` // provenance: source registry name; absent on hand-added
 	MinKpm   string `toml:"min_kpm"`  // optional minimum kpm version (REGISTRY.md §2)
 
-	Uninstall Uninstall `toml:"uninstall"`
+	Uninstall Uninstall   `toml:"uninstall"`
+	Configs   []ModConfig `toml:"configs,omitempty"` // editable config declarations (CONFIG.md §2)
 
 	// ID is the filename stem; not serialized into the TOML body.
 	ID string `toml:"-"`
@@ -185,6 +293,10 @@ func Save(path string, p *Package) error {
 		delete(m, "uninstall")
 	}
 
+	// Config declarations are registry-projected as a whole (never hand-merged
+	// like [uninstall]'s unknown keys), so overlay the array or drop the key.
+	overlayConfigs(m, p.Configs)
+
 	return encodeTOMLFile(path, m)
 }
 
@@ -193,7 +305,7 @@ func Save(path string, p *Package) error {
 // the on-disk file. Every other key (unknown top-level tables/fields, unknown
 // [uninstall] keys) is preserved (A1).
 var (
-	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm"}
+	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
 )
 
@@ -235,7 +347,22 @@ func SaveReplace(path string, p *Package) error {
 		delete(m, "uninstall")
 	}
 
+	// configs was cleared by the knownTopKeys loop; re-set it authoritatively so
+	// a config the registry dropped disappears locally (A1).
+	overlayConfigs(m, p.Configs)
+
 	return encodeTOMLFile(path, m)
+}
+
+// overlayConfigs writes p's config declarations as the "configs" array-of-tables
+// or removes the key when there are none, so a fresh package never emits an empty
+// configs array (E1/A1).
+func overlayConfigs(m map[string]any, cfgs []ModConfig) {
+	if len(cfgs) > 0 {
+		m["configs"] = cfgs
+	} else {
+		delete(m, "configs")
+	}
 }
 
 // encodeTOMLFile writes m to path as TOML atomically (encode to a buffer, then

@@ -9,7 +9,8 @@ package main
 // type flip is caught even when the golden string would still "look" valid.
 //
 // The fields the hook reads (derived from hook/src/{browsedialog,detaildialog,
-// kpmprocess}.cc and hook/src/widgets/packagerow.cc — code is ground truth):
+// configdialog,kpmprocess}.cc and hook/src/widgets/{packagerow,configrow}.cc —
+// code is ground truth):
 //
 //   search  --json  (KpmProcess::search, browse call; read-only, no lock):
 //     top-level: packages[] (array), staged{} (OBJECT: .count int),
@@ -160,6 +161,7 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantBool(t, pkg, "uninstallable")
 	wantStrOrNull(t, pkg, "min_kpm")
 	wantBool(t, pkg, "min_kpm_ok")
+	wantBool(t, pkg, "has_config") // drives the DetailDialog Settings button (CONFIG.md §4)
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")
 }
@@ -511,6 +513,127 @@ func assertMutationShape(t *testing.T, m map[string]any) {
 	wantBool(t, m, "reboot_required")
 	wantArray(t, m, "changed")
 	wantArray(t, m, "failed")
+}
+
+// ---- 8-10. config list / show / set (CONFIG.md §3.3) --------------------
+//
+// CONTRACT: these blocks were the forward spec the Phase 2 ConfigDialog was built
+// against; the hook now realizes them in hook/src/configdialog.cc and
+// hook/src/widgets/configrow.cc (the ConfigDialog file-picker + entry rows), which
+// join the other .cc files as ground truth. Field names/types stay pinned here so
+// a kpm change cannot silently break the ConfigDialog rendering.
+//
+//   config list <id> --json   (KpmProcess::configList — read-only, no lock):
+//     top-level: id(str), configs[] (array)
+//     configs[i]: name(str), path(str), format(str), reload(str),
+//                 exists(bool), can_create(bool), editable(bool),
+//                 description(str|null)
+//   config show <id> <sel> --json   (KpmProcess::configShow — read-only):
+//     top-level: id(str), file{} (object), entries[] (array), truncated(bool)
+//     file: name(str), format(str), reload(str), exists(bool)
+//     entries[i]: section(str), key(str|null — null for text lines),
+//                 line(number), value(str), sensitive(bool)
+//   config set <id> <name> ... --json   (KpmProcess::configSet — mutating):
+//     the shared mutation shape: changed[], failed[], staged(BOOL),
+//     reboot_required(BOOL). reboot_required = (reload == "reboot").
+
+func TestUIContractConfigList(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdConfig([]string{"list", "nickelclock", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("config list exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	if wantStr(t, m, "id") != "nickelclock" {
+		t.Errorf("id = %v", m["id"])
+	}
+	files := wantArray(t, m, "configs")
+	if len(files) != 1 {
+		t.Fatalf("configs len = %d, want 1", len(files))
+	}
+	f0 := files[0].(map[string]any)
+	wantStr(t, f0, "name")
+	wantStr(t, f0, "path")
+	wantStr(t, f0, "format")
+	wantStr(t, f0, "reload")
+	wantBool(t, f0, "exists")
+	wantBool(t, f0, "can_create")
+	wantBool(t, f0, "editable")
+	wantStrOrNull(t, f0, "description")
+}
+
+func TestUIContractConfigShow(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdConfig([]string{"show", "nickelclock", "Settings", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("config show exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	wantStr(t, m, "id")
+	wantBool(t, m, "truncated")
+	file := wantObject(t, m, "file")
+	wantStr(t, file, "name")
+	wantStr(t, file, "format")
+	wantStr(t, file, "reload")
+	wantBool(t, file, "exists")
+	entries := wantArray(t, m, "entries")
+	if len(entries) == 0 {
+		t.Fatal("entries should be non-empty")
+	}
+	e0 := entries[0].(map[string]any)
+	wantStr(t, e0, "section")
+	wantStrOrNull(t, e0, "key") // string for ini, null for text
+	wantNumber(t, e0, "line")
+	wantStr(t, e0, "value")
+	wantBool(t, e0, "sensitive")
+}
+
+func TestUIContractConfigShowTextKeyNull(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteConfig()})
+	writeDeviceFile(t, sysroot, notePath, "just one line")
+	out := captureStdout(t, func() { a.cmdConfig([]string{"show", "nickelnote", "1", "--json"}) })
+	m := decodeJSON(t, lastJSON(t, out))
+	e0 := wantArray(t, m, "entries")[0].(map[string]any)
+	if _, ok := e0["key"]; !ok {
+		t.Fatal("key field must be present (null) for text entries")
+	}
+	if e0["key"] != nil {
+		t.Errorf("text entry key must be null, got %v", e0["key"])
+	}
+}
+
+func TestUIContractConfigSet(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	registerConfigPkg(t, a, "nickelclock", []config.ModConfig{clockConfig()})
+	writeDeviceFile(t, sysroot, clockPath, clockBody)
+
+	var code int
+	out := captureStdout(t, func() {
+		code = a.cmdConfig([]string{"set", "nickelclock", "Settings", "--section", "Clock", "--key", "Enabled", "--value", "false", "--json"})
+	})
+	if code != exitOK {
+		t.Fatalf("config set exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	if wantBool(t, m, "staged") != false {
+		t.Errorf("config set stages nothing, staged = %v", m["staged"])
+	}
+	if wantBool(t, m, "reboot_required") != true {
+		t.Errorf("reload=reboot must set reboot_required true, got %v", m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "nickelclock" {
+		t.Errorf("changed = %v, want [nickelclock]", m["changed"])
+	}
 }
 
 // ---- busy: the "another kpm instance" dialog trigger --------------------
