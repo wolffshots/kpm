@@ -132,12 +132,14 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
   registries = payload.value("registries").toArray();
   dataReady = true;
 
+  bool checkStarted = false;
   if (pendingCheck) {
     pendingCheck = false;
     // check rides the mutating guard (it takes kpm's lock), so it can be
     // refused if another mutation is somehow in flight — degrade to no badges.
     KpmProcess *p = KpmProcess::check(); // network: latest/update badges (§5)
     if (p) {
+      checkStarted = true;
       QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onCheckDone);
       QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
     } else {
@@ -147,7 +149,11 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
     setActionsEnabled(true);
   }
 
-  if (laidOut) {
+  // Win 3 (kpm-flash-reduction-plan): when a check actually launched, onCheckDone
+  // renders the merged latest/update result — skip this intermediate no-badge
+  // render so a Refresh repaints once, not twice. The degraded path (check refused,
+  // p == nullptr) and the plain no-check path still render here.
+  if (laidOut && !checkStarted) {
     render();
   }
 }
