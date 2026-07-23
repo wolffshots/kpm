@@ -35,6 +35,7 @@ Usage:
   kpm search [<term>]
   kpm doctor [<id>]            (diagnose whether installed Nickel plugins actually loaded)
   kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
+  kpm adopt-self               (enrol kpm's own self-update from a configured registry)
   kpm sync [<id>...] [--overwrite]
   kpm config list <id>
   kpm config show <id> <name-or-index>
@@ -61,7 +62,7 @@ const (
 var mutatingCmds = map[string]bool{
 	"add": true, "remove": true, "uninstall": true, "check": true,
 	"update": true, "pin": true, "unpin": true, "unstage": true,
-	"install": true, "sync": true,
+	"install": true, "sync": true, "adopt-self": true,
 }
 
 // isMutating decides whether a command acquires the lock. Most commands are
@@ -155,6 +156,8 @@ func run(argv []string) int {
 		return app.cmdDoctor(args)
 	case "install":
 		return app.cmdInstall(args)
+	case "adopt-self":
+		return app.cmdAdoptSelf(args)
 	case "sync":
 		return app.cmdSync(args)
 	case "log":
@@ -218,6 +221,12 @@ type App struct {
 	// memory map through (signal 3). Nil in normal use — mapsReader() falls back
 	// to readNickelMaps, which reads /proc; tests inject a fake (DOCTOR.md).
 	nickelMaps func() (string, bool)
+
+	// netWait is the connectivity gate adopt-self's best-effort refresh polls
+	// before attempting a network refresh (kpm-self-enrol-plan §3). Nil in normal
+	// use — netUp() falls back to device.WaitForNetwork; a test injects a fast stub
+	// so the offline paths don't wait out the ~30s network budget.
+	netWait func(host string) bool
 }
 
 // newApp resolves paths, ensures directories, loads state, and — for mutating

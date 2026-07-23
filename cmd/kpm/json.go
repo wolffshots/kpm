@@ -127,6 +127,13 @@ type jsonSearchPkg struct {
 	// verification (A). Null when the package verified clean (or was never
 	// verified); a JSON array — possibly naming a dropped .so — when files are gone.
 	MissingFiles []string `json:"missing_files"`
+	// IsSelf marks the one row that is kpm itself (id == selfID); SelfConfigured
+	// reports whether that row's self-update is wired up (an adopted kpm resolves
+	// its source from state, so self_configured honours the overlay). Every non-kpm
+	// row serializes both false (bool default), so the UI can gate an "Enable
+	// self-update" affordance on is_self && !self_configured (kpm-self-enrol-plan §1).
+	IsSelf         bool `json:"is_self"`
+	SelfConfigured bool `json:"self_configured"`
 }
 
 type jsonRegistryFreshness struct {
@@ -249,23 +256,31 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		// registry-only package advertising configs is not yet editable (CONFIG.md §4).
 		hasConfig := local != nil && len(local.Configs) > 0
 
+		// is_self marks the kpm row; self_configured reads the state-resident source
+		// overlay via a.configured, so an adopted kpm reads true even though its
+		// kpm.toml is deliberately sourceless (kpm-self-enrol-plan §1, SELF-SOURCE §1).
+		isSelf := id == selfID
+		selfConfigured := isSelf && local != nil && a.configured(local)
+
 		pkgs = append(pkgs, jsonSearchPkg{
-			ID:            id,
-			Name:          name,
-			Description:   ptr(desc),
-			Homepage:      ptr(home),
-			Source:        source,
-			Registry:      ptr(regName),
-			Installed:     ptr(ps.InstalledVersion),
-			Pinned:        ptr(pin),
-			Staged:        ps.StagedVersion != "",
-			Uninstallable: uninstallable,
-			MinKpm:        ptr(minKpm),
-			MinKpmOK:      registry.MinKpmSatisfied(version.Version, minKpm),
-			HasConfig:     hasConfig,
-			TestedFw:      ptr(testedFw),
-			FwUntested:    registry.FirmwareUntested(deviceFw, testedFw),
-			MissingFiles:  ps.MissingFiles,
+			ID:             id,
+			Name:           name,
+			Description:    ptr(desc),
+			Homepage:       ptr(home),
+			Source:         source,
+			Registry:       ptr(regName),
+			Installed:      ptr(ps.InstalledVersion),
+			Pinned:         ptr(pin),
+			Staged:         ps.StagedVersion != "",
+			Uninstallable:  uninstallable,
+			MinKpm:         ptr(minKpm),
+			MinKpmOK:       registry.MinKpmSatisfied(version.Version, minKpm),
+			HasConfig:      hasConfig,
+			TestedFw:       ptr(testedFw),
+			FwUntested:     registry.FirmwareUntested(deviceFw, testedFw),
+			MissingFiles:   ps.MissingFiles,
+			IsSelf:         isSelf,
+			SelfConfigured: selfConfigured,
 		})
 	}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -388,6 +389,82 @@ func TestNonSelfPackageResolvesFromToml(t *testing.T) {
 	empty := &config.Package{ID: "other", Source: ""}
 	if a.configured(empty) {
 		t.Error("kpm's state source must not configure another package")
+	}
+}
+
+// searchSelfRow runs search --json and returns the one kpm self row, failing if
+// it is absent — a small helper for the self_configured assertions below.
+func searchSelfRow(t *testing.T, a *App) map[string]any {
+	t.Helper()
+	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
+	var payload struct {
+		Packages []map[string]any `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(lastJSON(t, out)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range payload.Packages {
+		if p["id"] == selfID {
+			return p
+		}
+	}
+	t.Fatalf("no kpm self row in payload: %s", out)
+	return nil
+}
+
+// kpm-self-enrol-plan §1: search's self_configured tracks the state overlay —
+// false for a never-adopted kpm, true once adopted, and it SURVIVES a tarball
+// clobber (the sourceless kpm.toml rewrite) because the source lives in state.
+func TestSearchSelfConfiguredReflectsAdoption(t *testing.T) {
+	a := newTestApp(t)
+	registerSelf(t, a) // sourceless kpm.toml, no state source
+
+	// Never adopted → is_self true, self_configured false.
+	row := searchSelfRow(t, a)
+	if row["is_self"] != true || row["self_configured"] != false {
+		t.Errorf("never-adopted: is_self/self_configured = %v/%v, want true/false", row["is_self"], row["self_configured"])
+	}
+
+	// Adopt (identity → state) → self_configured true.
+	adoptInState(t, a, "github.com/wolffshots/kpm", "github")
+	row = searchSelfRow(t, a)
+	if row["self_configured"] != true {
+		t.Errorf("after adopt: self_configured = %v, want true", row["self_configured"])
+	}
+
+	// A self-update clobbers kpm.toml back to the sourceless template; the state
+	// source survives, so self_configured stays true.
+	clobberSelfToml(t, a)
+	row = searchSelfRow(t, a)
+	if row["self_configured"] != true {
+		t.Errorf("after tarball clobber: self_configured = %v, want true (state source survives)", row["self_configured"])
+	}
+}
+
+// kpm-self-enrol-plan §1: a non-kpm row never carries is_self/self_configured
+// true — the self signal is scoped to the kpm id only.
+func TestSearchSelfConfiguredFalseForNonKpm(t *testing.T) {
+	a := newTestApp(t)
+	if err := config.Save(a.paths.PackageFile("nickelmenu"), &config.Package{
+		Name: "NickelMenu", Source: "github.com/pgaskin/NickelMenu", Forge: "github", Asset: "KoboRoot.tgz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Even if kpm's state carries a source, it must not leak onto another row.
+	a.state.Get(selfID).Source = "github.com/wolffshots/kpm"
+	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
+	var payload struct {
+		Packages []map[string]any `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(lastJSON(t, out)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range payload.Packages {
+		if p["id"] == "nickelmenu" {
+			if p["is_self"] != false || p["self_configured"] != false {
+				t.Errorf("non-kpm row is_self/self_configured = %v/%v, want false/false", p["is_self"], p["self_configured"])
+			}
+		}
 	}
 }
 

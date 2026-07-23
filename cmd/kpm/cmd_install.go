@@ -153,23 +153,29 @@ func (a *App) cmdInstall(args []string) int {
 	// kpm's own source/forge/pin live in state.json (so a self-update that
 	// overwrites kpm.toml can't drop them, §10); persistDef moves them there and
 	// blanks them in the def before it is written (SELF-SOURCE §5).
-	logSource := pkg.Source // record the real source for the INSTALL log, pre-blank
+	logSource := entry.Def.Source // record the real source for the INSTALL log, pre-blank
 	ps := a.state.Get(id)
-	a.persistDef(id, pkg, ps)
-	if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
-		fmt.Fprintln(os.Stderr, "kpm install:", err)
-		return exitError
-	}
-
-	// Record the synced def hash for later drift/up-to-date checks (§9.7).
-	hash, err := registry.HashDef(entry.Def)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "kpm install:", err)
-		return exitError
-	}
-	ps.SyncedDefSHA256 = hash
-	if id == selfID && pinVal != "" {
-		ps.Pin = pinVal // kpm's pin belongs in state.json (§10), read by effectivePin
+	if id == selfID {
+		// kpm's adoption identity → state.json, kpm.toml stays sourceless; the exact
+		// write is shared with `adopt-self` (kpm-self-enrol-plan §2). It records the
+		// synced def hash and preserves the existing state pin when pinVal is empty.
+		if err := a.adoptSelfFromEntry(entry, pinVal); err != nil {
+			fmt.Fprintln(os.Stderr, "kpm install:", err)
+			return exitError
+		}
+	} else {
+		a.persistDef(id, pkg, ps)
+		if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
+			fmt.Fprintln(os.Stderr, "kpm install:", err)
+			return exitError
+		}
+		// Record the synced def hash for later drift/up-to-date checks (§9.7).
+		hash, err := registry.HashDef(entry.Def)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kpm install:", err)
+			return exitError
+		}
+		ps.SyncedDefSHA256 = hash
 	}
 	if *installed != "" {
 		ps.InstalledVersion = *installed

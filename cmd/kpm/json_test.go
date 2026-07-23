@@ -84,7 +84,7 @@ func TestSearchJSONGolden(t *testing.T) {
 	// nickelclock has a registry def and is installed (in state) but has NO local
 	// packages.d def, so kpm cannot uninstall it (cmdUninstall needs a local def):
 	// uninstallable is false, not driven by the registry's advertised recipe (M2).
-	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}],"device_fw":null}`
+	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
 	}
@@ -141,9 +141,74 @@ func TestSearchJSONUnregisteredAndStaged(t *testing.T) {
 
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null}],"staged":{"count":1,"ids":["handmade"]},"registries":[],"device_fw":null}`
+	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false}],"staged":{"count":1,"ids":["handmade"]},"registries":[],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// jsonKpmManifest is a registry offering kpm itself (source carried by the
+// registry, as the real registry.toml does), used by the self-row goldens.
+const jsonKpmManifest = `schema_version = 1
+[packages.kpm]
+name = "kpm"
+description = "Kobo package manager"
+source = "github.com/wolffshots/kpm"
+forge = "github"
+asset = "KoboRoot.tgz"
+`
+
+// kpm-self-enrol-plan §1: an un-adopted kpm self row carries is_self:true but
+// self_configured:false — the registry advertises a source, yet kpm's own
+// self-update is not wired up (state carries no source), so the UI can offer
+// "Enable self-update". The advertised source still shows (from the registry def).
+func TestSearchJSONSelfRowUnconfigured(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.9.0")
+	registerSelf(t, a) // sourceless kpm.toml, no state source → un-adopted
+	seedRegistry(t, a, "main", jsonKpmManifest)
+	a.state.Get(selfID).InstalledVersion = "0.7.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
+	got := lastJSON(t, out)
+	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":false}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
+	if got != want {
+		t.Errorf("search --json (unconfigured self row)\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// kpm-self-enrol-plan §1: once adopted (source resident in state), the same kpm
+// row reads self_configured:true via the state overlay — the UI drops the "Enable
+// self-update" affordance.
+func TestSearchJSONSelfRowAdopted(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.9.0")
+	registerSelf(t, a)
+	seedRegistry(t, a, "main", jsonKpmManifest)
+	a.state.Get(selfID).InstalledVersion = "0.7.0"
+	adoptInState(t, a, "github.com/wolffshots/kpm", "github") // durable adoption identity
+	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
+	got := lastJSON(t, out)
+	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":true}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
+	if got != want {
+		t.Errorf("search --json (adopted self row)\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// kpm-self-enrol-plan §2: adopt-self reuses the shared mutation shape — a clean
+// enrol reports changed:["kpm"], nothing staged, no reboot.
+func TestAdoptSelfJSONGolden(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.9.0")
+	registerSelf(t, a)
+	a.netWait = func(string) bool { return false } // offline: adopt from the warm cache
+	seedRegistry(t, a, "main", jsonKpmManifest)    // cache already offers kpm
+	out := captureStdout(t, func() { a.cmdAdoptSelf([]string{"--json"}) })
+	got := lastJSON(t, out)
+	if want := `{"changed":["kpm"],"failed":[],"staged":false,"reboot_required":false}`; got != want {
+		t.Errorf("adopt-self --json\n got: %s\nwant: %s", got, want)
 	}
 }
 

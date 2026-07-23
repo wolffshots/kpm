@@ -7,6 +7,7 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 	"kpm/internal/uninstall"
 )
@@ -116,6 +117,34 @@ func (a *App) persistDef(id string, pkg *config.Package, ps *state.PackageState)
 	pkg.Source = "" // keep kpm.toml sourceless, matching the shipped def
 	pkg.Forge = ""
 	pkg.Pin = "" // kpm's pin also lives in state.json (§10)
+}
+
+// adoptSelfFromEntry writes kpm's own def from a registry entry and records its
+// adoption identity durably in state.json — the single write shared by
+// `install kpm --adopt` and `adopt-self` (kpm-self-enrol-plan §2). persistDef
+// funnels source/forge into state and blanks source/forge/pin in the def so the
+// written kpm.toml stays sourceless, matching the shipped template (SELF-SOURCE
+// §5). The pin argument is persisted only when non-empty, so a caller passing the
+// current state pin (adopt-self) or an empty local pin (install with no --pin)
+// PRESERVES the existing state-resident pin rather than clobbering it (§10). It
+// does NOT save state; the caller persists (so install can fold in --installed in
+// one write).
+func (a *App) adoptSelfFromEntry(entry *registry.Entry, pin string) error {
+	ps := a.state.Get(selfID)
+	pkg := entry.Def.ToPackage(selfID, entry.Registry, pin)
+	a.persistDef(selfID, pkg, ps)
+	if err := config.SaveReplace(a.paths.PackageFile(selfID), pkg); err != nil {
+		return err
+	}
+	hash, err := registry.HashDef(entry.Def)
+	if err != nil {
+		return err
+	}
+	ps.SyncedDefSHA256 = hash
+	if pin != "" {
+		ps.Pin = pin // kpm's pin belongs in state.json (§10), read by effectivePin
+	}
+	return nil
 }
 
 // verifyManifest checks that each manifest member exists on disk after an

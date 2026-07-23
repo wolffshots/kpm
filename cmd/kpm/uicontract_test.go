@@ -3,7 +3,7 @@ package main
 // uicontract_test.go pins the exact JSON/exit-code contract the graphical UI
 // (the NickelKPM Qt hook under hook/) consumes, so a future kpm change cannot
 // silently break the on-device UI. Unlike json_test.go's per-command goldens,
-// these tests drive each of the SEVEN command shapes the hook actually issues
+// these tests drive each of the EIGHT command shapes the hook actually issues
 // (hook/src/kpmprocess.cc) end to end through the real cmd* entry points, and
 // assert the PRESENCE and TYPE of every field the hook reads — a rename or a
 // type flip is caught even when the golden string would still "look" valid.
@@ -22,7 +22,9 @@ package main
 //                staged(BOOL), uninstallable(bool), min_kpm(str|null),
 //                min_kpm_ok(bool), tested_fw(str|null), fw_untested(BOOL) (D),
 //                missing_files(array|null) — absent members after post-install
-//                verification, null when clean (A).  latest/update are
+//                verification, null when clean (A), is_self(BOOL) — the one kpm
+//                self row, self_configured(BOOL) — whether kpm's self-update is
+//                wired up (kpm-self-enrol-plan §1).  latest/update are
 //                DELIBERATELY ABSENT here (registry defs carry no versions) —
 //                the hook merges them in from check (browsedialog.cc mergeCheck).
 //   check   --json  (KpmProcess::check; takes the lock):
@@ -31,8 +33,11 @@ package main
 //     payload is IGNORED by the hook (browsedialog.cc onRefreshDone voids it) —
 //     contract is only: exit 0/2 + a parseable trailing BEGIN_JSON line.
 //   install <id> --yes --json / update <id> --json / update --all --json /
-//   uninstall <id> --yes --json / sync --json  (the mutations):
+//   uninstall <id> --yes --json / sync --json / adopt-self --json  (mutations):
 //     top-level: staged(BOOL), reboot_required(BOOL)  [+changed[],failed[]]
+//     adopt-self (KpmProcess::adoptSelf; mutating, best-effort network) enrols
+//     kpm's own self-update; success reports changed:["kpm"], both bools false
+//     (it records the adoption identity, staging nothing) — see block 12.
 //     NOTE the shape split the hook relies on: `staged` is an OBJECT in the
 //     search payload but a BOOL in every mutation payload; both are exercised.
 //     sync always reports staged=false,reboot_required=false (a def re-copy
@@ -184,6 +189,8 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantStrOrNull(t, pkg, "tested_fw")       // advisory firmware-compat metadata (D)
 	wantBool(t, pkg, "fw_untested")          // server-computed "untested on your firmware" (D)
 	wantArrayOrNull(t, pkg, "missing_files") // post-install verification state (A)
+	wantBool(t, pkg, "is_self")              // the kpm self row (kpm-self-enrol-plan §1)
+	wantBool(t, pkg, "self_configured")      // whether kpm's self-update is wired up
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")
 }
@@ -739,6 +746,85 @@ func TestUIContractSync(t *testing.T) {
 	}
 	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "samplemod" {
 		t.Errorf("sync changed = %v, want [samplemod]", m["changed"])
+	}
+}
+
+// ---- 11b. search self row (kpm-self-enrol-plan §1) ----------------------
+//
+// CONTRACT: the kpm self row carries is_self:true; self_configured tells the hook
+// whether kpm's self-update is wired up. The DetailDialog gates its "Enable
+// self-update" affordance on is_self && !self_configured — so a rename/type flip
+// here would strand the enrol flow.
+
+func TestUIContractSearchSelfRow(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.9.0")
+	registerSelf(t, a) // sourceless kpm.toml, no state source → un-adopted
+	seedRegistry(t, a, "main", `schema_version = 1
+[packages.kpm]
+name = "kpm"
+source = "github.com/wolffshots/kpm"
+forge = "github"
+asset = "KoboRoot.tgz"
+`)
+	a.state.Get(selfID).InstalledVersion = "0.7.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdSearch([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("search --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	pkgs := wantArray(t, m, "packages")
+	if len(pkgs) != 1 {
+		t.Fatalf("packages len = %d, want 1", len(pkgs))
+	}
+	p0 := pkgs[0].(map[string]any)
+	assertSearchPkg(t, p0)
+	// The un-adopted kpm row: is_self true, self_configured false — the exact gate
+	// the DetailDialog's "Enable self-update" affordance keys off.
+	if p0["id"] != "kpm" || p0["is_self"] != true || p0["self_configured"] != false {
+		t.Errorf("self row = %v, want id=kpm is_self=true self_configured=false", p0)
+	}
+}
+
+// ---- 12. adopt-self --json (KpmProcess::adoptSelf — mutating, network) ---
+//
+// CONTRACT: the DetailDialog's "Enable self-update" button enrols kpm's own
+// self-update. It reuses the §2.3 mutation shape; a clean enrol reports
+// changed:["kpm"] with staged=false,reboot_required=false (it records the
+// adoption identity and stages nothing). The hook reads exactly changed[]/
+// failed[]/staged/reboot_required, so a rename/type flip breaks the enrol flow.
+
+func TestUIContractAdoptSelf(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.9.0")
+	registerSelf(t, a)
+	a.netWait = func(string) bool { return false } // offline: enrol from the warm cache
+	seedRegistry(t, a, "main", `schema_version = 1
+[packages.kpm]
+name = "kpm"
+source = "github.com/wolffshots/kpm"
+forge = "github"
+asset = "KoboRoot.tgz"
+`)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdAdoptSelf([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("adopt-self --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	if wantBool(t, m, "staged") != false || wantBool(t, m, "reboot_required") != false {
+		t.Errorf("adopt-self must report staged=false,reboot_required=false, got %v/%v",
+			m["staged"], m["reboot_required"])
+	}
+	if changed := wantArray(t, m, "changed"); len(changed) != 1 || changed[0] != "kpm" {
+		t.Errorf("adopt-self changed = %v, want [kpm]", m["changed"])
 	}
 }
 
