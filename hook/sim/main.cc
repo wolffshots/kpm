@@ -49,6 +49,7 @@
 #include "nickelstub.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
+#include "widgets/pagedstack.h"
 
 // sendClick synthesizes a left press+release at a widget's center, driving the
 // same mouse path a tap would (PackageRow::selected / SimTouchLabel::tapped).
@@ -763,6 +764,120 @@ static void runExerciseWake() {
       });
 }
 
+// pageLabelText returns the PagedStack's "Page X of Y" pagination label text (the
+// only child QLabel whose text starts with "Page "); empty if none. Used by the
+// reload exercise to read which page is current without touching PagedStack's
+// private current/total members.
+static QString pageLabelText(PagedStack *pages) {
+  for (QLabel *l : pages->findChildren<QLabel *>()) {
+    if (l->text().startsWith(QStringLiteral("Page "))) {
+      return l->text();
+    }
+  }
+  return QString();
+}
+
+// totalFromLabel parses N out of a "Page X of N" pagination label (0 if the label
+// is single-page "Page X" or absent). PagedStack keeps its real page total private;
+// the label is the observable proxy for it.
+static int totalFromLabel(const QString &lbl) {
+  int at = lbl.indexOf(QStringLiteral(" of "));
+  return at < 0 ? 0 : lbl.mid(at + 4).toInt();
+}
+
+// runExerciseReload probes Win 2 (kpm-flash-reduction-plan) PagedStack::reload()
+// on a DEEP page stack — the case the other exercises don't reach. It paginates
+// the browse list, navigates to page 2 (so the stack holds [status, page1, page2]),
+// then triggers a data-in-hand re-render (commit with an empty filter → reload()
+// with before>2). Asserts: no blank/stale frame (rows still shown), the high→low
+// stale-page delete leaves the new page correctly indexed (reset to "Page 1 of N"),
+// the page count is unchanged, and prev/next still page after the swap-once reload
+// (exit 0 = PASS; each failure exits non-zero).
+static void runExerciseReload() {
+  waitForRows(
+      []() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        if (!pages) {
+          std::fprintf(stderr, "sim: no PagedStack found\n");
+          qApp->exit(4);
+          return;
+        }
+        int totalPages = totalFromLabel(pageLabelText(pages));
+        if (totalPages < 2) {
+          std::fprintf(stderr, "sim: FAIL — need >=2 pages to test the multi-page reload (got %d)\n", totalPages);
+          qApp->exit(5);
+          return;
+        }
+        std::fprintf(stderr, "sim: browse paginated into %d pages; navigating to page 2\n", totalPages);
+        QMetaObject::invokeMethod(pages, "next"); // build + show page 2: stack now [status, page1, page2]
+        QTimer::singleShot(500, qApp, [browse, pages, totalPages]() {
+          QString lbl = pageLabelText(pages);
+          int rows = nickelstub_mainWindow()->findChildren<PackageRow *>().size();
+          if (rows < 1 || !lbl.startsWith(QStringLiteral("Page 2"))) {
+            std::fprintf(stderr, "sim: FAIL — page 2 not shown (rows=%d, label='%s')\n", rows, qPrintable(lbl));
+            qApp->exit(6);
+            return;
+          }
+          std::fprintf(stderr, "sim: on '%s' with %d rows; re-rendering in place (reload from page 2)\n",
+                       qPrintable(lbl), rows);
+          // Data-in-hand re-render while on page 2 → PagedStack::reload() with before>2:
+          // exercises the high→low delete loop and the reset-to-page-1 index math.
+          QMetaObject::invokeMethod(browse, "commit"); // empty filter → all packages
+          QTimer::singleShot(500, qApp, [pages, totalPages]() {
+            QString lbl = pageLabelText(pages);
+            int rows = nickelstub_mainWindow()->findChildren<PackageRow *>().size();
+            if (rows < 1) {
+              std::fprintf(stderr, "sim: FAIL — blank/stale frame after reload from page 2 (0 rows)\n");
+              qApp->exit(7);
+              return;
+            }
+            int nowTotal = totalFromLabel(lbl);
+            if (nowTotal != totalPages) {
+              std::fprintf(stderr, "sim: FAIL — page count changed after reload (%d -> %d)\n", totalPages, nowTotal);
+              qApp->exit(8);
+              return;
+            }
+            if (!lbl.startsWith(QStringLiteral("Page 1"))) {
+              std::fprintf(stderr, "sim: FAIL — reload did not reset to page 1 (label='%s')\n", qPrintable(lbl));
+              qApp->exit(9);
+              return;
+            }
+            std::fprintf(stderr, "sim: PASS — reload from page 2 rendered %d rows, reset to '%s', %d pages intact\n",
+                         rows, qPrintable(lbl), totalPages);
+            QMetaObject::invokeMethod(pages, "next"); // pagination still works after the swap-once reload
+            QTimer::singleShot(400, qApp, [pages]() {
+              QString lbl2 = pageLabelText(pages);
+              int r2 = nickelstub_mainWindow()->findChildren<PackageRow *>().size();
+              if (r2 < 1 || !lbl2.startsWith(QStringLiteral("Page 2"))) {
+                std::fprintf(stderr, "sim: FAIL — next() after reload broke (rows=%d, label='%s')\n", r2,
+                             qPrintable(lbl2));
+                qApp->exit(10);
+                return;
+              }
+              QMetaObject::invokeMethod(pages, "prev");
+              QTimer::singleShot(400, qApp, [pages]() {
+                QString lbl3 = pageLabelText(pages);
+                int r3 = nickelstub_mainWindow()->findChildren<PackageRow *>().size();
+                if (r3 < 1 || !lbl3.startsWith(QStringLiteral("Page 1"))) {
+                  std::fprintf(stderr, "sim: FAIL — prev() after reload broke (rows=%d, label='%s')\n", r3,
+                               qPrintable(lbl3));
+                  qApp->exit(11);
+                  return;
+                }
+                std::fprintf(stderr, "sim: PASS — prev/next paging works after reload ('%s')\n", qPrintable(lbl3));
+                qApp->exit(0);
+              });
+            });
+          });
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 int main(int argc, char **argv) {
   QApplication app(argc, argv);
 
@@ -775,6 +890,8 @@ int main(int argc, char **argv) {
   bool exerciseInit = false;
   bool exerciseBadges = false;
   bool exerciseEnroll = false;
+  bool exerciseReload = false;
+  bool sizeGiven = false;
 
   QStringList args = app.arguments();
   for (int i = 1; i < args.size(); i++) {
@@ -784,7 +901,10 @@ int main(int argc, char **argv) {
       if (wh.size() == 2) {
         w = wh.at(0).toInt();
         h = wh.at(1).toInt();
+        sizeGiven = true;
       }
+    } else if (a == "--exercise-reload") {
+      exerciseReload = true;
     } else if (a == "--screenshot" && i + 1 < args.size()) {
       screenshotDir = args.at(++i);
     } else if (a == "--exercise-uninstall" && i + 1 < args.size()) {
@@ -802,6 +922,14 @@ int main(int argc, char **argv) {
     } else if (a == "--exercise-enroll") {
       exerciseEnroll = true;
     }
+  }
+
+  // The reload probe needs a paginated browse list; the default portrait size fits
+  // all six fixture packages on one page. Shrink the window (unless overridden) so
+  // the list spans >=2 pages and reload()'s multi-page delete path is exercised.
+  if (exerciseReload && !sizeGiven) {
+    w = 600;
+    h = 360;
   }
 
   nickelstub_install(w, h);
@@ -825,6 +953,8 @@ int main(int argc, char **argv) {
     runExerciseBadges();
   } else if (exerciseEnroll) {
     runExerciseEnroll();
+  } else if (exerciseReload) {
+    runExerciseReload();
   }
 
   return app.exec();
