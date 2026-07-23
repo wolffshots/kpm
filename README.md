@@ -120,7 +120,19 @@ to turn it on (after the `registry add`/`refresh` above):
 kpm install kpm --adopt --yes
 ```
 
-and kpm maintains itself like any other package.
+and kpm maintains itself like any other package. Since 0.9.1 there is a
+shorthand for exactly this enrol — it refreshes the configured registries
+(best-effort: a warm cache lets it enrol offline), finds the kpm def they offer,
+and adopts it, preserving any pin:
+
+```
+kpm adopt-self
+```
+
+This is also the CLI command the graphical UI's **Enable self-update** button
+calls (see *Graphical UI* below), so a device with no SSH can turn self-update on
+from the touchscreen. It needs a configured registry that offers kpm and never
+hardcodes a source.
 
 Since 0.5.0 the adoption (`source`/`forge`) is stored in `state.json`, not in
 `kpm.toml` — the same place kpm's pin lives, and for the same reason. Every kpm
@@ -304,7 +316,11 @@ keyboard, and drills into a per-package view with **Install**, **Update**,
 **Sync** re-copies registry defs into `packages.d` so an existing install picks
 up new config declarations and uninstall-recipe fixes without SSH — the offline
 UI equivalent of `kpm sync` (distinct from **Refresh**, which only refetches the
-registry list and re-checks versions). On the package
+registry list and re-checks versions). When self-update is not yet enrolled the
+kpm row shows a **self-update off** badge and its detail page carries an **Enable
+self-update** button; one tap runs `kpm adopt-self` (kpm 0.9.1) to wire kpm's own
+source in from your configured registry, then offers to check for an update — so
+a device with no SSH can turn self-update on from the touchscreen. On the package
 list the title-bar **✕** closes the UI; in a package's detail view the **←**
 returns to the list and **✕** closes the whole UI. All real work is done by
 shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
@@ -394,6 +410,8 @@ kpm doctor [<id>]           diagnose whether installed Nickel plugins actually l
                             (read-only; no lock, no network — see below)
 kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
                             copy a package def from a registry into packages.d
+kpm adopt-self [--json]     enrol kpm's own self-update from a configured registry
+                            (best-effort refresh + install kpm --adopt in one step)
 kpm sync [<id>...] [--overwrite]  re-copy registry defs for registry-managed packages
 kpm config list <id>        declared config files for a package (offline)
 kpm config show <id> <file> entries of one config file — ini keys or text lines
