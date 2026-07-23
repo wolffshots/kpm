@@ -59,11 +59,19 @@ Dialog::Dialog(QString title) : QFrame() {
 
   QObject::connect(dialog, SIGNAL(closeTapped()), dialog, SLOT(deleteLater()));
 
-  dialog->show();
-
+  // Win 1 (kpm-flash-reduction-plan): hide the status/nav bars BETWEEN pushView
+  // and show(), not after, so the dialog's first paint already has the chrome
+  // gone — one flash on open instead of two (paint-with-bars, then paint-without).
+  // hideChrome finds its targets independently of this dialog being shown:
+  // MainNavView via findWidgetByClassName over all top-level widgets, and the
+  // status bar via MainWindowController__statusBarController(mwc) — neither needs
+  // our view visible — so calling it pre-show() is sound. The nh_log line inside
+  // confirms on-device that both bars are still found when hidden this early.
   if (canHideChrome) {
     hideChrome(mwc);
   }
+
+  dialog->show();
 }
 
 // findWidgetByClassName walks every widget in the process looking for Nickel's
