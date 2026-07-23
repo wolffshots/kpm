@@ -25,15 +25,22 @@ Q_SIGNALS:
   // browse dialog to close too so the whole UI dismisses (the back button, by
   // contrast, only closes this detail view — see the constructor).
   void closeRequested();
+  // selfEnrolled is emitted after a successful "Enable self-update" when the user
+  // opts into the post-enrol check: BrowseDialog binds it to loadSearch(true)
+  // (search + check) so the kpm row repaints with its real update badge
+  // (kpm-self-enrol-plan §5). Distinct from changed(), which reloads without a check.
+  void selfEnrolled();
 
 public Q_SLOTS:
   void install();
   void update();
   void uninstall();
-  void openConfig(); // Settings → ConfigDialog (CONFIG.md §4)
+  void openConfig();        // Settings → ConfigDialog (CONFIG.md §4)
+  void enableSelfUpdate();  // Enable self-update → adopt-self (kpm-self-enrol-plan §5)
 
   void onResponse(int exitCode, QJsonObject payload);
   void onInstallRegistered(int exitCode, QJsonObject payload);
+  void onSelfEnrolled(int exitCode, QJsonObject payload);
   void onFailure(QString reason);
 
 private:

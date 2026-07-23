@@ -42,6 +42,11 @@ DetailDialog::DetailDialog(QJsonObject package)
   bool updateAvailable = pkg.value("update").toBool();
   bool uninstallable = pkg.value("uninstallable").toBool();
   bool isKpm = id == QStringLiteral("kpm"); // §6: never offer to uninstall kpm itself
+  // Self-update enrolment state (kpm-self-enrol-plan §5): is_self marks the kpm
+  // row; self_configured says whether its self-update is wired up. Both false for
+  // every non-kpm row (server default), so selfUnenrolled gates the advisory line
+  // and the Enable button on kpm alone, and only while un-adopted.
+  bool selfUnenrolled = pkg.value("is_self").toBool() && !pkg.value("self_configured").toBool();
   // min_kpm gate (§2.1): don't offer an Install/Update kpm itself would refuse.
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
   // Settings opens the config editor; shown only when installed and the package
@@ -115,6 +120,16 @@ DetailDialog::DetailDialog(QJsonObject package)
     }
   }
 
+  // Self-update enrolment advisory (kpm-self-enrol-plan §5): tell the user that
+  // kpm's self-update is not set up and point at the Enable button below. Mirrors
+  // the fw_untested block's bold advisory line; a static literal (plain text via
+  // Label). Gated on the server-computed is_self && !self_configured.
+  if (selfUnenrolled) {
+    Label *selfWarn = new Label(Label::Small, "Self-update is not set up. Enable it to get kpm updates here.");
+    selfWarn->setStyleSheet(selfWarn->styleSheet() + "\nLabel { font-weight: bold; }");
+    layout->addWidget(selfWarn);
+  }
+
   layout->addSpacing(16);
 
   statusLabel = new Label(Label::Small, "");
@@ -148,6 +163,12 @@ DetailDialog::DetailDialog(QJsonObject package)
   } else {
     if (updateAvailable) {
       addButton("Update", SLOT(update()));
+    }
+    // Enable self-update (kpm-self-enrol-plan §5): for an un-adopted kpm this is
+    // the only button on the page — Uninstall is suppressed for self and, with no
+    // configured source, check never reports an update so updateAvailable is false.
+    if (selfUnenrolled) {
+      addButton("Enable self-update", SLOT(enableSelfUpdate()));
     }
     if (uninstallable && !isKpm) {
       addButton("Uninstall", SLOT(uninstall()));
@@ -214,6 +235,55 @@ void DetailDialog::onInstallRegistered(int exitCode, QJsonObject payload) {
 }
 
 void DetailDialog::update() { run(KpmProcess::update(id)); }
+
+// enableSelfUpdate enrols kpm's own self-update (kpm-self-enrol-plan §5). It does
+// NOT reuse the shared run()/onResponse: that path closes the view and reboots on
+// a staged change, but adopt-self stages nothing — it only records kpm's adoption
+// identity in state.json. Success is routed to onSelfEnrolled (a post-enrol check
+// prompt); a hard failure rides KpmProcess's error-dialog + onFailure path.
+void DetailDialog::enableSelfUpdate() {
+  KpmProcess *proc = KpmProcess::adoptSelf();
+  if (!proc) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
+    return;
+  }
+  setBusy(true);
+  QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onSelfEnrolled);
+  QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
+}
+
+// onSelfEnrolled handles a completed adopt-self. A hard error (exit 1, no payload)
+// never reaches here — it goes through onFailure — so a non-zero code here is the
+// defensive partial path only. On success, enrol wired up the source but ran no
+// version check, so offer one now (a check needs the network, hence opt-in),
+// copying the promptReboot ConfirmationDialog shape. "Check now" reloads browse
+// WITH a check (selfEnrolled → loadSearch(true)) so the kpm row repaints with its
+// real update badge; "Not now" reloads without a check (changed()) so the row just
+// loses its "self-update off" badge. Either way the detail view then closes.
+void DetailDialog::onSelfEnrolled(int exitCode, QJsonObject payload) {
+  (void)payload; // adopt-self stages nothing; its payload carries no reboot state
+  setBusy(false);
+  if (exitCode != 0) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "Enabling self-update failed. See the kpm log.");
+    return;
+  }
+  ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
+  ConfirmationDialog__setTitle(d, "kpm");
+  ConfirmationDialog__setText(d, "Self-update enabled. Check for an update now?");
+  ConfirmationDialog__setAcceptButtonText(d, "Check now");
+  ConfirmationDialog__setRejectButtonText(d, "Not now");
+  QObject::connect(d, &QDialog::accepted, this, [this] {
+    selfEnrolled();        // browse: loadSearch(true) — search + check, repaint the badge
+    dialog->deleteLater(); // close this detail view
+  });
+  QObject::connect(d, &QDialog::rejected, this, [this] {
+    changed();             // browse reloads without a check — the row drops "self-update off"
+    dialog->deleteLater();
+  });
+  QObject::connect(d, &QDialog::accepted, d, &QDialog::deleteLater);
+  QObject::connect(d, &QDialog::rejected, d, &QDialog::deleteLater);
+  d->open();
+}
 
 // openConfig pushes the ConfigDialog over this detail view (CONFIG.md §4). Its
 // back arrow returns here; its close X chains up through closeRequested so the

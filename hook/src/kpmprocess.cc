@@ -41,6 +41,12 @@ KpmProcess *KpmProcess::uninstall(const QString &id) { return start({"uninstall"
 // single-instance lock) but needs no network — it reads only the local registry
 // cache and rewrites packages.d (JSON-OUTPUT.md §2.3), so needsNetwork is false.
 KpmProcess *KpmProcess::sync() { return start({"sync", "--json"}, false, true); }
+// adopt-self enrols kpm's own self-update from a configured registry — the one UI
+// call the "Enable self-update" button drives (kpm-self-enrol-plan §2/§5). It is
+// mutating (takes kpm's lock, writes state.json) and network (best-effort refresh
+// of the registry cache), so it rides s_mutatingInFlight and the Wi-Fi gate. It
+// stages nothing: its payload reports staged=false/reboot_required=false.
+KpmProcess *KpmProcess::adoptSelf() { return start({"adopt-self", "--json"}, true, true); }
 
 // Config editing (CONFIG.md §3.2). list/show are offline reads; set is mutating
 // (takes kpm's single-instance lock) but needs no network — a config edit is a

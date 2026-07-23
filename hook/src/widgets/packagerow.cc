@@ -25,6 +25,14 @@ QString PackageRow::badgeText(const QJsonObject &json) {
   if (json.value("staged").toBool()) {
     return QStringLiteral("● reboot pending"); // ●
   }
+  // Self-update enrolment (kpm-self-enrol-plan §5): the kpm row's self-update is
+  // not wired up. Ranks below files-missing/staged (those describe a broken or
+  // pending install) but above the normal not-installed/update/current lines — an
+  // un-adopted kpm otherwise renders a healthy "0.7.0 ✓". Gated on the
+  // server-computed is_self && !self_configured; both false for every non-kpm row.
+  if (json.value("is_self").toBool() && !json.value("self_configured").toBool()) {
+    return QStringLiteral("self-update off");
+  }
   QString installed = json.value("installed").toString();
   if (installed.isEmpty()) {
     return QStringLiteral("not installed");

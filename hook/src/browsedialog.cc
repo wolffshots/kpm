@@ -272,6 +272,9 @@ void BrowseDialog::openDetail(QString id) {
     if (o.value("id").toString() == id) {
       DetailDialog *d = DetailDialog::show(o);
       QObject::connect(d, &DetailDialog::changed, this, [this] { loadSearch(false); });
+      // Post-enrol "Check now" (kpm-self-enrol-plan §5): reload WITH a check so the
+      // freshly-adopted kpm row repaints with its real update badge, like onRefreshDone.
+      QObject::connect(d, &DetailDialog::selfEnrolled, this, [this] { loadSearch(true); });
       // Detail's close (X) closes the whole package manager: dismiss this browse
       // dialog underneath it (the detail view deletes itself via the base Dialog).
       QObject::connect(d, &DetailDialog::closeRequested, this, [this] { dialog->deleteLater(); });
