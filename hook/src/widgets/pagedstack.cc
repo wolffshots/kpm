@@ -148,6 +148,49 @@ void PagedStack::clear() {
   setCurrent(0);
 }
 
+// reload() re-renders when the data is already in hand WITHOUT flipping through
+// the "Loading. Please wait..." status page (kpm-flash-reduction-plan Win 2).
+// clear()+next() deletes the content and setCurrent(0) → shows Loading, then the
+// consumer's addPage swaps again: two full-screen redraws. Here the current
+// content page stays shown while the consumer builds the new first page
+// (requestPage → addPage does the single setCurrent swap straight to it); only
+// THEN are the stale pages deleted, so the transition is content→content with no
+// blank/stale intermediate frame. Callers gate on hasContent() so the genuine
+// initial load (nothing shown yet) still goes through clear()/Loading.
+void PagedStack::reload() {
+  int before = stack->count(); // [0]=status, [1..before-1]=stale content pages
+
+  // Consumer builds page 1: setTotal() re-shows the still-live current page (no
+  // flash, it is unchanged) and addPage() appends the new page + setCurrent()s to
+  // it — the one swap. An empty result takes the setStatusText path, adding
+  // nothing (count unchanged), which the built check below detects.
+  requestPage(1);
+  bool built = stack->count() > before;
+
+  // Delete the stale content pages AFTER the swap. High index → low so the
+  // surviving new page (which sits above the stale range) is never the widget we
+  // grab; QStackedWidget keeps the current widget shown as lower indices drop.
+  for (int i = before - 1; i >= 1; i--) {
+    QWidget *widget = stack->widget(i);
+    stack->removeWidget(widget);
+    widget->deleteLater();
+  }
+
+  if (built) {
+    setCurrent(1); // the new page shifted down to index 1; resync bookkeeping
+  } else {
+    // Filtered to empty: show the status the consumer just set, matching clear()'s
+    // end state without the mid-render Loading flip.
+    setTotal(0);
+    setCurrent(0);
+  }
+}
+
+// hasContent reports whether a content page (not the index-0 status page) is the
+// one currently shown — the signal render() uses to pick reload() (data-in-hand
+// re-render) over clear()+next() (initial load, nothing rendered yet).
+bool PagedStack::hasContent() const { return current >= 1; }
+
 int PagedStack::getAvailableHeight() { return stack->contentsRect().height(); }
 
 int PagedStack::countPages() { return stack->count() - 1; }

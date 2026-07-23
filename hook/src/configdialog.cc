@@ -194,8 +194,15 @@ void ConfigDialog::showEntries(const QJsonObject &fileObj, const QJsonArray &fil
 
 void ConfigDialog::render() {
   endEdit();
-  pages->clear();
-  pages->next();
+  // Win 2 (kpm-flash-reduction-plan): a re-render with content already shown
+  // (file-list→entries, post-edit re-read) swaps straight across without the
+  // "Loading..." flip; the initial load (status page still shown) keeps clear().
+  if (pages->hasContent()) {
+    pages->reload();
+  } else {
+    pages->clear();
+    pages->next();
+  }
 }
 
 void ConfigDialog::requestPage(int index) {

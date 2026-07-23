@@ -344,8 +344,16 @@ void BrowseDialog::setActionsEnabled(bool enabled) {
 
 void BrowseDialog::render() {
   filtered = filteredPackages();
-  pages->clear();
-  pages->next();
+  // Win 2 (kpm-flash-reduction-plan): if a content page is already shown this is a
+  // data-in-hand re-render (post-action reload, post-check merge, in-search filter)
+  // — swap straight to the new list, no "Loading..." flip. The genuine initial load
+  // (status page still shown) keeps clear()/Loading.
+  if (pages->hasContent()) {
+    pages->reload();
+  } else {
+    pages->clear();
+    pages->next();
+  }
 }
 
 void BrowseDialog::requestPage(int index) {

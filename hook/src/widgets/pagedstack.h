@@ -25,6 +25,8 @@ public:
 
   void addPage(QWidget *page);
   void clear();
+  void reload();
+  bool hasContent() const;
   int getAvailableHeight();
   int countPages();
   void setTotal(int value);
