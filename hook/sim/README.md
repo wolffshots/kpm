@@ -54,12 +54,14 @@ Offscreen screenshots (automated validation — needs `QT_QPA_PLATFORM=offscreen
 which run.sh sets automatically for these modes):
 
 ```sh
-./run.sh --screenshot out       # browse/detail + detail-fw-untested + config-list/config-edit/config-files/config-init png's
+./run.sh --screenshot out       # browse/detail + detail-fw-untested + config-list/config-edit/config-files/config-init + detail-enroll png's
 ```
 
-`browse.png` shows samplemod's top-priority **files missing** badge (A) and
-`detail-fw-untested.png` shows nickelnote's **Untested on your firmware** warning
-line (D) — both driven by the seeded fixture below.
+`browse.png` shows samplemod's top-priority **files missing** badge (A) and the
+un-adopted kpm row's **self-update off** badge; `detail-fw-untested.png` shows
+nickelnote's **Untested on your firmware** warning line (D); and
+`detail-enroll.png` shows the kpm detail page's self-update advisory line plus the
+**Enable self-update** button — all driven by the seeded fixture below.
 
 Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall`):
 
@@ -101,6 +103,19 @@ Offscreen end-to-end sync (drives the browse footer's **Sync** button ->
 # missing button or an un-synced def fails non-zero).
 ```
 
+Offscreen end-to-end self-enrol (drives DetailDialog -> **Enable self-update** ->
+`kpm adopt-self`):
+
+```sh
+./run.sh --exercise-enroll
+# opens the un-adopted kpm detail, taps "Enable self-update", rejects the post-enrol
+# "Check now?" prompt (Not now — a check needs the network), then asserts (a) state.json
+# gained packages.kpm.source and (b) a fresh `kpm search --json` reports
+# self_configured=true for kpm (exit 0 = PASS; a missing button or an un-adopted state
+# fails non-zero). Works offline: adopt-self's best-effort refresh no-ops / soft-fails on
+# the warm pre-seeded registry cache, then adopts from the cache.
+```
+
 Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
 
 ```sh
@@ -129,7 +144,7 @@ uninstalls never touch the real filesystem.
 
 ## Seeded fixture (offline)
 
-`kpm search --json` returns four packages in mixed states:
+`kpm search --json` returns six packages in mixed states:
 
 | id | state | detail action |
 |----|-------|---------------|
@@ -138,15 +153,17 @@ uninstalls never touch the real filesystem.
 | nickelmenu | not installed | Install |
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path); registry def carries an old `tested_fw` (4.38) vs the seeded `.kobo/version` (4.45) → **firmware badge** ("Untested on your firmware") |
 | samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge |
+| kpm | installed 0.7.0 | un-adopted self row: sourceless `packages.d/kpm.toml` + empty state source (the registry offers a kpm def with a real source) → `is_self=true`, `self_configured=false` → **"self-update off"** badge + **Enable self-update** button — the `--exercise-enroll` target |
 
-## Which of the twelve UI actions work end-to-end
+## Which of the thirteen UI actions work end-to-end
 
-The twelve commands the hook issues (`hook/src/kpmprocess.cc`):
+The thirteen commands the hook issues (`hook/src/kpmprocess.cc`):
 
 | action | works in sim | notes |
 |--------|:---:|-------|
 | **search** (browse) | ✅ | offline, read-only; drives the whole browse/detail view |
 | **uninstall** | ✅ | offline mutation; confined to `KPM_SYSROOT`; validated end-to-end |
+| **adopt-self** | ✅ | offline mutation (best-effort refresh no-ops / soft-fails on the warm cache, then adopts from it); `--exercise-enroll` verifies kpm gains `self_configured=true` |
 | **sync** | ✅ | offline mutation; reads the registry cache + rewrites packages.d; `--exercise-sync` verifies samplemod gains its config |
 | **config list / show** | ✅ | offline reads; drive the ConfigDialog file picker + entries |
 | **config set** | ✅ | offline mutation; confined to `KPM_SYSROOT`; `--exercise-config` byte-verifies the surgical write |

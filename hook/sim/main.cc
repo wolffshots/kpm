@@ -12,6 +12,9 @@
 //                              equals the template bytes, then edit one line
 //   --exercise-sync            offscreen: tap Sync, assert samplemod's def gains
 //                              the registry's config table (has_config flips true)
+//   --exercise-enroll          offscreen: open kpm detail, tap "Enable self-update",
+//                              reject the "Check now?" prompt, assert state.json gained
+//                              packages.kpm.source and search reports self_configured
 //   --exercise-badges          offscreen: assert the "files missing" browse badge
 //                              (samplemod) and the "Untested on your firmware"
 //                              detail warning (nickelnote) render (A + D)
@@ -143,7 +146,15 @@ static void runScreenshot(const QString &dir) {
                 }
                 QTimer::singleShot(1500, qApp, [dir]() {
                   saveGrab(dir + "/config-init.png"); // the "Create from example" button
-                  qApp->quit();
+                  // Self-enrol: open the un-adopted kpm detail (fixture/seed.go) to
+                  // capture the advisory line + the "Enable self-update" button.
+                  if (BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>()) {
+                    QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("kpm")));
+                  }
+                  QTimer::singleShot(700, qApp, [dir]() {
+                    saveGrab(dir + "/detail-enroll.png"); // advisory + Enable self-update
+                    qApp->quit();
+                  });
                 });
               });
             });
@@ -587,6 +598,105 @@ static void runExerciseBadges() {
       });
 }
 
+// runExerciseEnroll drives the "Enable self-update" flow end to end, offline:
+// open the kpm detail -> tap "Enable self-update" -> DetailDialog::enableSelfUpdate()
+// -> KpmProcess::adoptSelf() runs `kpm adopt-self --json`, which (best-effort refresh
+// no-ops / soft-fails on the warm pre-seeded cache) records kpm's adoption identity in
+// state.json. On success the post-enrol "Check for an update now?" confirmation appears;
+// we REJECT it ("Not now") to keep the run offline — a check needs the network. It then
+// asserts, from the sandbox, that (a) state.json gained packages.kpm.source and (b) a
+// fresh `kpm search --json` kpm row reports self_configured=true (exit 0 = PASS). Mirrors
+// the seed's self-enrol target (fixture/seed.go: the un-adopted kpm self row).
+static void runExerciseEnroll() {
+  QString kpmRoot = QString::fromLocal8Bit(qgetenv("KPM_ROOT"));
+  QString statePath = kpmRoot + "/.adds/kpm/state.json";
+
+  waitForRows(
+      [statePath]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        if (!browse) {
+          std::fprintf(stderr, "sim: no BrowseDialog found\n");
+          qApp->exit(4);
+          return;
+        }
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("kpm")));
+        QTimer::singleShot(600, qApp, [statePath]() {
+          QLabel *btn = findLabelByText("Enable self-update");
+          if (!btn) {
+            std::fprintf(stderr, "sim: no 'Enable self-update' button on the kpm detail page\n");
+            qApp->exit(5);
+            return;
+          }
+          std::fprintf(stderr, "sim: tapping 'Enable self-update'\n");
+          sendClick(btn); // -> DetailDialog::enableSelfUpdate() -> KpmProcess::adoptSelf()
+          // adopt-self runs a best-effort network refresh (up to ~30s if the host is
+          // truly offline) before adopting from the warm cache, so POLL for the state
+          // mutation rather than a fixed wait. Reject the "Check now?" confirmation as
+          // soon as it appears to keep the run offline (a check needs the network).
+          int *elapsed = new int(0);
+          QTimer *poll = new QTimer(qApp);
+          QObject::connect(poll, &QTimer::timeout, qApp, [statePath, elapsed, poll]() {
+            *elapsed += 500;
+            if (g_lastConfirmation) {
+              std::fprintf(stderr, "sim: rejecting the post-enrol 'Check now?' prompt (Not now)\n");
+              g_lastConfirmation->reject();
+            }
+            // state.json only carries a kpm source AFTER adopt-self records the
+            // adoption identity — no seeded package writes that source into state.
+            QByteArray state = readBytes(statePath);
+            bool adopted = state.contains("github.com/wolffshots/kpm");
+            if (adopted) {
+              poll->stop();
+              delete elapsed;
+              std::fprintf(stderr, "sim: PASS — state.json gained packages.kpm.source\n");
+              // (b) a fresh `kpm search --json` reports self_configured=true for kpm.
+              QProcess sp;
+              sp.start(QString::fromLocal8Bit(qgetenv("NKPM_KPM")), QStringList{"search", "--json"});
+              if (!sp.waitForFinished(15000)) {
+                std::fprintf(stderr, "sim: FAIL — `kpm search --json` did not finish\n");
+                qApp->exit(9);
+                return;
+              }
+              QByteArray out = sp.readAllStandardOutput();
+              int idx = out.indexOf("BEGIN_JSON");
+              QJsonObject payload;
+              if (idx >= 0) {
+                payload = QJsonDocument::fromJson(out.mid(idx + static_cast<int>(sizeof("BEGIN_JSON") - 1))).object();
+              }
+              bool found = false, selfConfigured = false;
+              for (const QJsonValue &v : payload.value("packages").toArray()) {
+                QJsonObject o = v.toObject();
+                if (o.value("id").toString() == "kpm") {
+                  found = true;
+                  selfConfigured = o.value("self_configured").toBool();
+                }
+              }
+              if (!found) {
+                std::fprintf(stderr, "sim: FAIL — kpm missing from `kpm search --json`\n");
+                qApp->exit(10);
+              } else if (!selfConfigured) {
+                std::fprintf(stderr, "sim: FAIL — kpm self_configured=false after enrol\n");
+                qApp->exit(10);
+              } else {
+                std::fprintf(stderr, "sim: PASS — search --json reports kpm self_configured=true\n");
+                qApp->exit(0);
+              }
+            } else if (*elapsed > 40000) {
+              poll->stop();
+              delete elapsed;
+              std::fprintf(stderr, "sim: FAIL — state.json never gained packages.kpm.source:\n%s\n", state.constData());
+              qApp->exit(8);
+            }
+          });
+          poll->start(500);
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -664,6 +774,7 @@ int main(int argc, char **argv) {
   bool exerciseWake = false;
   bool exerciseInit = false;
   bool exerciseBadges = false;
+  bool exerciseEnroll = false;
 
   QStringList args = app.arguments();
   for (int i = 1; i < args.size(); i++) {
@@ -688,6 +799,8 @@ int main(int argc, char **argv) {
       exerciseInit = true;
     } else if (a == "--exercise-badges") {
       exerciseBadges = true;
+    } else if (a == "--exercise-enroll") {
+      exerciseEnroll = true;
     }
   }
 
@@ -710,6 +823,8 @@ int main(int argc, char **argv) {
     runExerciseInit();
   } else if (exerciseBadges) {
     runExerciseBadges();
+  } else if (exerciseEnroll) {
+    runExerciseEnroll();
   }
 
   return app.exec();

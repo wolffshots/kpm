@@ -18,6 +18,12 @@
 //	                                    the sync exercise target; and carries a
 //	                                    seeded MissingFiles — the "files missing"
 //	                                    badge fixture)
+//	kpm          installed 0.7.0      (SOURCELESS packages.d/kpm.toml + empty state
+//	                                    source = un-adopted self row; registry offers
+//	                                    a kpm def with a real source — search reports
+//	                                    is_self=true, self_configured=false, driving
+//	                                    the "self-update off" badge + the Enable
+//	                                    self-update button — the --exercise-enroll target)
 //
 // It imports kpm's own internal packages (it lives inside module kpm) to write
 // state exactly the way the real commands and the UI-contract tests do, so the
@@ -101,6 +107,19 @@ description = "A demo mod that recently gained an editable config — the sync t
   format = "ini"
   reload = "reboot"
   description = "Sample mod options."
+
+# kpm's own registry def: it carries a real source/forge/asset so the merged
+# manifest offers a kpm package (the enrol source, per kpm-self-enrol-plan §6).
+# The sandbox ships a SOURCELESS packages.d/kpm.toml with an empty state source,
+# so search reports is_self=true, self_configured=false (the un-adopted self row).
+# adopt-self reads THIS def to wire up the source — the --exercise-enroll target.
+[packages.kpm]
+name = "kpm"
+source = "github.com/wolffshots/kpm"
+forge = "github"
+asset = "KoboRoot.tgz"
+description = "The Kobo package manager itself — enable self-update to get new kpm releases here."
+homepage = "https://github.com/wolffshots/kpm"
 `
 
 // clockSettings is a realistic NickelClock settings.ini with comments and three
@@ -279,6 +298,18 @@ func main() {
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/content.template", noteContent)
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelnote/style.template", noteStyle)
 
+	// kpm's own un-adopted self row (kpm-self-enrol-plan §6): ship the SOURCELESS
+	// packages.d/kpm.toml exactly as a real KoboRoot.tgz does (name/asset only —
+	// source/forge/pin live in state.json once adopted, build/package.go's selfToml).
+	// With an EMPTY state source (set below) search reports is_self=true,
+	// self_configured=false — the "self-update off" badge + the Enable button target.
+	// The sim's kpm binary is built as version "dev", so seedSelf/migrateSelfSource
+	// never auto-adopt it (a dev binary never migrates source or reconciles version).
+	must(config.Save(p.PackageFile("kpm"), &config.Package{
+		Name:  "kpm",
+		Asset: "KoboRoot.tgz",
+	}))
+
 	// Device firmware descriptor (D): .kobo/version is one comma-separated line
 	// whose 3rd field is the firmware. Seeded NEWER (4.45) than nickelnote's
 	// tested_fw (4.38) so device.Firmware() reads it and search computes
@@ -293,6 +324,10 @@ func main() {
 	must(err)
 	st.Get("nickelclock").InstalledVersion = "v0.4.0"
 	st.Get("nickelnote").InstalledVersion = "v1.2.0"
+	// kpm installed but NOT adopted: an installed version with an EMPTY Source is
+	// the un-adopted self row (self_configured=false). adopt-self fills Source from
+	// the registry def — the --exercise-enroll assertion (state gains kpm.source).
+	st.Get("kpm").InstalledVersion = "0.7.0"
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
@@ -313,10 +348,11 @@ func main() {
 	fmt.Println("seed: sandbox ready")
 	fmt.Println("  KPM_ROOT    =", os.Getenv("KPM_ROOT"))
 	fmt.Println("  KPM_SYSROOT =", sysroot)
-	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0)")
+	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0) kpm(0.7.0, un-adopted)")
 	fmt.Println("  uninstall target: samplemod ->", hostFile)
 	fmt.Println("  config targets: nickelclock(settings.ini, ini) nickelnote(3 templates, text)")
 	fmt.Println("  sync target: samplemod (local def missing the registry's [[configs]])")
 	fmt.Println("  files-missing badge: samplemod (seeded MissingFiles)")
 	fmt.Println("  firmware badge: nickelnote (tested_fw 4.38 < device 4.45)")
+	fmt.Println("  self-enrol target: kpm (un-adopted: sourceless kpm.toml + empty state source; registry offers kpm)")
 }
