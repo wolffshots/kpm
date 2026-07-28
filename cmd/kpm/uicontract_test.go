@@ -3,7 +3,7 @@ package main
 // uicontract_test.go pins the exact JSON/exit-code contract the graphical UI
 // (the NickelKPM Qt hook under hook/) consumes, so a future kpm change cannot
 // silently break the on-device UI. Unlike json_test.go's per-command goldens,
-// these tests drive each of the EIGHT command shapes the hook actually issues
+// these tests drive each of the FIFTEEN command shapes the hook actually issues
 // (hook/src/kpmprocess.cc) end to end through the real cmd* entry points, and
 // assert the PRESENCE and TYPE of every field the hook reads — a rename or a
 // type flip is caught even when the golden string would still "look" valid.
@@ -49,6 +49,21 @@ package main
 //     search payload but a BOOL in every mutation payload; both are exercised.
 //     sync always reports staged=false,reboot_required=false (a def re-copy
 //     stages nothing) — see block 11.
+//   list    --json  (KpmProcess::list, DetailDialog's orphaned-def probe;
+//                    read-only, offline, and it takes NO lock):
+//     top-level: packages[] (array)
+//     packages[i]: id(str) — the only field the probe reads (detaildialog.cc
+//                  onRegistered) — plus name(str), installed(str|null),
+//                  pinned(str|null), source(str), registry(str|null).
+//                  These are the REGISTERED defs, not the installed ones: a def
+//                  with installed:null is exactly the orphan the probe hunts
+//                  (INTEGRITY.md §4.3) — see block 14.
+//   remove <id>     (KpmProcess::remove; mutating, no network, and NO --json):
+//     the one hook command with no payload at all. It is started with
+//     expectsPayload=false (kpmprocess.cc:92), so exit 0 with NO BEGIN_JSON
+//     marker is its success — a deliberate relaxation of the rule that a missing
+//     marker is a protocol violation, and the only place that relaxation applies
+//     — see block 15.
 //
 // The hook maps a mutating command that hits the single-instance lock — whose
 // stderr contains "another kpm instance" — to its "kpm is busy" dialog
@@ -173,6 +188,18 @@ func wantAbsent(t *testing.T, m map[string]any, key string) {
 	t.Helper()
 	if _, ok := m[key]; ok {
 		t.Fatalf("field %q must be ABSENT from this payload (contract §2.1): %v", key, m)
+	}
+}
+
+// wantNoPayload is lastJSON's opposite: it asserts stdout carries NO BEGIN_JSON
+// marker anywhere. Exactly one hook command may satisfy it — `kpm remove`, the
+// only one started with expectsPayload=false — because a marker appearing there
+// flips the hook onto the strict branch that demands exit 0/2 AND a payload
+// (kpmprocess.cc processFinished). See block 15.
+func wantNoPayload(t *testing.T, out string) {
+	t.Helper()
+	if strings.Contains(out, "BEGIN_JSON") {
+		t.Fatalf("this command must emit NO BEGIN_JSON payload (hook expectsPayload=false):\n%s", out)
 	}
 }
 
@@ -905,7 +932,7 @@ func TestUIContractBusyLockMessage(t *testing.T) {
 
 	var code int
 	stderr := captureStderr(t, func() {
-		// Drive the real binary entry point; install is one of the seven UI shapes.
+		// Drive the real binary entry point; install is one of the fifteen UI shapes.
 		code = run([]string{"install", "nickelclock", "--yes", "--json"})
 	})
 	if code != exitError {
@@ -966,5 +993,168 @@ min_kpm = "0.10.0"
 	// The stable substring the hook matches on (singular is a prefix of plural).
 	if msg := wantStr(t, f0, "error"); !strings.Contains(msg, "conflicts with installed package") {
 		t.Errorf("failed[0].error must carry the hook's match substring: %q", msg)
+	}
+}
+
+// ---- 14. list --json (KpmProcess::list — read-only, offline, no lock) ----
+//
+// CONTRACT: `KpmProcess::list()` runs {"list", "--json"} with needsNetwork=false
+// and mutating=false (kpmprocess.cc:86). Its one caller is DetailDialog's
+// orphaned-def probe (detaildialog.cc onRegistered, INTEGRITY.md §4.3): it walks
+// payload.packages[] and matches .id against the package on screen. A hit on a
+// page that shows the package as NOT installed is the orphan a failed two-step
+// install left behind, and it adds the "Drop registration" button.
+//
+// So the load-bearing part is not only the field shape. `list` reports what is
+// REGISTERED in packages.d — the question search cannot answer, since search's
+// rows are the union of the registry and the local snapshot — which means a def
+// with NO installed version must still appear, with installed:null. Were `list`
+// ever narrowed to installed packages, the probe would silently never fire and
+// the orphan would be unfixable from the UI.
+
+func TestUIContractList(t *testing.T) {
+	a := newTestApp(t)
+	// Two registered defs: one installed, one registered-but-NOT-installed —
+	// the orphan the probe exists to find.
+	for _, id := range []string{"installedpkg", "orphanpkg"} {
+		if err := config.Save(a.paths.PackageFile(id), &config.Package{
+			Name: id, Source: "codeberg.org/o/" + id, Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.state.Get("installedpkg").InstalledVersion = "v1.0.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdList([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("list --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	pkgs := wantArray(t, m, "packages")
+	if len(pkgs) != 2 {
+		t.Fatalf("list packages len = %d, want 2 (both REGISTERED defs)", len(pkgs))
+	}
+	byID := map[string]map[string]any{}
+	for _, p := range pkgs {
+		e := p.(map[string]any)
+		wantStr(t, e, "id") // the only field onRegistered reads
+		wantStr(t, e, "name")
+		wantStrOrNull(t, e, "installed")
+		wantStrOrNull(t, e, "pinned")
+		wantStr(t, e, "source")
+		wantStrOrNull(t, e, "registry")
+		byID[e["id"].(string)] = e
+	}
+	if byID["installedpkg"] == nil || byID["orphanpkg"] == nil {
+		t.Fatalf("list must report every registered def, keyed by id: %v", m["packages"])
+	}
+	// The orphan row IS the "Drop registration" trigger: present, installed null.
+	if v := byID["orphanpkg"]["installed"]; v != nil {
+		t.Errorf("registered-but-not-installed def: installed = %v, want null", v)
+	}
+	if v := byID["installedpkg"]["installed"]; v != "v1.0.0" {
+		t.Errorf("installed def: installed = %v, want v1.0.0", v)
+	}
+}
+
+// The probe is started with mutating=false (kpmprocess.cc:86), so it neither
+// takes the hook's in-flight guard nor is held back by one: nothing on the hook
+// side keeps it from firing while a mutating kpm holds the single-instance lock.
+// `list` must therefore answer THROUGH a held lock rather than bouncing off it
+// with "another kpm instance" — the inverse of the busy block above, and driven
+// the same way (the real entry point, against a lock held with a fresh mtime).
+func TestUIContractListTakesNoLock(t *testing.T) {
+	a := newTestApp(t)
+	if err := config.Save(a.paths.PackageFile("orphanpkg"), &config.Package{
+		Name: "orphanpkg", Source: "codeberg.org/o/orphanpkg", Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(a.paths.LockFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.paths.LockFile(), []byte("999 held\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = run([]string{"list", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("list --json under a HELD lock exit = %d, want %d — list must take no lock", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	if len(wantArray(t, m, "packages")) != 1 {
+		t.Errorf("list under a held lock = %v, want the one registered def", m["packages"])
+	}
+}
+
+// ---- 15. remove <id> (KpmProcess::remove — the one no-payload command) ---
+//
+// CONTRACT: `KpmProcess::remove(id)` runs {"remove", id} — no --json, because
+// `kpm remove` has no such flag — with needsNetwork=false, mutating=true and
+// expectsPayload=FALSE (kpmprocess.cc:92). It is what DetailDialog's "Drop
+// registration" button issues to unregister an orphaned def (detaildialog.cc
+// dropRegistration, INTEGRITY.md §4.3).
+//
+// expectsPayload=false relaxes the hook's success test for this one command:
+//
+//	ok = haveMarker ? (exitCode == 0 || exitCode == 2)
+//	                : (!expectsPayload && exitCode == 0)   [processFinished]
+//
+// so a MISSING BEGIN_JSON marker is not the protocol violation it is everywhere
+// else — exit 0 with no marker is the whole result, and response() carries an
+// empty payload the caller ignores. Both halves are pinned:
+//
+//   - success is exit 0 AND no marker. Were `kpm remove <id>` to start emitting
+//     one, the hook would take the strict branch instead and hold the run to a
+//     contract nothing on either side maintains.
+//   - a failure must be NON-ZERO. With no marker, exit 0 is the hook's only
+//     success signal, so an exit-0 failure would report "dropped" while the
+//     orphan stayed registered — and exit 2 (Go's panic code) is an error here,
+//     not the partial success it is for a --json command.
+//
+// remove is mutating (main.go mutatingCmds) so it takes the single-instance
+// lock; the busy block above pins the message that produces.
+
+func TestUIContractRemoveNoPayload(t *testing.T) {
+	a, sysroot := newUninstallApp(t)
+	f := mkfile(t, sysroot, "usr/local/pkg/lib.so")
+	registerPkg(t, a, "pkg", config.Uninstall{}, []string{"usr/local/pkg/lib.so"})
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdRemove([]string{"pkg"}) })
+	if code != exitOK {
+		t.Fatalf("remove exit = %d, want %d", code, exitOK)
+	}
+	wantNoPayload(t, out)
+	if _, err := os.Stat(a.paths.PackageFile("pkg")); !os.IsNotExist(err) {
+		t.Errorf("remove must unregister the def, stat err = %v", err)
+	}
+	// "No files are removed" is what the dropRegistration confirmation promises
+	// the user, so a surviving installed file is contract, not incidental.
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("remove must not delete installed files: %v", err)
+	}
+}
+
+func TestUIContractRemoveUnregisteredIsHardError(t *testing.T) {
+	a, _ := newUninstallApp(t)
+
+	var code int
+	var out string
+	stderr := captureStderr(t, func() {
+		out = captureStdout(t, func() { code = a.cmdRemove([]string{"pkg"}) })
+	})
+	if code != exitError {
+		t.Fatalf("remove of an unregistered id exit = %d, want %d (the hook's only failure signal)", code, exitError)
+	}
+	wantNoPayload(t, out)
+	// With no payload to read a sentence out of, stderr IS the hook's dialog text.
+	if strings.TrimSpace(stderr) == "" {
+		t.Error("a failing remove must explain itself on stderr — the hook has no payload to fall back on")
 	}
 }
