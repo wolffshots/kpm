@@ -632,7 +632,7 @@ func TestConflictGuardRefusesOnUnparseableDef(t *testing.T) {
 // LoadAll skipped": a file whose STEM is not a valid package id was never
 // registered, so it can carry no `conflicts` declaration and cannot weaken the
 // guard. Refusing on it protects against nothing while blocking every update —
-// and a stray `NickelClock.toml` or `README.toml` in packages.d is a far likelier
+// and a stray `NickelMenu.toml` or `README.toml` in packages.d is a far likelier
 // accident than a truncated def.
 func TestStrayFilenameDoesNotBlockConflictGatedCommands(t *testing.T) {
 	a := installConflictApp(t)
@@ -640,12 +640,28 @@ func TestStrayFilenameDoesNotBlockConflictGatedCommands(t *testing.T) {
 	a.client = forge.NewClientWithHTTP(srv.Client())
 	host := strings.TrimPrefix(srv.URL, "https://")
 	fakeForgePkg(t, a, host, "other", "v1.0.0")
+	// The fixture registers nickelclock against github.com, and this is the one
+	// conflict test whose update actually RUNS (the others refuse first). Re-point
+	// it at the fake forge — already at the tag the server serves, so it resolves
+	// and reports no update — or the run waits out the 30s network budget against
+	// a host the test client's cert pool cannot verify, and then fails.
+	fakeForgePkg(t, a, host, "nickelclock", "v2.0.0")
 	// Perfectly valid TOML under a filename that can never be a package id.
-	for _, name := range []string{"NickelClock.toml", "README.toml"} {
+	// Neither stem may case-fold onto a registered def: on a case-INsensitive
+	// filesystem (Windows, default macOS) a stray `NickelClock.toml` written here
+	// would land on top of `nickelclock.toml` and quietly replace the def whose
+	// inertness this test exists to prove.
+	for _, name := range []string{"NickelMenu.toml", "README.toml"} {
 		if err := os.WriteFile(a.paths.PackagesDir()+"/"+name,
 			[]byte("name = \"stray\"\nconflicts = [\"other\"]\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Guard the guard: on either filesystem the registered def must have survived
+	// the strays, or the assertions below prove nothing.
+	if p, err := config.Load(a.paths.PackageFile("nickelclock"), "nickelclock"); err != nil ||
+		!config.SourceConfigured(p.Source) {
+		t.Fatalf("a stray filename must not displace nickelclock.toml (err = %v, pkg = %+v)", err, p)
 	}
 
 	// update proceeds: the stray files are inert, not a hole in the graph. (Note
