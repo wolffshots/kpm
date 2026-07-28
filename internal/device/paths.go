@@ -68,7 +68,15 @@ func (p Paths) StateFile() string { return filepath.Join(p.AddsKpm(), "state.jso
 func (p Paths) LogFile() string { return filepath.Join(p.AddsKpm(), "kpm.log") }
 
 // StatusFile is the last-result summary shown by the NickelMenu status dialog.
-func (p Paths) StatusFile() string { return filepath.Join(p.AddsKpm(), "status.txt") }
+// The name is deliberately EXTENSIONLESS: on devices running the custom
+// ExcludeSyncFolders firmware-config variant Nickel scans .adds and imports a
+// status.txt as a book, which every new user then has to suppress by hand
+// (INTEGRITY.md §8.1). kpm.log keeps its extension — .log is not imported.
+func (p Paths) StatusFile() string { return filepath.Join(p.AddsKpm(), "status") }
+
+// LegacyStatusFile is the pre-0.10.0 status.txt path. It exists only for the
+// one-way migration in WriteStatus/ReadStatus (§8.3); nothing else may use it.
+func (p Paths) LegacyStatusFile() string { return filepath.Join(p.AddsKpm(), "status.txt") }
 
 // CacheDir holds downloaded assets awaiting staging.
 func (p Paths) CacheDir() string { return filepath.Join(p.AddsKpm(), "cache") }

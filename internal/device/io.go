@@ -32,14 +32,26 @@ func (p Paths) Log(event, detail string) error {
 	return err
 }
 
-// WriteStatus overwrites status.txt with a short dialog-friendly summary,
+// WriteStatus overwrites the status file with a short dialog-friendly summary,
 // written atomically (temp file + fsync + rename) so a reader never sees a
 // half-written status (G2/B3).
+//
+// It also completes the pre-0.10.0 status.txt migration by removing the legacy
+// file. Doing it HERE rather than at startup means the old file only disappears
+// once a fresh status exists, so the user is never left with nothing, and it
+// never runs from a read-only command — every WriteStatus caller is a mutating
+// one, so B1 is preserved (INTEGRITY.md §8.3). The delete is best-effort: a
+// failure (read-only mount, FAT32 hiccup) leaves a stale, harmless file that the
+// next mutating command retries.
 func (p Paths) WriteStatus(s string) error {
 	if !strings.HasSuffix(s, "\n") {
 		s += "\n"
 	}
-	return WriteFileAtomic(p.StatusFile(), []byte(s))
+	if err := WriteFileAtomic(p.StatusFile(), []byte(s)); err != nil {
+		return err
+	}
+	os.Remove(p.LegacyStatusFile())
+	return nil
 }
 
 // WriteFileAtomic writes data to path atomically (temp file in the same dir +
@@ -92,13 +104,18 @@ func FsyncDir(dir string) {
 	d.Close()
 }
 
-// ReadStatus returns status.txt contents (empty string if it does not exist).
+// ReadStatus returns the status file's contents (empty string if it does not
+// exist). It falls back to the pre-0.10.0 status.txt while that still exists, so
+// "kpm status" keeps showing the last summary between the upgrade and the first
+// command that writes one (INTEGRITY.md §8.3). Read-only: it never migrates.
 func (p Paths) ReadStatus() string {
-	b, err := os.ReadFile(p.StatusFile())
-	if err != nil {
-		return ""
+	if b, err := os.ReadFile(p.StatusFile()); err == nil {
+		return string(b)
 	}
-	return string(b)
+	if b, err := os.ReadFile(p.LegacyStatusFile()); err == nil {
+		return string(b)
+	}
+	return ""
 }
 
 // TailLog returns the last n lines of the current kpm.log (the rotated

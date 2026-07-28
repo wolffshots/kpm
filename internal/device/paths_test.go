@@ -158,3 +158,63 @@ func TestLogRotation(t *testing.T) {
 		}
 	}
 }
+
+// ---- INTEGRITY.md §8: status.txt -> extensionless status -----------------
+
+// §8.1: the basename must be exactly "status" — an extension is what Nickel's
+// ExcludeSyncFolders variant imports as a book.
+func TestStatusFileIsExtensionless(t *testing.T) {
+	t.Setenv("KPM_ROOT", t.TempDir())
+	p := New()
+	if got := filepath.Base(p.StatusFile()); got != "status" {
+		t.Errorf("StatusFile() basename = %q, want %q", got, "status")
+	}
+	if got := filepath.Base(p.LegacyStatusFile()); got != "status.txt" {
+		t.Errorf("LegacyStatusFile() basename = %q, want %q", got, "status.txt")
+	}
+}
+
+// §8.3: the migration REMOVES the old file rather than orphaning it — and only
+// after the new one exists, so the user is never left with nothing.
+func TestWriteStatusRemovesLegacyFile(t *testing.T) {
+	t.Setenv("KPM_ROOT", t.TempDir())
+	p := New()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.LegacyStatusFile(), []byte("old summary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.WriteStatus("new summary"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.ReadStatus(); got != "new summary\n" {
+		t.Errorf("ReadStatus = %q, want the new summary", got)
+	}
+	if _, err := os.Stat(p.StatusFile()); err != nil {
+		t.Errorf("the new status file must exist: %v", err)
+	}
+	if _, err := os.Stat(p.LegacyStatusFile()); !os.IsNotExist(err) {
+		t.Errorf("status.txt must be removed by the migration, stat err = %v", err)
+	}
+}
+
+// §8.3: between the upgrade and the first mutating command there is no new file
+// yet, so "kpm status" must keep showing the last summary from the legacy one.
+func TestReadStatusFallsBackToLegacy(t *testing.T) {
+	t.Setenv("KPM_ROOT", t.TempDir())
+	p := New()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.LegacyStatusFile(), []byte("pre-0.10.0 summary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.ReadStatus(); got != "pre-0.10.0 summary\n" {
+		t.Errorf("ReadStatus = %q, want the legacy contents", got)
+	}
+	// Reading must not migrate anything (it runs from read-only commands, B1).
+	if _, err := os.Stat(p.LegacyStatusFile()); err != nil {
+		t.Errorf("ReadStatus must not remove the legacy file: %v", err)
+	}
+}
