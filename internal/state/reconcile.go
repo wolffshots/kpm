@@ -21,6 +21,11 @@ func (s *State) PromoteStaged() []Promotion {
 		}
 		ps.InstalledVersion = ps.StagedVersion
 		ps.InstalledAt = now
+		// The staged fingerprint describes the payload that actually landed, so
+		// it becomes the installed baseline unconditionally — including the empty
+		// string for a non-rolling package (INTEGRITY.md §3.5).
+		ps.InstalledFingerprint = ps.StagedFingerprint
+		ps.StagedFingerprint = ""
 		// The staged manifest is what actually landed on disk — promote it to
 		// the installed manifest so uninstall targets the right files (B2).
 		if ps.StagedManifest != nil {
@@ -43,6 +48,7 @@ func (s *State) RollbackStaged() {
 		ps.StagedVersion = ""
 		ps.StagedAt = ""
 		ps.StagedManifest = nil
+		ps.StagedFingerprint = ""
 	}
 	s.clearStagedIdentity()
 }

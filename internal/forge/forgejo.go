@@ -12,7 +12,11 @@ type Forgejo struct{ c *Client }
 
 type forgejoRelease struct {
 	TagName string `json:"tag_name"`
-	Assets  []struct {
+	// PublishedAt feeds the rolling-release fingerprint (INTEGRITY.md §3.2). A
+	// response omitting it decodes to "", which is not an error — the
+	// fingerprint simply drops that component.
+	PublishedAt string `json:"published_at"`
+	Assets      []struct {
 		Name               string `json:"name"`
 		Size               int64  `json:"size"`
 		BrowserDownloadURL string `json:"browser_download_url"`
@@ -48,7 +52,7 @@ func (f *Forgejo) fetch(ctx context.Context, u string) (Release, error) {
 	if err := json.Unmarshal(body, &r); err != nil {
 		return Release{}, fmt.Errorf("decode forgejo release: %w", err)
 	}
-	rel := Release{Tag: r.TagName}
+	rel := Release{Tag: r.TagName, PublishedAt: r.PublishedAt}
 	for _, a := range r.Assets {
 		rel.Assets = append(rel.Assets, Asset{
 			Name:        a.Name,

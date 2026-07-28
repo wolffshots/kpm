@@ -141,3 +141,93 @@ func TestMatchAssetGlob(t *testing.T) {
 		t.Error("expected ambiguous-match error")
 	}
 }
+
+// ---- INTEGRITY.md §3: the rolling-release fingerprint --------------------
+
+// §3.4: components are emitted only when known, always in ascending key order.
+func TestFingerprintComponents(t *testing.T) {
+	asset := &Asset{Name: "KoboRoot.tgz", Size: 48213}
+	cases := []struct {
+		name string
+		rel  Release
+		a    *Asset
+		want string
+	}{
+		{"both", Release{PublishedAt: "2026-07-01T10:00:00Z"}, asset, "p=2026-07-01T10:00:00Z s=48213"},
+		{"asset nil", Release{PublishedAt: "2026-07-01T10:00:00Z"}, nil, "p=2026-07-01T10:00:00Z"},
+		{"no published_at", Release{}, asset, "s=48213"},
+		{"neither", Release{}, nil, ""},
+		{"zero size is unknown", Release{}, &Asset{Name: "K.tgz"}, ""},
+	}
+	for _, c := range cases {
+		if got := c.rel.Fingerprint(c.a); got != c.want {
+			t.Errorf("%s: Fingerprint = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// §3.4: only a key present on BOTH sides with a different value proves a change.
+func TestFingerprintChangedIgnoresMissingComponents(t *testing.T) {
+	cases := []struct {
+		old, cur string
+		want     bool
+	}{
+		{"", "p=A s=1", false},    // no baseline: never an update (baseline adoption)
+		{"p=A s=1", "", false},    // forge went quiet: degrade, never fabricate
+		{"", "", false},           //
+		{"p=A", "p=A s=1", false}, // asset newly resolvable: p still agrees
+		{"p=A s=1", "p=A", false}, // asset no longer resolvable: p still agrees
+		{"p=A s=1", "p=A s=2", true},
+		{"p=A", "p=B", true},
+		{"p=A s=1", "p=B s=1", true},
+		{"s=1", "p=A", false}, // no shared key at all
+	}
+	for _, c := range cases {
+		if got := FingerprintChanged(c.old, c.cur); got != c.want {
+			t.Errorf("FingerprintChanged(%q, %q) = %v, want %v", c.old, c.cur, got, c.want)
+		}
+	}
+}
+
+// §3.2: both decoders populate PublishedAt, and a response omitting it (or
+// sending null) yields "" rather than an error.
+func TestGitHubDecodesPublishedAt(t *testing.T) {
+	const withTS = `{"tag_name":"latest","published_at":"2026-07-01T10:00:00Z",
+	  "assets":[{"name":"KoboRoot.tgz","size":48213,"browser_download_url":"https://x/KoboRoot.tgz"}]}`
+	const withNull = `{"tag_name":"latest","published_at":null,"assets":[]}`
+	const without = `{"tag_name":"latest","assets":[]}`
+	for _, c := range []struct{ body, want string }{{withTS, "2026-07-01T10:00:00Z"}, {withNull, ""}, {without, ""}} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(c.body))
+		}))
+		g := &GitHub{c: &Client{hc: srv.Client()}, base: srv.URL}
+		rel, err := g.LatestRelease(context.Background(), "github.com", "o", "r")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", c.body, err)
+		}
+		if rel.PublishedAt != c.want {
+			t.Errorf("PublishedAt = %q, want %q (body %s)", rel.PublishedAt, c.want, c.body)
+		}
+	}
+}
+
+func TestForgejoDecodesPublishedAt(t *testing.T) {
+	const withTS = `{"tag_name":"latest","published_at":"2026-07-01T10:00:00Z",
+	  "assets":[{"name":"KoboRoot.tgz","size":48213,"browser_download_url":"https://x/KoboRoot.tgz"}]}`
+	const without = `{"tag_name":"latest","assets":[]}`
+	for _, c := range []struct{ body, want string }{{withTS, "2026-07-01T10:00:00Z"}, {without, ""}} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(c.body))
+		}))
+		f := &Forgejo{c: &Client{hc: srv.Client()}}
+		rel, err := f.LatestRelease(context.Background(), strings.TrimPrefix(srv.URL, "https://"), "o", "r")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", c.body, err)
+		}
+		if rel.PublishedAt != c.want {
+			t.Errorf("PublishedAt = %q, want %q (body %s)", rel.PublishedAt, c.want, c.body)
+		}
+	}
+}

@@ -29,6 +29,20 @@ type PackageState struct {
 	// promoted to Manifest by Reconcile so uninstall keeps using the installed
 	// (not the pending) manifest until the reboot install actually happens (B2).
 	StagedManifest []string `json:"staged_manifest,omitempty"`
+	// The fingerprint triple mirrors installed_version/staged_version/latest_seen
+	// for a rolling package, whose tag never moves: it records the release
+	// fingerprint (published_at + asset size) that each of those versions
+	// described, so a rebuilt release is detectable (INTEGRITY.md §3.5). All
+	// omitempty — additive, and an old state.json is unaffected.
+	//
+	// These are populated for EVERY package, rolling or not (check and update
+	// record them unconditionally; latest_fingerprint is gated on the pin, not on
+	// the mode). What makes them inert for a non-rolling def is the update_check
+	// test inside rebuildDetected — never an empty value. Do not build on an
+	// assumption that a non-rolling package's fingerprints are empty.
+	InstalledFingerprint string `json:"installed_fingerprint,omitempty"`
+	StagedFingerprint    string `json:"staged_fingerprint,omitempty"`
+	LatestFingerprint    string `json:"latest_fingerprint,omitempty"`
 	// Pin holds kpm's own pin, kept here (not in kpm.toml) so it survives
 	// self-update overwrite (§10). Other packages pin via their TOML.
 	Pin string `json:"pin,omitempty"`
