@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
 	"kpm/internal/state"
@@ -212,10 +213,18 @@ type App struct {
 	state  *state.State
 	client *forge.Client
 
-	readOnly   bool          // read-only command: no lock, no state/status writes (B1)
-	locked     bool          // holds the single-instance lock (mutating commands)
-	lockStop   chan struct{} // closed by releaseLock to stop the heartbeat
-	unreadable []string      // package defs skipped this run (E2), for the status line
+	readOnly bool          // read-only command: no lock, no state/status writes (B1)
+	locked   bool          // holds the single-instance lock (mutating commands)
+	lockStop chan struct{} // closed by releaseLock to stop the heartbeat
+	// skipped holds the packages.d entries loadPackages could not return this
+	// run (E2), split by cause: the status line counts them all, the
+	// conflict-gated refusal (§4.3) reads only Unparseable.
+	skipped config.SkippedDefs
+
+	// reportedDrops keys the (registry, id) pairs whose ParseManifest refusal has
+	// already been reported this invocation, so a command that reads a registry
+	// cache once per package (sync) does not repeat the same WARN.
+	reportedDrops map[string]bool
 
 	// nickelMaps is the seam `kpm doctor` reads the running Nickel process's
 	// memory map through (signal 3). Nil in normal use — mapsReader() falls back

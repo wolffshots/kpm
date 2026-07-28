@@ -9,6 +9,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/device"
+	"kpm/internal/forge"
 	"kpm/internal/state"
 )
 
@@ -70,7 +71,7 @@ func (a *App) cmdCheck(args []string) int {
 		if !a.configured(p) {
 			continue
 		}
-		tag, err := a.resolveTag(p)
+		rel, err := a.resolveCheckRelease(p)
 		ps := a.state.Get(p.ID)
 		pin := a.effectivePin(p)
 		if err != nil {
@@ -84,6 +85,7 @@ func (a *App) cmdCheck(args []string) int {
 			continue
 		}
 		okCount++
+		tag := rel.Tag
 		// Record the per-package check time only on SUCCESS: update's freshness
 		// window keys on it to decide whether latest_seen may be reused, so a
 		// failed check must not mark the package freshly checked (M2).
@@ -92,6 +94,23 @@ func (a *App) cmdCheck(args []string) int {
 		// the meaning of "latest" (F1).
 		if pin == "" {
 			ps.LatestSeen = tag
+		}
+		// Rolling detection (INTEGRITY.md §3.6). Asset matching is best-effort:
+		// an unresolvable glob passes nil to Fingerprint rather than failing the
+		// check, so check's failure semantics (and its exit-2 partial accounting)
+		// are exactly as they were.
+		var matched *forge.Asset
+		if asset, aerr := rel.MatchAsset(p.Asset); aerr == nil {
+			matched = &asset
+		}
+		fp := rel.Fingerprint(matched)
+		if a.warnRollingDegraded(p, fp) {
+			fmt.Printf("%s: rolling update detection unavailable from this forge — falling back to tag comparison\n", p.ID)
+		}
+		a.adoptFingerprintBaseline(p, ps, fp)
+		// LatestFingerprint follows LatestSeen exactly, pin rule included.
+		if pin == "" {
+			ps.LatestFingerprint = fp
 		}
 		_, avail := updateTarget(p, ps, pin)
 		if avail {
@@ -148,34 +167,31 @@ func (a *App) cmdCheck(args []string) int {
 	return exitOK
 }
 
-// resolveTag returns the release tag a package currently resolves to: the
-// pinned tag (confirmed to exist) or the latest release.
-func (a *App) resolveTag(p *config.Package) (string, error) {
+// resolveCheckRelease returns the whole release a package currently resolves
+// to: the pinned tag (confirmed to exist) or the latest release. check needs
+// more than the tag now — the rolling fingerprint is built from the release's
+// published_at and its matched asset's size (INTEGRITY.md §3.6).
+func (a *App) resolveCheckRelease(p *config.Package) (forge.Release, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	f, err := a.forgeFor(p)
 	if err != nil {
-		return "", err
+		return forge.Release{}, err
 	}
 	// Split the effective source so an adopted kpm resolves from state (§1/§3).
 	src := a.effectiveSource(p)
 	pin := a.effectivePin(p)
+	var rel forge.Release
 	if pin != "" {
-		rel, err := f.ReleaseByTag(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src), pin)
-		if err != nil {
-			return "", err
-		}
-		if rel.Tag == "" {
-			return "", fmt.Errorf("forge returned a release with an empty tag")
-		}
-		return rel.Tag, nil
+		rel, err = f.ReleaseByTag(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src), pin)
+	} else {
+		rel, err = f.LatestRelease(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src))
 	}
-	rel, err := f.LatestRelease(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src))
 	if err != nil {
-		return "", err
+		return forge.Release{}, err
 	}
 	if rel.Tag == "" {
-		return "", fmt.Errorf("forge returned a release with an empty tag")
+		return forge.Release{}, fmt.Errorf("forge returned a release with an empty tag")
 	}
-	return rel.Tag, nil
+	return rel, nil
 }

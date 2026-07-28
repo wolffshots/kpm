@@ -4,10 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"text/tabwriter"
 
 	"kpm/internal/config"
+	"kpm/internal/forge"
 	"kpm/internal/state"
 )
 
@@ -223,8 +223,36 @@ func (a *App) cmdStatus(args []string) int {
 	return exitOK
 }
 
+// rebuildDetected reports whether a rolling package's release was rebuilt under
+// the same tag — the fingerprint moved between old and cur (INTEGRITY.md §3.6).
+//
+// A PIN DISABLES IT ENTIRELY. A pin means frozen, full stop: it is an exact tag
+// the user chose, and README's `pin = "" # empty = track latest; else an exact
+// tag` is the promise. latest_fingerprint is itself pin-gated (cmd_check.go
+// records it only when no pin is in force), so a pinned package's stored value
+// is whatever it was when the pin went on — comparing against it produced a
+// phantom "UPDATE AVAILABLE (release rebuilt)" that never cleared until
+// `kpm unpin`, while `update` read the live wire and downloaded and staged a
+// release the user had explicitly frozen.
+//
+// Both halves route through here — `check`/`status` via updateTarget, `update`
+// via resolveAndDownload — so they agree by construction rather than by keeping
+// two expressions in sync.
+func rebuildDetected(pkg *config.Package, pin, old, cur string) bool {
+	if pin != "" || pkg == nil || pkg.EffectiveUpdateCheck() != config.UpdateCheckRolling {
+		return false
+	}
+	return forge.FingerprintChanged(old, cur)
+}
+
 // updateTarget returns the tag a package should move to and whether an update
 // is available (installed differs from target, and it is not already staged).
+//
+// For a package opted into rolling detection the tag alone is not enough — a
+// rolling repo's tag never moves — so a changed release fingerprint counts as an
+// update too (INTEGRITY.md §3.6). This is strictly additive: rebuildDetected is
+// false for every def that does not opt in (and for every pinned package), which
+// leaves the original behaviour byte for byte.
 func updateTarget(pkg *config.Package, ps *state.PackageState, pin string) (target string, available bool) {
 	if pin != "" {
 		target = pin
@@ -234,17 +262,22 @@ func updateTarget(pkg *config.Package, ps *state.PackageState, pin string) (targ
 	if target == "" {
 		return target, false
 	}
-	if tagsEqual(ps.StagedVersion, target) && ps.StagedVersion != "" {
+	rebuilt := rebuildDetected(pkg, pin, ps.InstalledFingerprint, ps.LatestFingerprint)
+	stagedRebuilt := rebuildDetected(pkg, pin, ps.StagedFingerprint, ps.LatestFingerprint)
+
+	if ps.StagedVersion != "" && tagsEqual(ps.StagedVersion, target) && !stagedRebuilt {
 		return target, false // already staged, awaiting reboot
 	}
-	return target, !tagsEqual(ps.InstalledVersion, target)
+	return target, !tagsEqual(ps.InstalledVersion, target) || rebuilt
 }
 
 // tagsEqual compares two release tags treating a single leading 'v' as
 // insignificant (so "v1.2.0" and "1.2.0" are the same release), but is
-// otherwise case-sensitive. Display always shows the raw tag (F6).
+// otherwise case-sensitive. Display always shows the raw tag (F6). The
+// normalization itself lives in config.NormalizeTag, shared with the checksums
+// lookup (INTEGRITY.md §5.2); the semantics here are unchanged.
 func tagsEqual(a, b string) bool {
-	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
+	return config.NormalizeTag(a) == config.NormalizeTag(b)
 }
 
 func dash(s string) string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -122,6 +123,27 @@ func (a *App) cmdInstall(args []string) int {
 		}
 	}
 
+	// B: refuse an install that would put a conflicting pair on the device
+	// (INTEGRITY.md §4.3). This is the earliest, most informative point — after
+	// the idempotent re-install short-circuit above, before anything is written.
+	// It is a HARD refusal: --yes does not override it, because the hook always
+	// passes --yes, so a confirm-and-proceed design would be silently bypassed by
+	// the only surface most users have. The graph is the local packages.d
+	// snapshot plus the def about to be written, and it is checked in both
+	// directions (§4.2).
+	blockers, berr := a.installBlockers(id, entry.Def, entries)
+	if berr != nil {
+		failJSON(berr.Error())
+		fmt.Fprintln(os.Stderr, "kpm install:", berr)
+		return exitError
+	}
+	if len(blockers) > 0 {
+		msg := fmt.Sprintf("%q %s", id, a.conflictRefusal(blockers))
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm install:", msg)
+		return exitError
+	}
+
 	// Disclose a provenance change: adopting an already-registry-managed id
 	// whose winning registry differs from the recorded one (C5).
 	provenanceChange := ""
@@ -205,6 +227,31 @@ func (a *App) cmdInstall(args []string) int {
 	return exitOK
 }
 
+// installBlockers returns the installed-or-staged package ids that must block
+// installing id, in either direction. The graph is the shared
+// registry-first-with-local-fallback construction (conflictGraphFor) — the same
+// one `search --json` reports on, so the UI's greyed-out Install and the CLI's
+// refusal can never disagree — with the incoming registry def's own list
+// overlaid, so a conflict the def only just declared is honoured before it is
+// written (§4.3).
+//
+// An error means the answer cannot be trusted (an unreadable packages.d, or a
+// def that failed to parse and is therefore invisible to the graph). The caller
+// refuses rather than proceeding on a knowingly partial view (M5). Only
+// Unparseable counts — see the note in cmdUpdate.
+func (a *App) installBlockers(id string, def *registry.PackageDef, entries map[string]*registry.Entry) ([]string, error) {
+	pkgs, err := a.loadPackages()
+	if err != nil {
+		return nil, fmt.Errorf("cannot check conflicts: %v", err)
+	}
+	if len(a.skipped.Unparseable) > 0 {
+		return nil, errors.New(unreadableRefusal(a.skipped.Unparseable))
+	}
+	graph := conflictGraphFor(entries, pkgs)
+	graph[id] = normalizeConflicts(def.Conflicts, id)
+	return a.blockingConflicts(id, graph, nil), nil
+}
+
 // missingDefFields returns the required def fields (source, forge, asset) that
 // are empty, so install can refuse an under-specified registry entry and search
 // can flag it (C1).
@@ -243,6 +290,11 @@ func printInstallDef(w io.Writer, id, regName string, p *config.Package, provena
 	}
 	if p.Pin != "" {
 		fmt.Fprintf(w, "  pin      %s\n", p.Pin)
+	}
+	// Disclose declared conflicts even when nothing is currently blocking, so a
+	// user reviewing the def sees the constraint before agreeing to it (§4.6).
+	for _, c := range normalizeConflicts(p.Conflicts, id) {
+		fmt.Fprintf(w, "  conflicts %s\n", c)
 	}
 	u := p.Uninstall
 	if u.EffectiveMethod() != config.MethodManifest || u.MarkerFile != "" ||

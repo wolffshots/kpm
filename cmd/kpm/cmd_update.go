@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,6 +34,12 @@ type resolved struct {
 	asset    forge.Asset
 	cache    string   // downloaded+verified tgz path
 	manifest []string // captured member manifest
+	// fingerprint is the release fingerprint this staging describes; it becomes
+	// staged_fingerprint and is promoted to installed_fingerprint after the
+	// reboot install (INTEGRITY.md §3.6). It is recorded for EVERY package,
+	// rolling or not — the `rolling` gates in rebuildDetected are what make it
+	// inert for a non-rolling def, not an empty value.
+	fingerprint string
 }
 
 func (a *App) cmdUpdate(args []string) int {
@@ -64,9 +72,37 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitOK
 	}
 
+	// M5: a def that failed to PARSE is skipped with err == nil, so it is
+	// invisible to the conflict graph — its stem is a valid id, so it may well be
+	// a registered package, and a conflict it declares (or that names it) cannot
+	// be seen. The guard would then answer "clear" from a view it knows is
+	// partial. Refuse instead, before the cache sweep and the network wait: it is
+	// cheap, offline and self-describing.
+	//
+	// A file whose STEM is not a valid package id is a different thing and is
+	// deliberately not covered: it was never registered, so it can declare
+	// nothing and cannot weaken the guard. Refusing on a stray `NickelClock.toml`
+	// or `README.toml` would protect against nothing while blocking every update.
+	if len(a.skipped.Unparseable) > 0 {
+		msg := unreadableRefusal(a.skipped.Unparseable)
+		if jsonMode {
+			jsonError(msg)
+		}
+		fmt.Fprintln(os.Stderr, "kpm update:", msg)
+		a.paths.Log("ERROR", msg)
+		return exitError
+	}
+
 	// failures accumulates per-package resolve/download errors for the §2.3
 	// mutation payload; changed is filled from the staged targets at the end.
+	// skips accumulates the deliberate, non-error no-ops (§4.3 conflict
+	// refusals under --all), which are reported but never affect the exit code.
 	var failures []jsonFailure
+	var skips []jsonSkip
+	// explicit is true when the user NAMED the packages: a conflict refusal is
+	// then a direct request that cannot be satisfied and must fail loudly. Under
+	// --all it is a skip instead — see the loop below (§4.3).
+	explicit := !*all
 
 	// Cache hygiene: drop stale .part files and week-old cached tgzs (F3).
 	a.cleanCache()
@@ -93,11 +129,30 @@ func (a *App) cmdUpdate(args []string) int {
 		}
 	}
 
+	// B: the conflict graph, built once for the run — the reverse direction needs
+	// packages that were not selected (§4.2), and it must be the SAME graph
+	// `search --json` reports on or the UI and the CLI disagree (§4.3).
+	conflicts, cerr := a.updateConflictGraph()
+	if cerr != nil {
+		if jsonMode {
+			jsonError(cerr.Error())
+		}
+		fmt.Fprintln(os.Stderr, "kpm update:", cerr)
+		a.paths.Log("ERROR", cerr.Error())
+		return exitError
+	}
+
 	// 1+2. Resolve targets and download+verify each asset.
 	var targets []resolved
 	failed := 0
+	// staging is the C1 in-run pending set: ids already resolved for staging in
+	// THIS run. ps.StagedVersion is only written after the whole loop, so without
+	// it neither half of a conflicting pair sees the other and both land in one
+	// merged KoboRoot.tgz — the normal new-device "Update all" sequence, which
+	// defeated feature B entirely.
+	staging := map[string]bool{}
 	for _, p := range pkgs {
-		r, skip, err := a.resolveAndDownload(p)
+		r, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
 		if err != nil {
 			failed++
 			failures = append(failures, jsonFailure{ID: p.ID, Error: err.Error()})
@@ -105,10 +160,30 @@ func (a *App) cmdUpdate(args []string) int {
 			a.paths.Log("ERROR", fmt.Sprintf("%s  %v", p.ID, err))
 			continue
 		}
+		if blocked != "" {
+			// A conflict refusal is PERMANENT: no retry can clear it, which makes
+			// it categorically different from the transient failures failed[] and a
+			// non-zero exit exist for. Under --all it is a skip-with-note, so one
+			// registered-but-not-installed def can't make every "Update all" tap
+			// end in an error dialog forever. When the user NAMED the package it
+			// stays a hard failure — silence there would be wrong (§4.3).
+			if explicit {
+				failed++
+				failures = append(failures, jsonFailure{ID: p.ID, Error: blocked})
+				fmt.Fprintf(os.Stderr, "kpm update: %s: %s\n", p.ID, blocked)
+				a.paths.Log("ERROR", fmt.Sprintf("%s  %s", p.ID, blocked))
+				continue
+			}
+			skips = append(skips, jsonSkip{ID: p.ID, Reason: blocked})
+			fmt.Printf("%s: skipped — %s\n", p.ID, blocked)
+			a.paths.Log("WARN", fmt.Sprintf("%s  skipped — %s", p.ID, blocked))
+			continue
+		}
 		if skip {
 			continue
 		}
 		targets = append(targets, r)
+		staging[r.pkg.ID] = true
 	}
 
 	if len(targets) == 0 {
@@ -131,7 +206,7 @@ func (a *App) cmdUpdate(args []string) int {
 			// Emit the payload BEFORE rebooting so --json always ends on the
 			// marker, even if the reboot call itself fails (JSON-OUTPUT §1).
 			if jsonMode {
-				emitMutation(nil, failures, false, false, "")
+				emitMutationWithSkips(nil, failures, skips, false, false, "")
 			}
 			if err := device.Reboot(); err != nil {
 				fmt.Fprintln(os.Stderr, "kpm update: reboot failed:", err)
@@ -142,7 +217,7 @@ func (a *App) cmdUpdate(args []string) int {
 		if failed > 0 {
 			// Everything selected failed and nothing was staged (F2).
 			if jsonMode {
-				emitMutation(nil, failures, false, false, "update failed")
+				emitMutationWithSkips(nil, failures, skips, false, false, "update failed")
 			}
 			n.toast("kpm: update failed — see status")
 			return exitError
@@ -151,8 +226,9 @@ func (a *App) cmdUpdate(args []string) int {
 		// line on every branch (JSON-OUTPUT.md §1).
 		fmt.Println("nothing to stage")
 		if jsonMode {
-			// Nothing to stage: already up to date / already staged (§2.3).
-			emitMutation(nil, failures, false, false, "")
+			// Nothing to stage: already up to date / already staged / skipped
+			// by a conflict refusal under --all (§2.3, §4.3).
+			emitMutationWithSkips(nil, failures, skips, false, false, "")
 		}
 		return exitOK
 	}
@@ -192,17 +268,20 @@ func (a *App) cmdUpdate(args []string) int {
 	// still-live staging back (orphaning its files, untracked) and the guard
 	// would refuse the slot (M3).
 	type stagedSnap struct {
-		id, version, at string
-		manifest        []string
+		id, version, at, fingerprint string
+		manifest                     []string
 	}
 	prevSHA, prevSize, prevCommitted := a.state.StagedSHA256, a.state.StagedSize, a.state.StagedCommitted
 	var snaps []stagedSnap
 	now := time.Now().UTC().Format(state.TimeFormat)
 	for _, r := range targets {
 		ps := a.state.Get(r.pkg.ID)
-		snaps = append(snaps, stagedSnap{r.pkg.ID, ps.StagedVersion, ps.StagedAt, ps.StagedManifest})
+		snaps = append(snaps, stagedSnap{r.pkg.ID, ps.StagedVersion, ps.StagedAt, ps.StagedFingerprint, ps.StagedManifest})
 		ps.StagedVersion = r.tag
 		ps.StagedAt = now
+		// The fingerprint the staged payload describes, promoted to
+		// installed_fingerprint by reconcile (INTEGRITY.md §3.5/§3.6).
+		ps.StagedFingerprint = r.fingerprint
 		// Record the pending manifest separately; Manifest (installed) is only
 		// updated by reconcile after the reboot install actually happens (B2).
 		ps.StagedManifest = r.manifest
@@ -231,6 +310,7 @@ func (a *App) cmdUpdate(args []string) int {
 		for _, s := range snaps {
 			ps := a.state.Get(s.id)
 			ps.StagedVersion, ps.StagedAt, ps.StagedManifest = s.version, s.at, s.manifest
+			ps.StagedFingerprint = s.fingerprint
 		}
 		_ = a.state.Save()
 		if jsonMode {
@@ -264,7 +344,7 @@ func (a *App) cmdUpdate(args []string) int {
 		if failed > 0 {
 			errMsg = "some packages failed"
 		}
-		emitMutation(changed, failures, true, true, errMsg)
+		emitMutationWithSkips(changed, failures, skips, true, true, errMsg)
 	}
 
 	// 5. Reboot. At least one package staged, so a reboot is worthwhile even if
@@ -292,6 +372,39 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitPartial // mixed: some staged, some failed (F2)
 	}
 	return exitOK
+}
+
+// updateConflictGraph builds the graph `update` enforces against: the shared
+// registry-first-with-local-fallback construction (conflictGraphFor), so this
+// command and `search --json` can never disagree about whether a package is
+// blocked (§4.3).
+//
+// The registry side comes from the CACHE only — never a network call. `update`
+// must work offline (it is the command that runs when Wi-Fi has just come up for
+// a download), so a missing or unparseable cache degrades to the local
+// packages.d graph with a WARN rather than failing.
+//
+// The unreadable-def refusal (M5) is NOT here: cmdUpdate makes it before the
+// network wait, off a.unreadable, so it costs nothing when it fires.
+func (a *App) updateConflictGraph() (map[string][]string, error) {
+	locals, err := a.loadPackages()
+	if err != nil {
+		return nil, fmt.Errorf("cannot check conflicts: %v", err)
+	}
+	var entries map[string]*registry.Entry
+	cfg, cerr := a.loadRegistryConfig()
+	if cerr != nil {
+		a.paths.Log("WARN", "registry config unreadable ("+cerr.Error()+") — checking conflicts against packages.d only")
+	} else {
+		mans, missing := a.cachedManifests(cfg)
+		if len(missing) > 0 {
+			a.paths.Log("WARN", fmt.Sprintf(
+				"no cached data for registry %s — checking conflicts against packages.d only for ids it offers; run: kpm registry refresh",
+				strings.Join(missing, ", ")))
+		}
+		entries, _ = registry.Merge(mans)
+	}
+	return conflictGraphFor(entries, locals), nil
 }
 
 // firstConfiguredHost returns the forge host of the first configured package,
@@ -338,12 +451,16 @@ func (a *App) selectPackages(ids []string, all bool) ([]*config.Package, error) 
 }
 
 // resolveAndDownload resolves a package's target release and downloads+verifies
-// its asset. skip=true means the package is already up to date or already
-// staged and needs no action.
-func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
+// its asset. skip=true means the package needs no action (unconfigured, too old
+// a kpm, already up to date, or already staged). blocked is non-empty when the
+// package was left alone because something on the device collides with it: the
+// refusal sentence, for the caller to grade as a skip or a failure (§4.3).
+// conflicts is the run's conflict graph; a nil graph simply blocks nothing.
+// staging is the C1 in-run pending set.
+func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]string, staging map[string]bool) (resolved, bool, string, error) {
 	// Unconfigured (e.g. self-update with empty source): skip silently (F7).
 	if !a.configured(p) {
-		return resolved{}, true, nil
+		return resolved{}, true, "", nil
 	}
 	// Honor the def's min_kpm: an old kpm skips a package that needs a newer one
 	// (with a note) rather than staging it blindly (§9.8). install/sync gate too,
@@ -351,44 +468,114 @@ func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	if !registry.MinKpmSatisfied(version.Version, p.MinKpm) && version.Version != "dev" {
 		fmt.Printf("%s: requires kpm >= %s (running %s) — skipped; update kpm first\n", p.ID, p.MinKpm, version.Version)
 		a.paths.Log("WARN", fmt.Sprintf("%s  requires kpm >= %s — skipped", p.ID, p.MinKpm))
-		return resolved{}, true, nil
+		return resolved{}, true, "", nil
+	}
+	// B: refuse to fetch software that would collide with something already on
+	// the device (INTEGRITY.md §4.3). Required here as well as at install because
+	// a def can be hand-`add`ed, or can predate the field. Cheap and offline, so
+	// it fails fast — before the network resolve.
+	if blockers := a.blockingConflicts(p.ID, conflicts, staging); len(blockers) > 0 {
+		return resolved{}, true, a.conflictRefusal(blockers), nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	rel, err := a.resolveRelease(ctx, p)
 	cancel()
 	if err != nil {
-		return resolved{}, false, err
+		return resolved{}, false, "", err
 	}
 	// A 2xx that decodes to an empty tag (a misconfigured proxy, or a non-forge
 	// endpoint on a hand-edited source) must not read as "up to date" via
 	// tagsEqual("", "") for a never-installed package — fail loudly (§11).
 	if rel.Tag == "" {
-		return resolved{}, false, fmt.Errorf("forge returned a release with an empty tag")
+		return resolved{}, false, "", fmt.Errorf("forge returned a release with an empty tag")
 	}
 
 	ps := a.state.Get(p.ID)
+	pin := a.effectivePin(p)
 	// Only record latest_seen for unpinned packages, so a pin can't poison the
 	// meaning of "latest" (F1).
-	if a.effectivePin(p) == "" {
+	if pin == "" {
 		ps.LatestSeen = rel.Tag
 	}
 	ps.LastChecked = time.Now().UTC().Format(state.TimeFormat)
 
-	if tagsEqual(ps.InstalledVersion, rel.Tag) {
-		return resolved{}, true, nil // up to date
+	// Resolve the asset BEFORE the up-to-date checks: the rolling fingerprint
+	// needs it, and the download needs it anyway, so the call is hoisted rather
+	// than duplicated (INTEGRITY.md §3.6).
+	//
+	// The failure classes are NOT the same and must not be treated alike. A
+	// malformed glob (path.ErrBadPattern) is a property of the DEF — it can never
+	// match anything in any release — so it stays loud and early. "no asset
+	// matching" / "N assets match" are properties of the CURRENT RELEASE: a
+	// rolling repo republishing by recreating its release has a window where the
+	// release exists with no assets yet, and treating that as a def error made
+	// `check` say an update was available while `update --all` exited 1 saying it
+	// failed — on every publish. So those compute the fingerprint from a nil
+	// asset (exactly as cmd_check.go does), fall through the up-to-date and
+	// already-staged short-circuits, and hard-fail only where a download is
+	// actually about to happen.
+	asset, assetErr := rel.MatchAsset(p.Asset)
+	if assetErr != nil && errors.Is(assetErr, path.ErrBadPattern) {
+		return resolved{}, false, "", assetErr
 	}
-	if tagsEqual(ps.StagedVersion, rel.Tag) && ps.StagedVersion != "" {
-		return resolved{}, true, nil // already staged, awaiting reboot
+	var matched *forge.Asset
+	if assetErr == nil {
+		matched = &asset
 	}
 
-	asset, err := rel.MatchAsset(p.Asset)
-	if err != nil {
-		return resolved{}, false, err
+	fp := rel.Fingerprint(matched)
+	a.warnRollingDegraded(p, fp)
+	if a.adoptFingerprintBaseline(p, ps, fp) {
+		// The adoption makes this run a no-op, which is right (§3.6.1) but
+		// mystifying for a user who deliberately typed `kpm update <id>`. Say so
+		// rather than reporting "nothing to stage" with no explanation (m1).
+		fmt.Printf("%s: recording this release as the rolling baseline — nothing to update now; a later rebuild will be detected\n", p.ID)
+	}
+	if pin == "" {
+		ps.LatestFingerprint = fp
+	}
+	rebuilt := rebuildDetected(p, pin, ps.InstalledFingerprint, fp)
+
+	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt {
+		return resolved{}, true, "", nil // up to date
+	}
+	// A pin freezes the staged payload too: without the pin term a pinned
+	// package whose release was rebuilt would fall through and re-download
+	// (rebuildDetected covers the installed comparison above).
+	if ps.StagedVersion != "" && tagsEqual(ps.StagedVersion, rel.Tag) &&
+		(pin != "" || !forge.FingerprintChanged(ps.StagedFingerprint, fp)) {
+		return resolved{}, true, "", nil // already staged, awaiting reboot
 	}
 
-	cachePath, manifest, err := a.download(p.ID, rel.Tag, asset)
+	// Past every short-circuit: this package IS about to be downloaded, so an
+	// unresolved asset is now fatal (see the MatchAsset comment above).
+	if assetErr != nil {
+		return resolved{}, false, "", assetErr
+	}
+
+	// C: the checksum the registry attests for THIS release, "" when the tag is
+	// not listed (unverified — the normal state, INTEGRITY.md §5.3).
+	wantSHA, ok := p.ChecksumFor(rel.Tag)
+	declared := p.ChecksumDeclaredFor(rel.Tag)
+	switch {
+	case ok:
+	case p.EffectiveUpdateCheck() == config.UpdateCheckRolling && len(p.Checksums) > 0:
+		// rolling + checksums is a parse-time error for a REGISTRY def, but
+		// packages.d is user-editable and a hand-edited def can carry both. The
+		// tag never moves while the asset does, so the recorded hash is correct
+		// exactly once and then hard-fails every download forever with wording
+		// that reads like a security incident. Degrade to unverified (§9.2).
+		a.paths.Log("WARN", fmt.Sprintf(
+			"%s  update_check = %q cannot be combined with checksums (a rolling tag's asset changes without a def edit) — ignoring the checksums table and downloading unverified",
+			p.ID, config.UpdateCheckRolling))
+	case declared:
+		a.paths.Log("WARN", fmt.Sprintf(
+			"%s  checksums entry for tag %s is not a 64-character hex sha256 — downloading unverified", p.ID, rel.Tag))
+	}
+
+	cachePath, manifest, err := a.download(p.ID, rel.Tag, wantSHA, declared, len(p.Checksums) > 0, asset)
 	if err != nil {
-		return resolved{}, false, err
+		return resolved{}, false, "", err
 	}
 	// No package other than kpm itself may write kpm's reserved paths (its
 	// install tree or NickelMenu drop-in). This makes the "kpm merged last"
@@ -398,10 +585,10 @@ func (a *App) resolveAndDownload(p *config.Package) (resolved, bool, error) {
 	if p.ID != selfID {
 		if hit := firstReservedPath(manifest); hit != "" {
 			os.Remove(cachePath)
-			return resolved{}, false, fmt.Errorf("refusing %s: its archive writes to kpm's reserved path %q", p.ID, hit)
+			return resolved{}, false, "", fmt.Errorf("refusing %s: its archive writes to kpm's reserved path %q", p.ID, hit)
 		}
 	}
-	return resolved{pkg: p, tag: rel.Tag, asset: asset, cache: cachePath, manifest: manifest}, false, nil
+	return resolved{pkg: p, tag: rel.Tag, asset: asset, cache: cachePath, manifest: manifest, fingerprint: fp}, false, "", nil
 }
 
 // firstReservedPath returns the first manifest member that lands in a path only
@@ -459,10 +646,17 @@ func fresh(lastCheck string) bool {
 	return d < checkFreshness
 }
 
-// download streams the asset to cache/<id>-<tag>.tgz (via .part), unwraps a
-// zip-wrapped tgz if the asset is one (ZIP-ASSETS §1), then verifies gzip
-// integrity + walks the tar, returning the captured manifest.
-func (a *App) download(id, tag string, asset forge.Asset) (string, []string, error) {
+// download streams the asset to cache/<id>-<tag>.tgz (via .part), verifies the
+// registry-declared sha256 if there is one, unwraps a zip-wrapped tgz if the
+// asset is one (ZIP-ASSETS §1), then verifies gzip integrity + walks the tar,
+// returning the captured manifest.
+//
+// wantSHA is the checksum the registry attests for this exact release, or "" —
+// which is not an error but the normal unverified case (INTEGRITY.md §5.3).
+// declaredForTag (an entry exists for THIS tag) and hasChecksums (the def
+// carries a table at all) only distinguish the unverified situations in the log
+// line; see verifiedSuffix.
+func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, []string, error) {
 	final := a.paths.CacheDir() + "/" + id + "-" + safeTag(tag) + ".tgz"
 	part := final + ".part"
 	f, err := os.Create(part)
@@ -483,6 +677,26 @@ func (a *App) download(id, tag string, asset forge.Asset) (string, []string, err
 		os.Remove(part)
 		return "", nil, cerr
 	}
+	// Checksum the asset EXACTLY as the forge publishes it — before the zip
+	// unwrap (which rewrites the file) and before the rename, so a mismatch never
+	// produces a file at the final cache name at all (INTEGRITY.md §5.4). There
+	// is no retry: Download's own retry loop already succeeded, so the bytes are
+	// what the server serves and re-fetching would produce the same result.
+	sum, _, err := sha256AndSize(part)
+	if err != nil {
+		os.Remove(part)
+		return "", nil, err
+	}
+	if wantSHA != "" && !strings.EqualFold(sum, wantSHA) {
+		os.Remove(part)
+		a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  MISMATCH want=%s got=%s", id, tag, wantSHA, sum))
+		return "", nil, fmt.Errorf(
+			"checksum mismatch for asset %q of %s %s: registry declares sha256 %s, downloaded %s — refusing to install",
+			asset.Name, id, tag, wantSHA, sum)
+	}
+	// Emitted on every successful download, verified or not: a curator with the
+	// package installed reads the hash straight out of `kpm log` (§5.5).
+	a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  sha256=%s%s", id, tag, sum, verifiedSuffix(wantSHA, declaredForTag, hasChecksums)))
 	if err := os.Rename(part, final); err != nil {
 		os.Remove(part) // don't leak the full-size .part on a rename failure (#9)
 		return "", nil, err
@@ -515,6 +729,32 @@ func (a *App) download(id, tag string, asset forge.Asset) (string, []string, err
 		a.paths.Log("WARN", fmt.Sprintf("%s  unusual path: %s", id, w))
 	}
 	return final, res.Manifest, nil
+}
+
+// verifiedSuffix annotates the CHECKSUM log line with what the hash proves.
+// The unverified cases are deliberately distinguished, because each is a
+// different, otherwise-invisible fact:
+//
+//   - declaredForTag: an attestation exists for THIS exact release but was
+//     rejected at use (malformed, or ignored because the def is rolling). Keying
+//     the middle case on `len(Checksums) > 0` alone logged "none for this tag"
+//     for a tag that had one — the opposite of what happened.
+//   - hasChecksums without declaredForTag: the curator IS attesting for this
+//     package and has fallen behind a release.
+//
+// It changes only the log text; the degradation behaviour of INTEGRITY.md §5.3
+// is unchanged and nothing reaches --json.
+func verifiedSuffix(wantSHA string, declaredForTag, hasChecksums bool) string {
+	switch {
+	case wantSHA != "":
+		return " (verified)"
+	case declaredForTag:
+		return " (unverified — the checksum declared for this tag is unusable)"
+	case hasChecksums:
+		return " (unverified — registry has checksums but none for this tag)"
+	default:
+		return " (unverified — no registry checksum)"
+	}
 }
 
 // guardExistingTgz refuses to overwrite a staged tgz that kpm did not create.
@@ -701,6 +941,7 @@ func (a *App) cmdUnstage(args []string) int {
 		ps.StagedVersion = ""
 		ps.StagedAt = ""
 		ps.StagedManifest = nil
+		ps.StagedFingerprint = ""
 		unstaged = append(unstaged, id)
 	}
 	sort.Strings(unstaged)

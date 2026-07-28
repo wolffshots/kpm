@@ -95,6 +95,15 @@ func HashDef(def *PackageDef) (string, error) {
 	// def's `configs = []` or `sensitive_keys = []` hashes identically to omitting
 	// the key (A3).
 	norm.Configs = normConfigs(norm.Configs)
+	// The integrity fields are functional and therefore INCLUDED (INTEGRITY.md
+	// §2.1): update_check must reach devices where the package is already
+	// installed, conflicts must be visible to `update` (which reads only
+	// packages.d), and a new checksum must propagate to the download path. Empty
+	// collections normalize to nil so `conflicts = []` / `checksums = {}` hash
+	// identically to omitting the key (§2.2 hazard 3). UpdateCheck needs no
+	// normalization: its zero value is "" everywhere and omitempty drops it.
+	norm.Conflicts = nilIfEmpty(norm.Conflicts)
+	norm.Checksums = nilIfEmptyMap(norm.Checksums)
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(&norm); err != nil {
@@ -111,6 +120,17 @@ func nilIfEmpty(s []string) []string {
 		return nil
 	}
 	return s
+}
+
+// nilIfEmptyMap is nilIfEmpty for the checksums map. BurntSushi's encoder
+// already omits a zero-length map under omitempty and sorts map keys
+// deterministically, but normalizing explicitly matches the configs/purge_paths
+// precedent and keeps the invariant testable (A3/§2.2 hazard 3).
+func nilIfEmptyMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
 }
 
 // normConfigs returns a copy with an empty slice collapsed to nil and each
@@ -132,30 +152,43 @@ func normConfigs(cfgs []config.ModConfig) []config.ModConfig {
 // pin/registry/id so its hash can be compared against a registry def (§9.7).
 func DefFromPackage(p *config.Package) *PackageDef {
 	return &PackageDef{
-		Name:      p.Name,
-		Source:    p.Source,
-		Forge:     p.Forge,
-		Asset:     p.Asset,
-		MinKpm:    p.MinKpm,
-		Uninstall: p.Uninstall,
-		Configs:   p.Configs,
+		Name:        p.Name,
+		Source:      p.Source,
+		Forge:       p.Forge,
+		Asset:       p.Asset,
+		MinKpm:      p.MinKpm,
+		UpdateCheck: p.UpdateCheck,
+		Conflicts:   p.Conflicts,
+		Checksums:   p.Checksums,
+		Uninstall:   p.Uninstall,
+		Configs:     p.Configs,
 	}
 }
 
 // ToPackage materializes a registry def into a local package def, stamping the
 // registry provenance and carrying over a locally-decided pin (§5).
+//
+// UpdateCheck is copied VERBATIM, including the empty string. Materializing its
+// "tag" default here would make DefFromPackage produce "tag" while the remote
+// def carries "" — the two hash differently and every package reads as
+// permanently drifted, skipped from every sync. That is the 0.5.0 bug
+// (INTEGRITY.md §2.2 hazard 1); the default lives only in
+// EffectiveUpdateCheck.
 func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 	return &config.Package{
-		ID:        id,
-		Name:      d.Name,
-		Source:    d.Source,
-		Forge:     d.Forge,
-		Asset:     d.Asset,
-		MinKpm:    d.MinKpm,
-		Registry:  registry,
-		Pin:       pin,
-		Uninstall: d.Uninstall,
-		Configs:   d.Configs,
+		ID:          id,
+		Name:        d.Name,
+		Source:      d.Source,
+		Forge:       d.Forge,
+		Asset:       d.Asset,
+		MinKpm:      d.MinKpm,
+		Registry:    registry,
+		Pin:         pin,
+		UpdateCheck: d.UpdateCheck,
+		Conflicts:   d.Conflicts,
+		Checksums:   d.Checksums,
+		Uninstall:   d.Uninstall,
+		Configs:     d.Configs,
 	}
 }
 
@@ -173,6 +206,13 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	add("forge", local.Forge, remote.Forge)
 	add("asset", local.Asset, remote.Asset)
 	add("min_kpm", local.MinKpm, remote.MinKpm)
+	add("update_check", local.UpdateCheck, remote.UpdateCheck)
+	add("conflicts", quoteList(local.Conflicts), quoteList(remote.Conflicts))
+	lc0, _ := HashDef(&PackageDef{Checksums: local.Checksums})
+	rc0, _ := HashDef(&PackageDef{Checksums: remote.Checksums})
+	if lc0 != rc0 {
+		out = append(out, "checksums: (changed)")
+	}
 	lh, _ := HashDef(&PackageDef{Uninstall: local.Uninstall})
 	rh, _ := HashDef(&PackageDef{Uninstall: remote.Uninstall})
 	if lh != rh {
@@ -191,6 +231,20 @@ func quote(s string) string {
 		return `""`
 	}
 	return s
+}
+
+// quoteList renders a string slice unambiguously. Joining on ", " made a
+// hand-edited ["a, b"] render identically to ["a","b"], so `add` saw equal
+// strings and dropped the diff line for a change sync then applied silently.
+func quoteList(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	q := make([]string, len(ss))
+	for i, s := range ss {
+		q[i] = strconv.Quote(s)
+	}
+	return strings.Join(q, ", ")
 }
 
 // MinKpmSatisfied reports whether the running kpm version meets a def's min_kpm.

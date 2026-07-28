@@ -15,21 +15,30 @@ import (
 // selfID is kpm's own package id.
 const selfID = "kpm"
 
-// loadPackages reads every registered package from packages.d. Unreadable defs
-// are skipped: a mutating command WARNs to the log (and buildStatus notes them);
-// a read-only command reports to stderr without writing (E2/B1).
+// loadPackages reads every registered package from packages.d. Skipped defs are
+// reported: a mutating command WARNs to the log (and buildStatus notes them); a
+// read-only command reports to stderr without writing (E2/B1). The two skip
+// causes get different wording because they mean different things — see
+// config.SkippedDefs — and a.skipped keeps them distinguishable for the
+// conflict-gated refusal (§4.3).
 func (a *App) loadPackages() ([]*config.Package, error) {
-	pkgs, unreadable, err := config.LoadAll(a.paths.PackagesDir())
+	pkgs, skipped, err := config.LoadAll(a.paths.PackagesDir())
 	if err != nil {
 		return nil, err
 	}
-	a.unreadable = unreadable
-	for _, f := range unreadable {
+	a.skipped = skipped
+	report := func(msg string) {
 		if a.readOnly {
-			fmt.Fprintf(os.Stderr, "kpm: package definition unreadable, skipping: %s\n", f)
+			fmt.Fprintln(os.Stderr, "kpm:", msg)
 		} else {
-			a.paths.Log("WARN", "package definition unreadable: "+f)
+			a.paths.Log("WARN", msg)
 		}
+	}
+	for _, f := range skipped.Unparseable {
+		report("package definition unreadable: " + f)
+	}
+	for _, f := range skipped.InvalidName {
+		report("not a package definition (filename is not a valid package id), ignoring: " + f)
 	}
 	return pkgs, nil
 }
@@ -172,6 +181,48 @@ func verifyManifest(paths device.Paths, members []string) []string {
 		}
 	}
 	return missing
+}
+
+// adoptFingerprintBaseline records the current release fingerprint as the
+// baseline for a rolling package that is already installed but has no recorded
+// fingerprint — the packages that predate 0.10.0, or whose def only just turned
+// rolling. Without it, the first check after the def flips would report an
+// update for every such package and stage a reboot for a payload the device
+// already has.
+//
+// The cost is one missed rebuild, once, per package — strictly better than
+// today's permanently missed rebuilds. It mirrors the sync hash backfill of
+// REGISTRY.md §9.7 rule (1): heal a legitimately-empty baseline transparently
+// rather than reading it as a change. It writes only in-memory state; both
+// callers (check and update) already Save, and both are mutating commands, so
+// the B1 read-only rule is untouched.
+//
+// It reports whether it adopted, so `update` can explain the resulting no-op to
+// a user who deliberately asked for that package (m1).
+func (a *App) adoptFingerprintBaseline(p *config.Package, ps *state.PackageState, fp string) bool {
+	if p.EffectiveUpdateCheck() != config.UpdateCheckRolling {
+		return false
+	}
+	if ps.InstalledVersion == "" || ps.InstalledFingerprint != "" || fp == "" {
+		return false
+	}
+	ps.InstalledFingerprint = fp
+	a.paths.Log("INFO", fmt.Sprintf("%s  rolling baseline adopted (%s)", p.ID, fp))
+	return true
+}
+
+// warnRollingDegraded logs the once-per-run WARN for a rolling package whose
+// forge supplied neither a published_at nor an asset size, and reports whether
+// it fired. Such a package silently degrades to plain tag comparison — today's
+// behaviour — rather than becoming un-updatable (INTEGRITY.md §3.2/§3.7).
+func (a *App) warnRollingDegraded(p *config.Package, fp string) bool {
+	if fp != "" || p.EffectiveUpdateCheck() != config.UpdateCheckRolling {
+		return false
+	}
+	a.paths.Log("WARN", fmt.Sprintf(
+		"%s  update_check = %q but the forge supplies no published_at or asset size — falling back to tag comparison",
+		p.ID, config.UpdateCheckRolling))
+	return true
 }
 
 // notifier reports progress via NickelDBus toast when --notify is set and qndb

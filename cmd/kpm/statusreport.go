@@ -11,8 +11,8 @@ import (
 	"kpm/internal/version"
 )
 
-// buildStatus renders the short, dialog-friendly summary written to status.txt
-// and printed by "kpm check"/"kpm status" (§6).
+// buildStatus renders the short, dialog-friendly summary written to the status
+// file and printed by "kpm check"/"kpm status" (§6).
 func (a *App) buildStatus(pkgs []*config.Package) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "kpm %s — checked %s\n", version.Version, humanTime(a.state.LastCheck))
@@ -28,15 +28,36 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 			fmt.Fprintf(tw, "%s\t%s\t%s\n", p.ID, installed, unconfiguredNote(p.ID))
 		case ps.StagedVersion != "":
 			staged++
-			fmt.Fprintf(tw, "%s\t%s -> %s\tSTAGED (reboot)\n", p.ID, installed, ps.StagedVersion)
+			// A rolling package staged at its own permanent tag would otherwise
+			// render "latest -> latest STAGED (reboot)" — the exact confusion
+			// §3.7 removes, one state later. Name the reason instead.
+			if ps.InstalledVersion != "" && tagsEqual(ps.InstalledVersion, ps.StagedVersion) {
+				fmt.Fprintf(tw, "%s\t%s\tSTAGED: release rebuilt (reboot)\n", p.ID, installed)
+			} else {
+				fmt.Fprintf(tw, "%s\t%s -> %s\tSTAGED (reboot)\n", p.ID, installed, ps.StagedVersion)
+			}
 		case avail:
 			available++
-			fmt.Fprintf(tw, "%s\t%s -> %s\tUPDATE AVAILABLE\n", p.ID, installed, target)
+			// A rolling package whose tag has not moved would otherwise render a
+			// confusing "latest -> latest"; name the real reason instead
+			// (INTEGRITY.md §3.7). Every other case is unchanged.
+			if tagsEqual(ps.InstalledVersion, target) {
+				fmt.Fprintf(tw, "%s\t%s\tUPDATE AVAILABLE (release rebuilt)\n", p.ID, installed)
+			} else {
+				fmt.Fprintf(tw, "%s\t%s -> %s\tUPDATE AVAILABLE\n", p.ID, installed, target)
+			}
 		default:
 			fmt.Fprintf(tw, "%s\t%s\tup to date\n", p.ID, installed)
 		}
 	}
 	tw.Flush()
+
+	// B: a pair that is already installed is REPORTED, never blocked — refusing
+	// to update either one would strand both and undo nothing (§1.2 item 3,
+	// §4.5). One line per distinct unordered pair, sorted.
+	for _, pair := range a.conflictPairs(pkgs) {
+		fmt.Fprintf(&b, "CONFLICT: %s and %s cannot both be installed — uninstall one.\n", pair[0], pair[1])
+	}
 
 	switch {
 	case staged > 0 && available > 0:
@@ -48,8 +69,8 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 	default:
 		b.WriteString("Everything up to date.\n")
 	}
-	if len(a.unreadable) > 0 {
-		fmt.Fprintf(&b, "%d package definition(s) unreadable — see log.\n", len(a.unreadable))
+	if n := len(a.skipped.All()); n > 0 {
+		fmt.Fprintf(&b, "%d package definition(s) unreadable — see log.\n", n)
 	}
 	return b.String()
 }

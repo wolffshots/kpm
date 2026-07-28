@@ -57,7 +57,40 @@ func (a *App) cachedManifest(r registry.Registry) (*registry.Manifest, error) {
 		}
 		return nil, err
 	}
-	return registry.ParseManifest(b)
+	m, perr := registry.ParseManifest(b)
+	if perr != nil {
+		return nil, perr
+	}
+	a.reportDropped(r.Name, m)
+	return m, nil
+}
+
+// reportDropped names every def ParseManifest refused and why. A dropped def
+// vanishes from the registry entirely, which looks exactly like a package the
+// curator never published — a silent, disproportionate outcome for one mistyped
+// field (m3). The log/stderr split is the same as loadPackages: a read-only
+// command must not write (B1).
+//
+// Once per (registry, id) per invocation: `sync` reads the cache once per
+// target package, so an undeduped report would write a dozen identical WARN
+// lines into kpm.log on a single run.
+func (a *App) reportDropped(regName string, m *registry.Manifest) {
+	if a.reportedDrops == nil {
+		a.reportedDrops = map[string]bool{}
+	}
+	for _, d := range m.Dropped {
+		key := regName + "\x00" + d.ID
+		if a.reportedDrops[key] {
+			continue
+		}
+		a.reportedDrops[key] = true
+		msg := fmt.Sprintf("registry %q: dropped package %q — %s", regName, d.ID, d.Reason)
+		if a.readOnly {
+			fmt.Fprintln(os.Stderr, "kpm:", msg)
+		} else {
+			a.paths.Log("WARN", msg)
+		}
+	}
 }
 
 // cachedManifests loads every configured registry's cached manifest in config

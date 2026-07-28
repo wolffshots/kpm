@@ -24,11 +24,18 @@ package main
 //                missing_files(array|null) — absent members after post-install
 //                verification, null when clean (A), is_self(BOOL) — the one kpm
 //                self row, self_configured(BOOL) — whether kpm's self-update is
-//                wired up (kpm-self-enrol-plan §1).  latest/update are
-//                DELIBERATELY ABSENT here (registry defs carry no versions) —
-//                the hook merges them in from check (browsedialog.cc mergeCheck).
+//                wired up (kpm-self-enrol-plan §1), conflicts(ARRAY, never null)
+//                + conflicts_active(ARRAY, never null) — declared vs currently
+//                installed-or-staged blockers, rolling(BOOL) (INTEGRITY.md §6.1).
+//                latest/update are DELIBERATELY ABSENT here (registry defs carry
+//                no versions) — the hook merges them in from check
+//                (browsedialog.cc mergeCheck).
 //   check   --json  (KpmProcess::check; takes the lock):
 //     packages[i]: id(str), latest(str|null), update(BOOL)  [+installed,pinned,error]
+//     For a REBUILT rolling release the payload carries installed == latest AND
+//     update:true — already expressible, already correctly consumed (the hook
+//     reads `update` as an independent bool); render off `update`, and use
+//     search's `rolling` to phrase the label (INTEGRITY.md §6.3).
 //   registry refresh --json (KpmProcess::registryRefresh):
 //     payload is IGNORED by the hook (browsedialog.cc onRefreshDone voids it) —
 //     contract is only: exit 0/2 + a parseable trailing BEGIN_JSON line.
@@ -191,6 +198,12 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantArrayOrNull(t, pkg, "missing_files") // post-install verification state (A)
 	wantBool(t, pkg, "is_self")              // the kpm self row (kpm-self-enrol-plan §1)
 	wantBool(t, pkg, "self_configured")      // whether kpm's self-update is wired up
+	// INTEGRITY.md §6.1. Both conflict arrays are NEVER null (unlike
+	// missing_files, where absence is meaningful) so the hook needs no null
+	// check; rolling lets it phrase a rebuilt-release update.
+	wantArray(t, pkg, "conflicts")
+	wantArray(t, pkg, "conflicts_active")
+	wantBool(t, pkg, "rolling")
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")
 }
@@ -900,5 +913,58 @@ func TestUIContractBusyLockMessage(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(stderr), "another kpm instance") {
 		t.Errorf("stderr must contain the busy-dialog trigger \"another kpm instance\":\n%s", stderr)
+	}
+}
+
+// ---- 13. install <id> --yes --json refused by a conflict -----------------
+//
+// INTEGRITY.md §6.5. The hook ALWAYS passes --yes (kpmprocess.cc:33), so a
+// conflict refusal must be a hard exit-1 error that still emits the standard
+// mutation payload, and its message must carry the substring the hook matches —
+// the same pattern already used for "another kpm instance".
+func TestUIContractInstallConflictRefused(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.10.0")
+	seedRegistry(t, a, "main", `schema_version = 1
+[packages.kobo-tweaks]
+name = "Kobo Tweaks"
+source = "github.com/o/kobo-tweaks"
+forge = "github"
+asset = "KoboRoot.tgz"
+conflicts = ["nickelclock"]
+min_kpm = "0.10.0"
+`)
+	// The victim is installed, so the install must be refused.
+	a.state.Get("nickelclock").InstalledVersion = "v0.4.0"
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	out := captureStdout(t, func() {
+		captureStderr(t, func() { code = a.cmdInstall([]string{"kobo-tweaks", "--yes", "--json"}) })
+	})
+	if code == exitConfirm {
+		t.Fatalf("a conflict refusal must not be the exit-3 confirm path — the UI would stall")
+	}
+	if code != exitError {
+		t.Fatalf("install refused by a conflict exit = %d, want %d", code, exitError)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	assertMutationShape(t, m)
+	if changed := wantArray(t, m, "changed"); len(changed) != 0 {
+		t.Errorf("a refused install must change nothing, got %v", changed)
+	}
+	failed := wantArray(t, m, "failed")
+	if len(failed) != 1 {
+		t.Fatalf("failed len = %d, want 1", len(failed))
+	}
+	f0 := failed[0].(map[string]any)
+	if wantStr(t, f0, "id") != "kobo-tweaks" {
+		t.Errorf("failed[0].id = %v", f0["id"])
+	}
+	// The stable substring the hook matches on (singular is a prefix of plural).
+	if msg := wantStr(t, f0, "error"); !strings.Contains(msg, "conflicts with installed package") {
+		t.Errorf("failed[0].error must carry the hook's match substring: %q", msg)
 	}
 }

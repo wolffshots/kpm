@@ -134,6 +134,17 @@ type jsonSearchPkg struct {
 	// self-update" affordance on is_self && !self_configured (kpm-self-enrol-plan §1).
 	IsSelf         bool `json:"is_self"`
 	SelfConfigured bool `json:"self_configured"`
+	// Conflicts is what this package's effective def declares (sorted, deduped,
+	// self-reference removed); ConflictsActive is the subset that is currently
+	// installed or staged on this device, in EITHER direction — non-empty means
+	// installing this package is refused (INTEGRITY.md §6.1). Both are normalized
+	// to [] before marshalling and are never null: unlike missing_files, where
+	// absence is meaningful, a declaration list has nothing to say with null.
+	// Rolling lets the UI render "Update available (release rebuilt)" instead of
+	// a confusing latest -> latest.
+	Conflicts       []string `json:"conflicts"`
+	ConflictsActive []string `json:"conflicts_active"`
+	Rolling         bool     `json:"rolling"`
 }
 
 type jsonRegistryFreshness struct {
@@ -172,11 +183,13 @@ func (a *App) registryFreshness(cfg *registry.Config) []jsonRegistryFreshness {
 // (in packages.d/state but no registry def), which carry registry:null,
 // description:null. Read-only: registry cache + state only, no network, no lock.
 func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entry, term string) int {
-	locals := map[string]*config.Package{}
+	var localPkgs []*config.Package
 	if pkgs, err := a.loadPackages(); err == nil {
-		for _, p := range pkgs {
-			locals[p.ID] = p
-		}
+		localPkgs = pkgs
+	}
+	locals := map[string]*config.Package{}
+	for _, p := range localPkgs {
+		locals[p.ID] = p
 	}
 
 	idset := map[string]bool{}
@@ -193,6 +206,13 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 	sort.Strings(ids)
 
 	deviceFw, _ := a.paths.Firmware()
+
+	// B: the conflict graph over the registry entries plus the local snapshot
+	// (§6.1), from the SHARED construction install and update enforce with — the
+	// reporting surface and the enforcing surface must be the same graph. Built
+	// over every id BEFORE the term filter, because a filtered-out package can
+	// still be an active blocker.
+	graph := conflictGraphFor(entries, localPkgs)
 
 	tl := strings.ToLower(term)
 	pkgs := make([]jsonSearchPkg, 0, len(ids))
@@ -262,6 +282,15 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		isSelf := id == selfID
 		selfConfigured := isSelf && local != nil && a.configured(local)
 
+		// rolling reads the effective def: the registry entry when one exists,
+		// else the local snapshot — matching where `conflicts` comes from.
+		rolling := false
+		if e != nil {
+			rolling = e.Def.EffectiveUpdateCheck() == config.UpdateCheckRolling
+		} else if local != nil {
+			rolling = local.EffectiveUpdateCheck() == config.UpdateCheckRolling
+		}
+
 		pkgs = append(pkgs, jsonSearchPkg{
 			ID:             id,
 			Name:           name,
@@ -281,6 +310,10 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			MissingFiles:   ps.MissingFiles,
 			IsSelf:         isSelf,
 			SelfConfigured: selfConfigured,
+
+			Conflicts:       graph[id],
+			ConflictsActive: a.activeConflicts(id, graph, nil),
+			Rolling:         rolling,
 		})
 	}
 
@@ -387,24 +420,44 @@ type jsonCheckPayload struct {
 
 // ---- mutations: install / update / uninstall (§2.3) ---------------------
 
+// jsonSkip is one entry of the mutation payload's `skipped` array: a package the
+// command deliberately did not act on for a reason that a retry cannot change.
+type jsonSkip struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 type jsonMutation struct {
 	Changed        []string      `json:"changed"`
 	Failed         []jsonFailure `json:"failed"`
 	Staged         bool          `json:"staged"`
 	RebootRequired bool          `json:"reboot_required"`
-	Error          string        `json:"error,omitempty"`
+	// Skipped names packages left alone for a PERMANENT reason — currently only
+	// a conflict refusal during `update --all` (INTEGRITY.md §4.3). It is not an
+	// error: it never enters `failed` and never changes the exit code, because a
+	// retry cannot clear it and an otherwise-successful run must not be reported
+	// as failed. `omitempty` keeps every other command's payload byte-identical.
+	Skipped []jsonSkip `json:"skipped,omitempty"`
+	Error   string     `json:"error,omitempty"`
 }
 
 // emitMutation writes the shared install/update/uninstall payload (§2.3),
 // normalizing nil slices to [] so they never marshal as null.
 func emitMutation(changed []string, failed []jsonFailure, staged, reboot bool, errMsg string) {
+	emitMutationWithSkips(changed, failed, nil, staged, reboot, errMsg)
+}
+
+// emitMutationWithSkips is emitMutation plus the §4.3 skip list. Only `update`
+// produces skips, so every other caller goes through emitMutation.
+func emitMutationWithSkips(changed []string, failed []jsonFailure, skipped []jsonSkip, staged, reboot bool, errMsg string) {
 	if changed == nil {
 		changed = []string{}
 	}
 	if failed == nil {
 		failed = []jsonFailure{}
 	}
-	jsonLine(jsonMutation{Changed: changed, Failed: failed, Staged: staged, RebootRequired: reboot, Error: errMsg})
+	jsonLine(jsonMutation{Changed: changed, Failed: failed, Staged: staged,
+		RebootRequired: reboot, Skipped: skipped, Error: errMsg})
 }
 
 type jsonUnstage struct {
@@ -468,6 +521,11 @@ type jsonStatusPkg struct {
 	// verification (A): null when the package verified clean (or was never
 	// verified), a JSON array when files are gone. Same shape as jsonSearchPkg.
 	MissingFiles []string `json:"missing_files"`
+	// ConflictsActive has the same semantics as jsonSearchPkg's, but is computed
+	// from the LOCAL packages.d snapshot only — statusJSON loads no registry
+	// caches, mirroring the existing local-only rule for uninstallable and
+	// has_config (INTEGRITY.md §6.2). Never null.
+	ConflictsActive []string `json:"conflicts_active"`
 }
 
 type jsonStatusPayload struct {
@@ -491,6 +549,7 @@ func (a *App) statusJSON() int {
 		jsonError(err.Error())
 		return exitError
 	}
+	graph := localConflictGraph(pkgs)
 	out := make([]jsonStatusPkg, 0, len(pkgs))
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
@@ -510,13 +569,14 @@ func (a *App) statusJSON() int {
 			latest = ptr(ps.LatestSeen)
 		}
 		out = append(out, jsonStatusPkg{
-			ID:           p.ID,
-			Installed:    ptr(ps.InstalledVersion),
-			Staged:       ptr(ps.StagedVersion),
-			Latest:       latest,
-			Pinned:       ptr(a.effectivePin(p)),
-			State:        st,
-			MissingFiles: ps.MissingFiles,
+			ID:              p.ID,
+			Installed:       ptr(ps.InstalledVersion),
+			Staged:          ptr(ps.StagedVersion),
+			Latest:          latest,
+			Pinned:          ptr(a.effectivePin(p)),
+			State:           st,
+			MissingFiles:    ps.MissingFiles,
+			ConflictsActive: a.activeConflicts(p.ID, graph, nil),
 		})
 	}
 	jsonLine(jsonStatusPayload{

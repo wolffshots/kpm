@@ -115,7 +115,7 @@ func TestDownloadZipAssetUnwrapsAndStages(t *testing.T) {
 	})
 	srv := serveAsset(t, a, body)
 
-	cache, manifest, err := a.download("nickelclock", "v0.4.0", forge.Asset{
+	cache, manifest, err := a.download("nickelclock", "v0.4.0", "", false, false, forge.Asset{
 		Name: "NickelClock-v0.4.0.zip", DownloadURL: srv.URL + "/NickelClock-v0.4.0.zip",
 	})
 	if err != nil {
@@ -156,7 +156,7 @@ func TestDownloadPlainTgzUnchanged(t *testing.T) {
 	body := tgzBytes(t, map[string]string{"./usr/local/App/bin/app": "bin"})
 	srv := serveAsset(t, a, body)
 
-	cache, manifest, err := a.download("app", "v1", forge.Asset{
+	cache, manifest, err := a.download("app", "v1", "", false, false, forge.Asset{
 		Name: "KoboRoot.tgz", DownloadURL: srv.URL + "/KoboRoot.tgz",
 	})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestDownloadZipWithoutTgzFailsClean(t *testing.T) {
 	body := zipBytes(t, map[string][]byte{"README.md": []byte("no tgz here")})
 	srv := serveAsset(t, a, body)
 
-	_, _, err := a.download("bad", "v1", forge.Asset{
+	_, _, err := a.download("bad", "v1", "", false, false, forge.Asset{
 		Name: "bad-v1.zip", DownloadURL: srv.URL + "/bad-v1.zip",
 	})
 	if err == nil {

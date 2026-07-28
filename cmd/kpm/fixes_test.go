@@ -368,7 +368,7 @@ func TestUnconfiguredSkipped(t *testing.T) {
 	if p.Configured() {
 		t.Fatal("empty source should be unconfigured")
 	}
-	_, skip, err := a.resolveAndDownload(p)
+	_, skip, _, err := a.resolveAndDownload(p, nil, nil)
 	if err != nil {
 		t.Errorf("unconfigured package must not error: %v", err)
 	}

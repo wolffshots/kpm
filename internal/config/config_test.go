@@ -488,12 +488,12 @@ func TestLoadAllSorted(t *testing.T) {
 	}
 	// a non-toml file should be ignored
 	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644)
-	pkgs, unreadable, err := LoadAll(dir)
+	pkgs, skipped, err := LoadAll(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(unreadable) != 0 {
-		t.Errorf("unexpected unreadable: %v", unreadable)
+	if len(skipped.All()) != 0 {
+		t.Errorf("unexpected skipped: %+v", skipped)
 	}
 	if len(pkgs) != 3 || pkgs[0].ID != "alpha" || pkgs[2].ID != "zeta" {
 		t.Errorf("LoadAll not sorted: %+v", pkgs)
@@ -520,15 +520,20 @@ func TestLoadAllSkipsAppleDoubleAndHidden(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Bad_Name.toml"), []byte("source = \"h/o/x\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pkgs, unreadable, err := LoadAll(dir)
+	pkgs, skipped, err := LoadAll(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pkgs) != 1 || pkgs[0].ID != "nickeldbus" {
 		t.Errorf("only the valid def should load: %+v", pkgs)
 	}
-	if len(unreadable) != 1 || unreadable[0] != "Bad_Name.toml" {
-		t.Errorf("only Bad_Name.toml should be unreadable, got %v", unreadable)
+	if len(skipped.All()) != 1 || skipped.All()[0] != "Bad_Name.toml" {
+		t.Errorf("only Bad_Name.toml should be skipped, got %+v", skipped)
+	}
+	// And it is reported as an invalid NAME, not as unparseable: the file
+	// decodes fine, it simply was never a registration (see SkippedDefs).
+	if len(skipped.InvalidName) != 1 || len(skipped.Unparseable) != 0 {
+		t.Errorf("Bad_Name.toml must be an invalid-name skip, got %+v", skipped)
 	}
 }
 
@@ -568,14 +573,247 @@ func TestLoadAllSkipsBadAndInvalidId(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "Bad_Id.toml"), []byte("source = \"h/o/x\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	pkgs, unreadable, err := LoadAll(dir)
+	pkgs, skipped, err := LoadAll(dir)
 	if err != nil {
 		t.Fatalf("LoadAll must not fail on bad files: %v", err)
 	}
 	if len(pkgs) != 1 || pkgs[0].ID != "good" {
 		t.Errorf("only the good def should load: %+v", pkgs)
 	}
-	if len(unreadable) != 2 {
-		t.Errorf("both bad files should be reported unreadable: %v", unreadable)
+	if len(skipped.All()) != 2 {
+		t.Errorf("both bad files should be reported: %+v", skipped)
+	}
+	// SPLIT BY CAUSE. These two are not interchangeable: broken.toml has a valid
+	// stem so it may be a registered package whose declarations kpm cannot read,
+	// while Bad_Id.toml was never registered and can declare nothing. The
+	// conflict-gated refusal keys on the first and must ignore the second.
+	if len(skipped.Unparseable) != 1 || skipped.Unparseable[0] != "broken.toml" {
+		t.Errorf("broken.toml must be the unparseable one, got %+v", skipped)
+	}
+	if len(skipped.InvalidName) != 1 || skipped.InvalidName[0] != "Bad_Id.toml" {
+		t.Errorf("Bad_Id.toml must be the invalid-name one, got %+v", skipped)
+	}
+}
+
+// ---- INTEGRITY.md §3/§5/§9: the 0.10.0 def fields ------------------------
+
+// §2.2 hazard 1: the "tag" default lives only in the derived getter.
+func TestEffectiveUpdateCheck(t *testing.T) {
+	cases := []struct{ stored, want string }{
+		{"", UpdateCheckTag},
+		{UpdateCheckTag, UpdateCheckTag},
+		{UpdateCheckRolling, UpdateCheckRolling},
+	}
+	for _, c := range cases {
+		p := Package{UpdateCheck: c.stored}
+		if got := p.EffectiveUpdateCheck(); got != c.want {
+			t.Errorf("EffectiveUpdateCheck(%q) = %q, want %q", c.stored, got, c.want)
+		}
+		if p.UpdateCheck != c.stored {
+			t.Errorf("the getter must not mutate the stored value")
+		}
+	}
+	// §9.2 defense in depth: a hand-edited garbage value degrades to tag
+	// comparison (it is simply never equal to UpdateCheckRolling).
+	if (Package{UpdateCheck: "semver"}).EffectiveUpdateCheck() == UpdateCheckRolling {
+		t.Error("a garbage update_check must not read as rolling")
+	}
+}
+
+// §5.2: tagsEqual's normalization is shared, and the checksums lookup uses it.
+func TestNormalizeTag(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"v1.2.0", "1.2.0"}, {"1.2.0", "1.2.0"}, {"vv1", "v1"}, {"latest", "latest"}, {"", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeTag(c.in); got != c.want {
+			t.Errorf("NormalizeTag(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestChecksumFor(t *testing.T) {
+	sum := strings.Repeat("3b", 32)
+	p := Package{Checksums: map[string]string{"v0.4.0": sum, "0.5.0": strings.ToUpper(sum)}}
+	// Exact and normalized lookups both hit, in both directions (§5.2).
+	for _, tag := range []string{"v0.4.0", "0.4.0", "v0.5.0", "0.5.0"} {
+		got, ok := p.ChecksumFor(tag)
+		if !ok || got != sum {
+			t.Errorf("ChecksumFor(%q) = (%q,%v), want (%q,true)", tag, got, ok, sum)
+		}
+	}
+	if _, ok := p.ChecksumFor("v9.9.9"); ok {
+		t.Error("an undeclared tag must report no checksum")
+	}
+	if _, ok := (Package{}).ChecksumFor("v1"); ok {
+		t.Error("a def with no checksums table must report no checksum")
+	}
+	// §9.2: a malformed local value disables verification instead of wedging the
+	// package, and ChecksumDeclaredFor still reports the entry so it can WARN.
+	bad := Package{Checksums: map[string]string{"v1": "deadbeef"}}
+	if _, ok := bad.ChecksumFor("v1"); ok {
+		t.Error("a non-64-hex value must not be used as a checksum")
+	}
+	if !bad.ChecksumDeclaredFor("v1") {
+		t.Error("ChecksumDeclaredFor must see the malformed entry")
+	}
+	if bad.ChecksumDeclaredFor("v2") {
+		t.Error("ChecksumDeclaredFor must be false for an absent tag")
+	}
+}
+
+// m2: rolling + checksums is a parse-time error for a REGISTRY def, but
+// packages.d is user-editable and a hand-edited def can carry both. The tag
+// never moves while the asset does, so the recorded hash is correct exactly once
+// and then hard-fails every download forever with wording that reads like a
+// security incident. Degrade to unverified instead (§9.2's pattern).
+func TestChecksumIgnoredForRollingDef(t *testing.T) {
+	sum := strings.Repeat("3b", 32)
+	rolling := Package{UpdateCheck: UpdateCheckRolling, Checksums: map[string]string{"latest": sum}}
+	if got, ok := rolling.ChecksumFor("latest"); ok {
+		t.Errorf("a rolling def must never verify against a pinned checksum, got %q", got)
+	}
+	// The same def without the rolling flag still verifies — proof the checksum
+	// itself is well-formed and the rolling test is what suppressed it.
+	tagged := Package{Checksums: map[string]string{"latest": sum}}
+	if got, ok := tagged.ChecksumFor("latest"); !ok || got != sum {
+		t.Errorf("a tag-mode def must still verify: (%q,%v)", got, ok)
+	}
+}
+
+// m3: §5.5 steers a curator at GitHub's `sha256:<hex>` asset digest, so accept
+// it verbatim at use. n2: a stray-whitespace key was accepted by
+// ValidateChecksums but could never match, so the release installed unverified
+// with no diagnostic at all.
+func TestChecksumNormalization(t *testing.T) {
+	sum := strings.Repeat("3b", 32)
+	cases := []struct{ name, key, value string }{
+		{"sha256 prefix", "v1.0.0", "sha256:" + sum},
+		{"uppercase prefix", "v1.0.0", "SHA256:" + strings.ToUpper(sum)},
+		{"padded value", "v1.0.0", "  " + sum + "  "},
+		{"padded key", " v1.0.0 ", sum},
+	}
+	for _, c := range cases {
+		p := Package{Checksums: map[string]string{c.key: c.value}}
+		if err := ValidateChecksums(p.Checksums); err != nil {
+			t.Errorf("%s: ValidateChecksums = %v, want nil", c.name, err)
+		}
+		got, ok := p.ChecksumFor("v1.0.0")
+		if !ok || got != sum {
+			t.Errorf("%s: ChecksumFor = (%q,%v), want (%q,true)", c.name, got, ok, sum)
+		}
+	}
+	// Still rejected: a prefix around something that is not a digest.
+	if err := ValidateChecksums(map[string]string{"v1": "sha256:deadbeef"}); err == nil {
+		t.Error("stripping the prefix must not make a short value valid")
+	}
+}
+
+func TestIntegrityValidators(t *testing.T) {
+	sum := strings.Repeat("a", 64)
+	if err := ValidateUpdateCheck(""); err != nil {
+		t.Errorf("empty update_check is the default, not an error: %v", err)
+	}
+	if err := ValidateUpdateCheck("semver"); err == nil ||
+		err.Error() != `invalid update_check "semver" (want "tag" or "rolling")` {
+		t.Errorf("update_check error = %v", err)
+	}
+	if err := ValidateConflicts("a", []string{"Bad_Id"}); err == nil ||
+		err.Error() != `conflicts entry "Bad_Id" is not a valid package id` {
+		t.Errorf("conflicts id error = %v", err)
+	}
+	if err := ValidateConflicts("a", []string{"a"}); err == nil ||
+		err.Error() != `conflicts must not list the package's own id "a"` {
+		t.Errorf("self-conflict error = %v", err)
+	}
+	if err := ValidateConflicts("a", []string{"b", "b", "c"}); err != nil {
+		t.Errorf("duplicates are collapsed at use, not an error: %v", err)
+	}
+	if err := ValidateChecksums(map[string]string{"": sum}); err == nil ||
+		err.Error() != "checksums has an empty release tag key" {
+		t.Errorf("empty tag error = %v", err)
+	}
+	if err := ValidateChecksums(map[string]string{"v1": "deadbeef"}); err == nil ||
+		err.Error() != `checksums entry for tag "v1" is not a 64-character hex sha256` {
+		t.Errorf("bad checksum error = %v", err)
+	}
+	if err := ValidateChecksums(map[string]string{"v1": strings.ToUpper(sum)}); err != nil {
+		t.Errorf("uppercase hex is valid: %v", err)
+	}
+	if err := ValidateDefCombination(Package{UpdateCheck: UpdateCheckRolling, Checksums: map[string]string{"latest": sum}}); err == nil ||
+		err.Error() != `update_check = "rolling" cannot be combined with checksums (a rolling tag's asset changes without a def edit)` {
+		t.Errorf("rolling+checksums error = %v", err)
+	}
+	if err := ValidateDefCombination(Package{UpdateCheck: UpdateCheckRolling}); err != nil {
+		t.Errorf("rolling alone is fine: %v", err)
+	}
+}
+
+// §2.2 hazard 2/4: the three fields survive Save/Load, and a def that omits them
+// writes no key at all (so its canonical bytes are unchanged from 0.9.2).
+func TestIntegrityFieldsRoundTripThroughTOML(t *testing.T) {
+	sum := strings.Repeat("3b", 32)
+	dir := t.TempDir()
+
+	full := filepath.Join(dir, "kobo-tweaks.toml")
+	if err := Save(full, &Package{
+		Name: "Kobo Tweaks", Source: "github.com/o/kobo-tweaks", Forge: ForgeGitHub, Asset: "KoboRoot.tgz",
+		Conflicts: []string{"nickelclock"}, Checksums: map[string]string{"v1.0.0": sum},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(full, "kobo-tweaks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Conflicts) != 1 || got.Conflicts[0] != "nickelclock" {
+		t.Errorf("conflicts lost: %+v", got.Conflicts)
+	}
+	if got.Checksums["v1.0.0"] != sum {
+		t.Errorf("checksums lost: %+v", got.Checksums)
+	}
+
+	rolling := filepath.Join(dir, "kobocloud.toml")
+	if err := SaveReplace(rolling, &Package{
+		Name: "KoboCloud", Source: "github.com/f/KoboCloud", Forge: ForgeGitHub, Asset: "KoboRoot.tgz",
+		UpdateCheck: UpdateCheckRolling, MinKpm: "0.10.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rp, err := Load(rolling, "kobocloud")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.UpdateCheck != UpdateCheckRolling {
+		t.Errorf("update_check lost: %q", rp.UpdateCheck)
+	}
+
+	// A def using none of them writes none of them (no empty-key noise).
+	plain := filepath.Join(dir, "plain.toml")
+	if err := Save(plain, &Package{Name: "Plain", Source: "github.com/o/p", Forge: ForgeGitHub, Asset: "KoboRoot.tgz"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"update_check", "conflicts", "checksums"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("a def that does not use %s must not grow the key:\n%s", key, b)
+		}
+	}
+
+	// SaveReplace is authoritative: a field the registry dropped disappears.
+	if err := SaveReplace(full, &Package{
+		Name: "Kobo Tweaks", Source: "github.com/o/kobo-tweaks", Forge: ForgeGitHub, Asset: "KoboRoot.tgz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Load(full, "kobo-tweaks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Conflicts) != 0 || len(after.Checksums) != 0 {
+		t.Errorf("SaveReplace must clear dropped integrity fields: %+v / %+v", after.Conflicts, after.Checksums)
 	}
 }

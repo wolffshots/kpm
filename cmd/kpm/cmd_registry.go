@@ -405,6 +405,9 @@ func (a *App) storeRefresh(r registry.Registry, res forge.RawResult) error {
 	rs.LastFetched = now
 	rs.Etag = res.Etag
 	a.paths.Log("REFRESH", fmt.Sprintf("%s  %d package(s)", r.Name, len(m.Packages)))
+	// Name anything the parse refused: refresh is the moment a curator's mistake
+	// arrives, so it is the most useful place to say a package vanished (m3).
+	a.reportDropped(r.Name, m)
 	return nil
 }
 

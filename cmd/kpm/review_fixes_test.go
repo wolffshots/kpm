@@ -83,10 +83,10 @@ func TestUpdateFreshnessReusesRecentPerPackage(t *testing.T) {
 // silent "up to date" via tagsEqual("","") for a never-installed package.
 func TestResolveEmptyTagIsError(t *testing.T) {
 	a, p := twoEndpointForge(t, "") // latest returns tag_name:""
-	if _, err := a.resolveTag(p); err == nil {
-		t.Error("resolveTag should error on an empty tag")
+	if _, err := a.resolveCheckRelease(p); err == nil {
+		t.Error("resolveCheckRelease should error on an empty tag")
 	}
-	if _, _, err := a.resolveAndDownload(p); err == nil {
+	if _, _, _, err := a.resolveAndDownload(p, nil, nil); err == nil {
 		t.Error("resolveAndDownload should error on an empty tag")
 	}
 }

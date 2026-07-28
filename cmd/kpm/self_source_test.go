@@ -120,12 +120,12 @@ func TestSelfSourceOverlayResolves(t *testing.T) {
 		t.Errorf("effectiveForge = %q, want forgejo", got)
 	}
 
-	tag, err := a.resolveTag(p)
+	rel, err := a.resolveCheckRelease(p)
 	if err != nil {
-		t.Fatalf("resolveTag: %v", err)
+		t.Fatalf("resolveCheckRelease: %v", err)
 	}
-	if tag != "v9.9.9" {
-		t.Errorf("tag = %q, want v9.9.9", tag)
+	if rel.Tag != "v9.9.9" {
+		t.Errorf("tag = %q, want v9.9.9", rel.Tag)
 	}
 	if stub.owner != "o" || stub.repo != "r" {
 		t.Errorf("forge contacted with owner/repo %q/%q, want o/r", stub.owner, stub.repo)
@@ -175,19 +175,19 @@ func TestSelfSourceSurvivesTarballClobber(t *testing.T) {
 	}
 
 	// check must still resolve it against the adopted source.
-	tag, err := a.resolveTag(kpmPkg)
+	rel, err := a.resolveCheckRelease(kpmPkg)
 	if err != nil {
-		t.Fatalf("resolveTag after clobber: %v", err)
+		t.Fatalf("resolveCheckRelease after clobber: %v", err)
 	}
-	if tag != "v0.6.0" {
-		t.Errorf("tag = %q, want v0.6.0", tag)
+	if rel.Tag != "v0.6.0" {
+		t.Errorf("tag = %q, want v0.6.0", rel.Tag)
 	}
 	if stub.owner != "o" || stub.repo != "r" {
 		t.Errorf("forge contacted with %q/%q, want o/r", stub.owner, stub.repo)
 	}
 
 	// update must not skip it as unconfigured either.
-	if _, skip, err := a.resolveAndDownload(kpmPkg); err != nil || skip {
+	if _, skip, _, err := a.resolveAndDownload(kpmPkg, nil, nil); err != nil || skip {
 		// A no-asset release makes MatchAsset fail; what matters is that it was
 		// NOT silently skipped as unconfigured (F7).
 		if skip {
@@ -348,7 +348,7 @@ func TestSelfNeverAdoptedStaysUnconfigured(t *testing.T) {
 		t.Errorf("status should report the unconfigured self-update:\n%s", status)
 	}
 	// update skips it silently, no error (F7).
-	if _, skip, err := a.resolveAndDownload(p); err != nil || !skip {
+	if _, skip, _, err := a.resolveAndDownload(p, nil, nil); err != nil || !skip {
 		t.Errorf("unconfigured kpm should be skipped without error (skip=%v err=%v)", skip, err)
 	}
 }

@@ -35,24 +35,59 @@ const SchemaVersion = 1
 // package's load-failure dump. Optional and registry-only (excluded from HashDef,
 // never projected to packages.d) exactly like TestedFw; doctor falls back to the
 // display Name with spaces stripped when it is absent (DOCTOR.md).
+//
+// UpdateCheck/Conflicts/Checksums are the 0.10.0 integrity fields
+// (INTEGRITY.md §2). Unlike the four above they are FUNCTIONAL — they change
+// what install/update do — so all three are projected into packages.d and
+// included in HashDef. Every one carries omitempty: a def that omits them must
+// encode to the same canonical bytes as before 0.10.0, or its hash changes and
+// it reads as spurious drift (§2.2 hazard 2).
 type PackageDef struct {
 	Name        string             `toml:"name"`
 	Source      string             `toml:"source"`
 	Forge       string             `toml:"forge"`
 	Asset       string             `toml:"asset"`
 	MinKpm      string             `toml:"min_kpm"`
-	Description string             `toml:"description,omitempty"` // JSON-OUTPUT.md §3
-	Homepage    string             `toml:"homepage,omitempty"`    // JSON-OUTPUT.md §3
-	TestedFw    string             `toml:"tested_fw,omitempty"`   // REGISTRY.md §2
-	NhName      string             `toml:"nh_name,omitempty"`     // DOCTOR.md
+	Description string             `toml:"description,omitempty"`  // JSON-OUTPUT.md §3
+	Homepage    string             `toml:"homepage,omitempty"`     // JSON-OUTPUT.md §3
+	TestedFw    string             `toml:"tested_fw,omitempty"`    // REGISTRY.md §2
+	NhName      string             `toml:"nh_name,omitempty"`      // DOCTOR.md
+	UpdateCheck string             `toml:"update_check,omitempty"` // INTEGRITY.md §3
+	Conflicts   []string           `toml:"conflicts,omitempty"`    // INTEGRITY.md §4
 	Uninstall   config.Uninstall   `toml:"uninstall"`
 	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
+	// Checksums is last: TOML requires tables after scalars, and BurntSushi's
+	// encoder writes struct fields in declaration order.
+	Checksums map[string]string `toml:"checksums,omitempty"` // INTEGRITY.md §5
+}
+
+// EffectiveUpdateCheck returns UpdateCheck with the default ("tag") applied,
+// mirroring config.Package.EffectiveUpdateCheck. The default is applied only
+// here — never stored (INTEGRITY.md §2.2 hazard 1).
+func (d *PackageDef) EffectiveUpdateCheck() string {
+	if d.UpdateCheck == "" {
+		return config.UpdateCheckTag
+	}
+	return d.UpdateCheck
+}
+
+// DroppedDef records a package def ParseManifest refused, with the reason. A
+// dropped def is INVISIBLE: the package simply is not in the registry, which
+// from the outside is indistinguishable from one the curator never published —
+// a disproportionate outcome for (say) one mistyped checksum. Callers report
+// these so the cause is discoverable (m3). Not part of the TOML.
+type DroppedDef struct {
+	ID     string
+	Reason string
 }
 
 // Manifest is a parsed registry.toml.
 type Manifest struct {
 	SchemaVersion int                    `toml:"schema_version"`
 	Packages      map[string]*PackageDef `toml:"packages"`
+	// Dropped lists the ids ParseManifest refused, sorted. Populated at parse,
+	// never decoded from the file.
+	Dropped []DroppedDef `toml:"-"`
 }
 
 // ParseManifest decodes registry.toml bytes and gates on schema_version: a
@@ -70,23 +105,63 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if m.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("unsupported registry schema_version %d (this kpm supports %d); update kpm", m.SchemaVersion, SchemaVersion)
 	}
+	// drop removes a def and records why, so the loss is reportable instead of
+	// silent (m3).
+	drop := func(id, reason string) {
+		delete(m.Packages, id)
+		m.Dropped = append(m.Dropped, DroppedDef{ID: id, Reason: reason})
+	}
 	for id := range m.Packages {
 		if !config.ValidID(id) {
-			delete(m.Packages, id)
+			drop(id, "not a valid package id (want [a-z0-9-]+ starting with an alphanumeric)")
 			continue
 		}
-		// A def whose config declarations are invalid (bad format, unsafe path, or
-		// duplicate name) is dropped, exactly like an invalid id — a malformed
-		// [[configs]] block must not reach the editor (CONFIG.md §2).
-		if def := m.Packages[id]; def != nil {
-			if err := uninstall.ValidateConfigDecls(def.Configs); err != nil {
-				delete(m.Packages, id)
-			}
+		// A def whose declarations are invalid (bad config format, unsafe path,
+		// duplicate name, bad update_check/conflicts/checksums, or an incoherent
+		// combination) is dropped, exactly like an invalid id — a malformed block
+		// must never reach the machinery that acts on it (CONFIG.md §2,
+		// INTEGRITY.md §9).
+		def := m.Packages[id]
+		if def == nil {
+			continue
+		}
+		if err := uninstall.ValidateConfigDecls(def.Configs); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateUpdateCheck(def.UpdateCheck); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateConflicts(id, def.Conflicts); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateChecksums(def.Checksums); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateDefCombination(config.Package{
+			UpdateCheck: def.UpdateCheck, Checksums: def.Checksums,
+		}); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		// §3.8: a rolling entry MUST declare min_kpm. Nothing enforced it, so a
+		// curator omission silently reproduces the exact bug feature A fixes: an
+		// older kpm ignores the unknown update_check key, compares tags, and
+		// reports the package up to date forever on every 0.9.x device. Truthful
+		// silence ("requires kpm >= …") beats a false all-clear, so the entry is
+		// incoherent without it and joins the other dropped defs.
+		if def.EffectiveUpdateCheck() == config.UpdateCheckRolling && strings.TrimSpace(def.MinKpm) == "" {
+			drop(id, `update_check = "rolling" requires min_kpm (an older kpm would ignore it and report this package up to date forever)`)
+			continue
 		}
 	}
 	if m.Packages == nil {
 		m.Packages = map[string]*PackageDef{}
 	}
+	sort.Slice(m.Dropped, func(i, j int) bool { return m.Dropped[i].ID < m.Dropped[j].ID })
 	return &m, nil
 }
 

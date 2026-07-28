@@ -31,6 +31,52 @@ const (
 	MethodMarkerRemove = "marker-remove"
 )
 
+// Update-check modes (INTEGRITY.md §3). Empty means the default, "tag" — see
+// EffectiveUpdateCheck. The zero value is NEVER materialized into a stored def:
+// a def that omits the key must hash identically to one that does, or every
+// package reads as permanently drifted (INTEGRITY.md §2.2 hazard 1).
+const (
+	UpdateCheckTag     = "tag"
+	UpdateCheckRolling = "rolling"
+)
+
+// NormalizeTag strips a single leading "v" so "v1.2.0" and "1.2.0" name the
+// same release. It is the one place that rule lives: tagsEqual and the
+// checksums lookup both delegate here (INTEGRITY.md §5.2).
+func NormalizeTag(tag string) string { return strings.TrimPrefix(tag, "v") }
+
+// sha256HexLen is the length of a hex-encoded SHA-256 digest.
+const sha256HexLen = 64
+
+// NormalizeChecksum trims a declared checksum and strips an optional "sha256:"
+// prefix (case-insensitive). §5.5 steers a curator straight at GitHub's asset
+// digest, which is published in exactly that `sha256:<hex>` form — pasting it
+// verbatim used to fail validation and take the WHOLE package out of the
+// registry, silently. It normalizes at USE only: the stored bytes are untouched,
+// so HashDef is unaffected and a def can never read as drifted for this.
+func NormalizeChecksum(s string) string {
+	s = strings.TrimSpace(s)
+	const prefix = "sha256:"
+	if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
+		s = strings.TrimSpace(s[len(prefix):])
+	}
+	return strings.ToLower(s)
+}
+
+// isSHA256Hex reports whether s is exactly 64 hex characters (either case).
+func isSHA256Hex(s string) bool {
+	if len(s) != sha256HexLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 // Uninstall is the per-package [uninstall] table (UNINSTALL.md §2). All fields
 // are optional; a bad block only surfaces errors when "kpm uninstall" runs, so
 // registration/check/update never fail on it.
@@ -217,11 +263,151 @@ type Package struct {
 	Registry string `toml:"registry"` // provenance: source registry name; absent on hand-added
 	MinKpm   string `toml:"min_kpm"`  // optional minimum kpm version (REGISTRY.md §2)
 
+	// UpdateCheck opts a package into rolling-release detection: "" (default,
+	// meaning "tag") or "rolling" (INTEGRITY.md §3). Read through
+	// EffectiveUpdateCheck — the default is never stored.
+	UpdateCheck string `toml:"update_check,omitempty"`
+	// Conflicts names package ids that cannot be installed alongside this one.
+	// The relation is treated as symmetric: kpm checks both directions, so a
+	// curator declares it once (INTEGRITY.md §4.2).
+	Conflicts []string `toml:"conflicts,omitempty"`
+	// Checksums maps a release tag to the curator-attested lowercase sha256 of
+	// that release's asset, verified at download time (INTEGRITY.md §5). An
+	// absent tag is simply unverified.
+	Checksums map[string]string `toml:"checksums,omitempty"`
+
 	Uninstall Uninstall   `toml:"uninstall"`
 	Configs   []ModConfig `toml:"configs,omitempty"` // editable config declarations (CONFIG.md §2)
 
 	// ID is the filename stem; not serialized into the TOML body.
 	ID string `toml:"-"`
+}
+
+// EffectiveUpdateCheck returns UpdateCheck with the default ("tag") applied.
+// The default is applied HERE and nowhere else: materializing it into a stored
+// def would make every package that omits the key hash differently from its
+// registry entry and read as permanently drifted (INTEGRITY.md §2.2 hazard 1).
+func (p Package) EffectiveUpdateCheck() string {
+	if p.UpdateCheck == "" {
+		return UpdateCheckTag
+	}
+	return p.UpdateCheck
+}
+
+// ChecksumFor returns the declared lowercase sha256 for a release tag and
+// whether one was declared. Lookup is tag-normalized the same way tagsEqual
+// normalizes (a single leading "v" is insignificant), so a curator writing
+// "0.4.0" against an upstream tag of "v0.4.0" still gets verification.
+//
+// A declared value that is not a 64-character hex sha256 yields ("", false):
+// a fat-fingered local edit disables verification rather than making the
+// package permanently un-installable (INTEGRITY.md §9.2). Use
+// ChecksumDeclaredFor to tell that case apart from "no attestation".
+func (p Package) ChecksumFor(tag string) (string, bool) {
+	// A rolling package's asset changes under a permanently-constant tag, so any
+	// declared checksum is correct exactly once and then hard-fails every
+	// download after — with wording that reads like a security incident. The
+	// combination is a parse-time error for a registry def
+	// (ValidateDefCombination), but packages.d is user-editable, so enforce it
+	// again at use and degrade to unverified, matching §9.2's pattern.
+	if p.EffectiveUpdateCheck() == UpdateCheckRolling {
+		return "", false
+	}
+	sum, ok := lookupChecksum(p.Checksums, tag)
+	if !ok {
+		return "", false
+	}
+	sum = NormalizeChecksum(sum)
+	if !isSHA256Hex(sum) {
+		return "", false
+	}
+	return sum, true
+}
+
+// ChecksumDeclaredFor reports whether checksums carries an entry for tag at
+// all, valid or not — the signal that a malformed local edit deserves a WARN.
+func (p Package) ChecksumDeclaredFor(tag string) bool {
+	_, ok := lookupChecksum(p.Checksums, tag)
+	return ok
+}
+
+// lookupChecksum finds the entry for tag, comparing tags through NormalizeTag.
+// An exact key match wins over a normalized one. Keys are trimmed before
+// comparison: a stray-whitespace key like " v1.0.0" is accepted by
+// ValidateChecksums but could never match, so the release installed unverified
+// with no diagnostic at all.
+func lookupChecksum(sums map[string]string, tag string) (string, bool) {
+	if len(sums) == 0 {
+		return "", false
+	}
+	if v, ok := sums[tag]; ok {
+		return v, true
+	}
+	want := NormalizeTag(strings.TrimSpace(tag))
+	for k, v := range sums {
+		if NormalizeTag(strings.TrimSpace(k)) == want {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// ValidateUpdateCheck checks the update_check enum. Empty is valid (it means
+// the default) — see EffectiveUpdateCheck.
+func ValidateUpdateCheck(v string) error {
+	switch v {
+	case "", UpdateCheckTag, UpdateCheckRolling:
+		return nil
+	}
+	return fmt.Errorf("invalid update_check %q (want %q or %q)", v, UpdateCheckTag, UpdateCheckRolling)
+}
+
+// ValidateConflicts checks that every entry is a valid package id and that the
+// package does not conflict with itself. Duplicates are not an error — they are
+// collapsed at use by the consumer's normalization — but a self-reference is,
+// because it signals a curator mistake rather than a harmless redundancy.
+func ValidateConflicts(id string, conflicts []string) error {
+	for _, c := range conflicts {
+		if c == id {
+			return fmt.Errorf("conflicts must not list the package's own id %q", id)
+		}
+		if !ValidID(c) {
+			return fmt.Errorf("conflicts entry %q is not a valid package id", c)
+		}
+	}
+	return nil
+}
+
+// ValidateChecksums checks that every key is a non-empty release tag and every
+// value is a 64-character hex sha256, after NormalizeChecksum strips an optional
+// "sha256:" prefix (the form GitHub publishes and §5.5 points a curator at).
+// Keys are visited in sorted order so the reported error is deterministic.
+func ValidateChecksums(sums map[string]string) error {
+	tags := make([]string, 0, len(sums))
+	for tag := range sums {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) == "" {
+			return fmt.Errorf("checksums has an empty release tag key")
+		}
+		if !isSHA256Hex(NormalizeChecksum(sums[tag])) {
+			return fmt.Errorf("checksums entry for tag %q is not a 64-character hex sha256", tag)
+		}
+	}
+	return nil
+}
+
+// ValidateDefCombination rejects field combinations that are individually valid
+// but jointly incoherent. A rolling tag's asset changes without any registry
+// edit, so a checksum pinned to that permanently-constant tag would be correct
+// exactly once and hard-fail every download after (INTEGRITY.md §5.6).
+func ValidateDefCombination(p Package) error {
+	if p.UpdateCheck == UpdateCheckRolling && len(p.Checksums) > 0 {
+		return fmt.Errorf(`update_check = "rolling" cannot be combined with checksums (a rolling tag's asset changes without a def edit)`)
+	}
+	return nil
 }
 
 // Host/Owner/Repo split the "source" field. They delegate to the package-level
@@ -310,6 +496,12 @@ func Save(path string, p *Package) error {
 	// so this overlay preserves it too.
 	setOptional(m, "registry", p.Registry)
 	setOptional(m, "min_kpm", p.MinKpm)
+	// The three integrity fields are optional and functional: write them only
+	// when set, so a def that does not use them is byte-identical to before
+	// 0.10.0 and its HashDef is unchanged (INTEGRITY.md §2.2 hazard 2).
+	setOptional(m, "update_check", p.UpdateCheck)
+	setOptionalSlice(m, "conflicts", p.Conflicts)
+	setOptionalMap(m, "checksums", p.Checksums)
 
 	// Merge the [uninstall] table: overlay only non-zero known fields onto any
 	// existing (possibly unknown-key-bearing) table; never inject empty keys.
@@ -333,7 +525,7 @@ func Save(path string, p *Package) error {
 // the on-disk file. Every other key (unknown top-level tables/fields, unknown
 // [uninstall] keys) is preserved (A1).
 var (
-	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs"}
+	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
 )
 
@@ -362,6 +554,9 @@ func SaveReplace(path string, p *Package) error {
 	setOptional(m, "pin", p.Pin)
 	setOptional(m, "registry", p.Registry)
 	setOptional(m, "min_kpm", p.MinKpm)
+	setOptional(m, "update_check", p.UpdateCheck)
+	setOptionalSlice(m, "conflicts", p.Conflicts)
+	setOptionalMap(m, "checksums", p.Checksums)
 
 	// Clear known [uninstall] keys (unknown keys in the table survive), overlay.
 	uni := asMap(m["uninstall"])
@@ -443,6 +638,25 @@ func setOptional(m map[string]any, key, val string) {
 	}
 }
 
+// setOptionalSlice/setOptionalMap are setOptional for the collection-valued
+// optional fields: an empty collection removes the key, so `conflicts = []` or
+// `checksums = {}` is never written and never reads as drift (§2.2 hazard 3).
+func setOptionalSlice(m map[string]any, key string, val []string) {
+	if len(val) > 0 {
+		m[key] = val
+	} else {
+		delete(m, key)
+	}
+}
+
+func setOptionalMap(m map[string]any, key string, val map[string]string) {
+	if len(val) > 0 {
+		m[key] = val
+	} else {
+		delete(m, key)
+	}
+}
+
 // asMap coerces a decoded TOML table value into a map[string]any (a new empty
 // one if absent or the wrong shape).
 func asMap(v any) map[string]any {
@@ -479,17 +693,51 @@ func overlayUninstall(dst map[string]any, u Uninstall) {
 	setStr("run_after", u.RunAfter)
 }
 
+// SkippedDefs names the packages.d entries LoadAll did not return, SPLIT BY
+// CAUSE. The two are not interchangeable and callers must not treat them alike:
+//
+//   - Unparseable: the stem IS a valid package id, so this file may well be a
+//     registered package — kpm simply cannot read what it declares. Anything
+//     derived from the whole snapshot (notably the conflict graph) is therefore
+//     incomplete in a way kpm cannot bound.
+//   - InvalidName: the stem is not a valid package id, so the file was never
+//     registered and can declare nothing. Its absence from the snapshot costs
+//     nothing; it is inert clutter (a stray `NickelClock.toml`, a `README.toml`).
+//
+// Conflating them made a stray filename refuse every conflict-gated command
+// while protecting against nothing.
+type SkippedDefs struct {
+	Unparseable []string
+	InvalidName []string
+}
+
+// All returns every skipped filename — the count and WARN surface, where the
+// cause does not matter. InvalidName first, then Unparseable; each is already in
+// directory order.
+func (s SkippedDefs) All() []string {
+	if len(s.Unparseable) == 0 {
+		return s.InvalidName
+	}
+	if len(s.InvalidName) == 0 {
+		return s.Unparseable
+	}
+	out := make([]string, 0, len(s.InvalidName)+len(s.Unparseable))
+	out = append(out, s.InvalidName...)
+	return append(out, s.Unparseable...)
+}
+
 // LoadAll reads every <id>.toml in dir, sorted by id. A file that fails to
 // decode, or whose stem is not a valid package id, is skipped and its name
-// returned in unreadable (the caller WARNs) rather than failing the whole load
-// (E2/E3) — one bad def must not make every package invisible.
-func LoadAll(dir string) (pkgs []*Package, unreadable []string, err error) {
+// returned in skipped (the caller WARNs) rather than failing the whole load
+// (E2/E3) — one bad def must not make every package invisible. See SkippedDefs
+// for why the two causes are reported separately.
+func LoadAll(dir string) (pkgs []*Package, skipped SkippedDefs, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil, nil
+			return nil, SkippedDefs{}, nil
 		}
-		return nil, nil, err
+		return nil, SkippedDefs{}, err
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
@@ -504,16 +752,16 @@ func LoadAll(dir string) (pkgs []*Package, unreadable []string, err error) {
 		}
 		id := strings.TrimSuffix(e.Name(), ".toml")
 		if !ValidID(id) {
-			unreadable = append(unreadable, e.Name())
+			skipped.InvalidName = append(skipped.InvalidName, e.Name())
 			continue
 		}
 		p, lerr := Load(dir+"/"+e.Name(), id)
 		if lerr != nil {
-			unreadable = append(unreadable, e.Name())
+			skipped.Unparseable = append(skipped.Unparseable, e.Name())
 			continue
 		}
 		pkgs = append(pkgs, p)
 	}
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].ID < pkgs[j].ID })
-	return pkgs, unreadable, nil
+	return pkgs, skipped, nil
 }
