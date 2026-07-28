@@ -104,6 +104,11 @@ func HashDef(def *PackageDef) (string, error) {
 	// normalization: its zero value is "" everywhere and omitempty drops it.
 	norm.Conflicts = nilIfEmpty(norm.Conflicts)
 	norm.Checksums = nilIfEmptyMap(norm.Checksums)
+	// [install] is functional — it decides where kpm writes files as root — so a
+	// registry fix to root/dest MUST propagate to installed devices via sync
+	// (APP-TREE.md §12.1). An all-zero table collapses to nil so a bare `[install]`
+	// hashes identically to omitting it, mirroring nilIfEmpty (A3).
+	norm.Install = normInstall(norm.Install)
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(&norm); err != nil {
@@ -148,8 +153,23 @@ func normConfigs(cfgs []config.ModConfig) []config.ModConfig {
 	return out
 }
 
+// normInstall collapses an entirely zero-valued (but non-nil) *Install to nil so
+// a registry that writes a bare `[install]` table hashes identically to one that
+// omits it — the same false-drift normalization nilIfEmpty performs for the
+// uninstall slices (APP-TREE.md §12.1 / A3).
+func normInstall(i *config.Install) *config.Install {
+	if i.IsZero() {
+		return nil
+	}
+	return i
+}
+
 // DefFromPackage projects a local package def onto the syncable payload, dropping
 // pin/registry/id so its hash can be compared against a registry def (§9.7).
+//
+// Install is DEEP-COPIED, not aliased: a shared pointer between a registry def
+// and a local package would let a mutation on one silently alter the other's hash
+// input (APP-TREE.md §12.2).
 func DefFromPackage(p *config.Package) *PackageDef {
 	return &PackageDef{
 		Name:        p.Name,
@@ -160,6 +180,7 @@ func DefFromPackage(p *config.Package) *PackageDef {
 		UpdateCheck: p.UpdateCheck,
 		Conflicts:   p.Conflicts,
 		Checksums:   p.Checksums,
+		Install:     p.Install.Clone(),
 		Uninstall:   p.Uninstall,
 		Configs:     p.Configs,
 	}
@@ -187,6 +208,7 @@ func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 		UpdateCheck: d.UpdateCheck,
 		Conflicts:   d.Conflicts,
 		Checksums:   d.Checksums,
+		Install:     d.Install.Clone(), // deep copy — never share the pointer (§12.2)
 		Uninstall:   d.Uninstall,
 		Configs:     d.Configs,
 	}
@@ -212,6 +234,11 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	rc0, _ := HashDef(&PackageDef{Checksums: remote.Checksums})
 	if lc0 != rc0 {
 		out = append(out, "checksums: (changed)")
+	}
+	li, _ := HashDef(&PackageDef{Install: local.Install})
+	ri, _ := HashDef(&PackageDef{Install: remote.Install})
+	if li != ri {
+		out = append(out, "install: (changed)")
 	}
 	lh, _ := HashDef(&PackageDef{Uninstall: local.Uninstall})
 	rh, _ := HashDef(&PackageDef{Uninstall: remote.Uninstall})
@@ -299,6 +326,22 @@ func FirmwareUntested(deviceFw, testedFw string) bool {
 		return dMaj > tMaj
 	}
 	return dMin > tMin
+}
+
+// FirmwareAtLeast reports whether deviceFw is at or above major.minor. It exists
+// for advisories that apply from a known firmware onward — the ExcludeSyncFolders
+// note, which only matters on FW >= 4.17 (APP-TREE.md §10.3). An unknown firmware
+// is never "at least" anything: silence is the safe default, exactly as it is for
+// FirmwareUntested.
+func FirmwareAtLeast(deviceFw string, major, minor int) bool {
+	if strings.TrimSpace(deviceFw) == "" {
+		return false
+	}
+	dMaj, dMin := majorMinor(deviceFw)
+	if dMaj != major {
+		return dMaj > major
+	}
+	return dMin >= minor
 }
 
 // majorMinor returns the first two dotted-numeric segments of v (missing

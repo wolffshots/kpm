@@ -187,7 +187,7 @@ func TestSelfSourceSurvivesTarballClobber(t *testing.T) {
 	}
 
 	// update must not skip it as unconfigured either.
-	if _, skip, _, err := a.resolveAndDownload(kpmPkg, nil, nil); err != nil || skip {
+	if _, _, skip, _, err := a.resolveAndDownload(kpmPkg, nil, nil); err != nil || skip {
 		// A no-asset release makes MatchAsset fail; what matters is that it was
 		// NOT silently skipped as unconfigured (F7).
 		if skip {
@@ -348,7 +348,7 @@ func TestSelfNeverAdoptedStaysUnconfigured(t *testing.T) {
 		t.Errorf("status should report the unconfigured self-update:\n%s", status)
 	}
 	// update skips it silently, no error (F7).
-	if _, skip, _, err := a.resolveAndDownload(p, nil, nil); err != nil || !skip {
+	if _, _, skip, _, err := a.resolveAndDownload(p, nil, nil); err != nil || !skip {
 		t.Errorf("unconfigured kpm should be skipped without error (skip=%v err=%v)", skip, err)
 	}
 }

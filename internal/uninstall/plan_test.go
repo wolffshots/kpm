@@ -564,3 +564,105 @@ func TestComputeRmdirsDeepestFirst(t *testing.T) {
 		t.Errorf("expected /usr/local/Foo/sub in rmdirs: %v", plan.Rmdirs)
 	}
 }
+
+// TestComputeRecursiveSurvivesManifestDedupe is the general form of the bug the
+// 0.11.0 "exclude dest from Plan.Manifest()" change fixed point-wise: candidates
+// are deduped by cleaned path with the MANIFEST visited first, so any configured
+// path whose base coincides with a manifest member silently lost its recursion.
+// App-tree makes this the common case, because its manifest records every
+// inferred directory — so a `purge_paths = [".../settings/**"]` whose base is a
+// shipped directory degraded to a no-op while --purge still reported success.
+func TestComputeRecursiveSurvivesManifestDedupe(t *testing.T) {
+	manifest := []string{
+		"mnt/onboard/.adds/koreader/reader.lua",
+		"mnt/onboard/.adds/koreader/settings", // an inferred DIRECTORY member
+	}
+	cfg := config.Uninstall{
+		PurgePaths: []string{"/mnt/onboard/.adds/koreader/settings/**"},
+		ExtraPaths: []string{"/mnt/onboard/.adds/koreader/reader.lua/**"},
+	}
+	plan, err := Compute(manifest, cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec, purgeRec bool
+	for _, d := range plan.Deletes {
+		if d.Path == "/mnt/onboard/.adds/koreader/settings" && d.Recursive {
+			rec = true
+			purgeRec = d.Purge
+		}
+	}
+	if !rec {
+		t.Errorf("the recursive purge of .../settings was deduped away by the manifest entry: %+v", plan.Deletes)
+	}
+	if !purgeRec {
+		t.Errorf("the surviving recursive delete must still be gated as a purge: %+v", plan.Deletes)
+	}
+	// The same rule for extra_paths on the plain (non-purge) path.
+	var extraRec bool
+	for _, d := range plan.Deletes {
+		if d.Path == "/mnt/onboard/.adds/koreader/reader.lua" && d.Recursive && !d.Purge {
+			extraRec = true
+		}
+	}
+	if !extraRec {
+		t.Errorf("the recursive extra_paths entry was deduped away by the manifest entry: %+v", plan.Deletes)
+	}
+}
+
+// TestComputeDedupeFoldsOnboardCase: every other comparison in this package
+// folds case for the FAT32 onboard partition (C2). The dedupe map did not, so a
+// manifest that spells a member two ways produced two deletion actions for one
+// device file — and, with keep_paths, one that was kept and one that was not.
+func TestComputeDedupeFoldsOnboardCase(t *testing.T) {
+	manifest := []string{
+		"mnt/onboard/.adds/koreader/Reader.lua",
+		"mnt/onboard/.adds/koreader/reader.lua",
+	}
+	plan, err := Compute(manifest, config.Uninstall{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, d := range plan.Deletes {
+		if strings.EqualFold(d.Path, "/mnt/onboard/.adds/koreader/reader.lua") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("one device file must produce one delete, got %d: %+v", n, plan.Deletes)
+	}
+	// A rootfs path is case-SENSITIVE and must still produce two.
+	plan, err = Compute([]string{"usr/local/foo/Lib.so", "usr/local/foo/lib.so"}, config.Uninstall{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Deletes) != 2 {
+		t.Errorf("rootfs paths are case-sensitive; want 2 deletes, got %+v", plan.Deletes)
+	}
+}
+
+// TestComputeNoManifestPurgePathsSatisfiesGuard: the no-manifest refusal exists
+// so a package registered but never installed through kpm cannot be "uninstalled"
+// with nothing to go on. purge_paths is exactly as good a recipe as extra_paths
+// for that purpose, so under --purge it must satisfy the guard too — otherwise a
+// half-extracted app-tree install (ENOSPC, USB pulled mid-extraction) is
+// unremovable even though the shipped def says precisely how to clean it up.
+func TestComputeNoManifestPurgePathsSatisfiesGuard(t *testing.T) {
+	cfg := config.Uninstall{PurgePaths: []string{"/mnt/onboard/.adds/koreader/**"}}
+	plan, err := Compute(nil, cfg, true)
+	if err != nil {
+		t.Fatalf("--purge with purge_paths must be able to clean up: %v", err)
+	}
+	if len(plan.Deletes) != 1 || !plan.Deletes[0].Recursive || !plan.Deletes[0].Purge {
+		t.Errorf("Deletes = %+v, want the recursive purge", plan.Deletes)
+	}
+	// WITHOUT --purge there is still nothing to go on, so the refusal stands.
+	if _, err := Compute(nil, cfg, false); err == nil {
+		t.Error("without --purge a package with no manifest and no extra_paths must still refuse")
+	}
+	// And with neither, both ways.
+	if _, err := Compute(nil, config.Uninstall{}, true); err == nil {
+		t.Error("no manifest, no extra_paths and no purge_paths must still refuse")
+	}
+}

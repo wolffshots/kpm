@@ -7,6 +7,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/device"
+	"kpm/internal/testenv"
 )
 
 // sandbox sets KPM_SYSROOT to a temp dir and returns (paths, sysroot).
@@ -197,7 +198,7 @@ func TestExecuteSymlinkNotTraversed(t *testing.T) {
 	}
 	link := filepath.Join(pkgDir, "link")
 	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlink creation unsupported on this host: %v", err)
+		testenv.SkipUnsupported(t, "symlink creation unsupported on this host: %v", err)
 	}
 
 	cfg := config.Uninstall{ExtraPaths: []string{"/opt/pkg/**"}}
@@ -297,7 +298,7 @@ func TestExecuteSymlinkedParentSkipped(t *testing.T) {
 	}
 	link := filepath.Join(optPkg, "link")
 	if err := os.Symlink(real, link); err != nil {
-		t.Skipf("symlink creation unsupported on this host: %v", err)
+		testenv.SkipUnsupported(t, "symlink creation unsupported on this host: %v", err)
 	}
 	// Manifest points a single-file delete through the symlinked parent.
 	plan, err := Compute([]string{"opt/pkg/link/secret"}, config.Uninstall{}, false)

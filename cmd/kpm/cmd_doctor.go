@@ -128,7 +128,43 @@ func (a *App) cmdDoctor(args []string) int {
 	}
 
 	a.printDoctor(results, deviceFw)
+	// App-tree advisories are printed after the table and never change the exit
+	// code or the --json payload: they are manual steps kpm cannot take, not
+	// diagnoses of the package (APP-TREE.md §8.1/§10.3).
+	for _, line := range a.appTreeAdvice(targets, deviceFw) {
+		fmt.Println()
+		fmt.Println(line)
+	}
 	return exitOK
+}
+
+// appTreeAdvice returns the advisory blocks for the app-tree packages among
+// targets: the KFMon launcher icon kpm cannot place (§8.1), and the
+// ExcludeSyncFolders edit kpm deliberately does not make (§10.3).
+//
+// Both are ADVISORY: never an error, never a non-zero exit, never part of the
+// JSON contract. The ExcludeSyncFolders note is emitted at most once per run and
+// only on firmware >= 4.17, where the edit actually does something.
+func (a *App) appTreeAdvice(targets []*config.Package, deviceFw string) []string {
+	var out []string
+	syncNoted := false
+	for _, p := range targets {
+		if !p.IsAppTree() {
+			continue
+		}
+		if line := kfmonAdvice(a.paths, p.ID); line != "" {
+			out = append(out, line)
+		}
+		if syncNoted || !registry.FirmwareAtLeast(deviceFw, 4, 17) {
+			continue
+		}
+		switch excludeSyncVerdict(a.paths) {
+		case syncExcludeWeak, syncExcludeAbsent:
+			out = append(out, excludeSyncAdvice(p.ID, deviceFw))
+			syncNoted = true
+		}
+	}
+	return out
 }
 
 // diagnose runs the signal chain for one package and returns its verdict.

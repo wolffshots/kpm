@@ -42,6 +42,13 @@ const SchemaVersion = 1
 // included in HashDef. Every one carries omitempty: a def that omits them must
 // encode to the same canonical bytes as before 0.10.0, or its hash changes and
 // it reads as spurious drift (§2.2 hazard 2).
+//
+// Install is the 0.11.0 app-tree field (APP-TREE.md §2), and it is the same
+// class: purely functional (it decides WHERE kpm writes files as root), so it is
+// projected and hashed. It is a POINTER with omitempty for the §2.2-hazard-2
+// reason above, which for this field is load-bearing rather than tidy — a value
+// struct would add an empty [install] table to every def's canonical encoding and
+// make all 14 shipped packages read as permanently drifted forever.
 type PackageDef struct {
 	Name        string             `toml:"name"`
 	Source      string             `toml:"source"`
@@ -54,6 +61,7 @@ type PackageDef struct {
 	NhName      string             `toml:"nh_name,omitempty"`      // DOCTOR.md
 	UpdateCheck string             `toml:"update_check,omitempty"` // INTEGRITY.md §3
 	Conflicts   []string           `toml:"conflicts,omitempty"`    // INTEGRITY.md §4
+	Install     *config.Install    `toml:"install,omitempty"`      // APP-TREE.md §2
 	Uninstall   config.Uninstall   `toml:"uninstall"`
 	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
 	// Checksums is last: TOML requires tables after scalars, and BurntSushi's
@@ -69,6 +77,16 @@ func (d *PackageDef) EffectiveUpdateCheck() string {
 		return config.UpdateCheckTag
 	}
 	return d.UpdateCheck
+}
+
+// EffectiveInstallMethod returns the def's install method with the default
+// ("tgz") applied, mirroring config.Package.EffectiveInstallMethod. It is read by
+// `search --json` for a package that has no local snapshot yet (APP-TREE.md §11.1).
+func (d *PackageDef) EffectiveInstallMethod() string {
+	if d.Install == nil || d.Install.Method == "" {
+		return config.MethodTgz
+	}
+	return d.Install.Method
 }
 
 // DroppedDef records a package def ParseManifest refused, with the reason. A
@@ -126,6 +144,13 @@ func ParseManifest(data []byte) (*Manifest, error) {
 			continue
 		}
 		if err := uninstall.ValidateConfigDecls(def.Configs); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		// [install] decides where kpm WRITES as root, so unlike [uninstall] it is
+		// validated at parse time as well as at use: a malformed block must never
+		// reach the extractor from a registry (APP-TREE.md §2.4).
+		if err := uninstall.ValidateInstallDecl(def.Install); err != nil {
 			drop(id, err.Error())
 			continue
 		}

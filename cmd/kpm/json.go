@@ -145,6 +145,25 @@ type jsonSearchPkg struct {
 	Conflicts       []string `json:"conflicts"`
 	ConflictsActive []string `json:"conflicts_active"`
 	Rolling         bool     `json:"rolling"`
+	// InstallMethod is "tgz" or "app-tree": how this package installs. The hook
+	// uses it to label the Install/Update action and to suppress reboot copy for a
+	// package that installs immediately (APP-TREE.md §11.1). It is a STRING and
+	// never null — there is always a method, and "" would be meaningless — so it
+	// deliberately does not use ptr(), unlike description/tested_fw.
+	InstallMethod string `json:"install_method"`
+}
+
+// installMethodFor returns the install method to report for a row: the LOCAL
+// packages.d snapshot when there is one (that is the def `update` will act on),
+// else the registry def, else the "tgz" default (APP-TREE.md §11.1).
+func installMethodFor(local *config.Package, e *registry.Entry) string {
+	if local != nil {
+		return local.EffectiveInstallMethod()
+	}
+	if e != nil {
+		return e.Def.EffectiveInstallMethod()
+	}
+	return config.MethodTgz
 }
 
 type jsonRegistryFreshness struct {
@@ -314,6 +333,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			Conflicts:       graph[id],
 			ConflictsActive: a.activeConflicts(id, graph, nil),
 			Rolling:         rolling,
+			InstallMethod:   installMethodFor(local, e),
 		})
 	}
 
@@ -526,6 +546,10 @@ type jsonStatusPkg struct {
 	// caches, mirroring the existing local-only rule for uninstallable and
 	// has_config (INTEGRITY.md §6.2). Never null.
 	ConflictsActive []string `json:"conflicts_active"`
+	// InstallMethod mirrors jsonSearchPkg's: "tgz" | "app-tree", a string, never
+	// null. statusJSON reads only the local snapshot, which is the right source
+	// for an installed package anyway (APP-TREE.md §11.1).
+	InstallMethod string `json:"install_method"`
 }
 
 type jsonStatusPayload struct {
@@ -577,6 +601,7 @@ func (a *App) statusJSON() int {
 			State:           st,
 			MissingFiles:    ps.MissingFiles,
 			ConflictsActive: a.activeConflicts(p.ID, graph, nil),
+			InstallMethod:   p.EffectiveInstallMethod(),
 		})
 	}
 	jsonLine(jsonStatusPayload{

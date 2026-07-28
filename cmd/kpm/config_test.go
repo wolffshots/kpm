@@ -8,6 +8,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/modconfig"
+	"kpm/internal/testenv"
 )
 
 // config_test.go covers `kpm config list|show|set` end to end against a fake
@@ -354,7 +355,7 @@ func TestConfigInitSymlinkParentRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(realDir, filepath.Join(linkParent, "nickelnote")); err != nil {
-		t.Skipf("symlink unsupported on this host: %v", err)
+		testenv.SkipUnsupported(t, "symlink unsupported on this host: %v", err)
 	}
 	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteTemplateConfig()})
 	if code := a.cmdConfig([]string{"init", "nickelnote", "Note content"}); code != exitError {
@@ -411,7 +412,7 @@ func TestConfigSetSymlinkParentRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(realDir, filepath.Join(linkParent, "nickelnote")); err != nil {
-		t.Skipf("symlink unsupported on this host: %v", err)
+		testenv.SkipUnsupported(t, "symlink unsupported on this host: %v", err)
 	}
 	registerConfigPkg(t, a, "nickelnote", []config.ModConfig{noteConfig()})
 	if code := a.cmdConfig([]string{"set", "nickelnote", "Note content", "--append", "--value", "x"}); code != exitError {

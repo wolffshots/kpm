@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"kpm/internal/apptree"
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
@@ -47,6 +48,10 @@ func (a *App) cmdUpdate(args []string) int {
 	all := fs.Bool("all", false, "update all registered packages")
 	reboot := fs.Bool("reboot", false, "reboot after staging (installs on boot)")
 	notify := fs.Bool("notify", false, "emit NickelDBus toasts")
+	// --force-launcher is on `update` only, never on `install`: it exists to
+	// re-assert a NickelMenu drop-in the user has since customised, which is a
+	// deliberate act, not something a first install should ever need (§8.2).
+	forceLauncher := fs.Bool("force-launcher", false, "rewrite an app-tree package's NickelMenu entry even if it exists")
 	flags, pos := splitArgs(args, nil)
 	flags, jsonMode := takeJSON(flags)
 	if err := fs.Parse(flags); err != nil {
@@ -142,8 +147,11 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitError
 	}
 
-	// 1+2. Resolve targets and download+verify each asset.
+	// 1+2. Resolve targets and download+verify each asset. App-tree packages go
+	// into their own slice: they never enter the merge, never set a staged
+	// version, and are installed outright further down (APP-TREE.md §6.1).
 	var targets []resolved
+	var appTargets []resolvedApp
 	failed := 0
 	// staging is the C1 in-run pending set: ids already resolved for staging in
 	// THIS run. ps.StagedVersion is only written after the whole loop, so without
@@ -152,7 +160,7 @@ func (a *App) cmdUpdate(args []string) int {
 	// defeated feature B entirely.
 	staging := map[string]bool{}
 	for _, p := range pkgs {
-		r, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
+		r, app, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
 		if err != nil {
 			failed++
 			failures = append(failures, jsonFailure{ID: p.ID, Error: err.Error()})
@@ -182,11 +190,61 @@ func (a *App) cmdUpdate(args []string) int {
 		if skip {
 			continue
 		}
+		if app != nil {
+			appTargets = append(appTargets, *app)
+			staging[app.pkg.ID] = true
+			continue
+		}
 		targets = append(targets, r)
 		staging[r.pkg.ID] = true
 	}
 
+	// App-tree installs run FIRST, before the merge: a tgz merge failure must not
+	// strand a package that was going to succeed, and the extractor's free-space
+	// check must run before ~40 MiB of merged tgz lands on the same partition
+	// (§6.4). Each package is recorded on success, one save at a time.
+	var appChanged []string
+	appPartial := false
+	if len(appTargets) > 0 {
+		var appFailures []jsonFailure
+		appChanged, appFailures, appPartial = a.installAppTrees(appTargets, *forceLauncher)
+		failed += len(appFailures)
+		failures = append(failures, appFailures...)
+		for _, w := range a.launcherWarnings(appTreePkgs(appTargets)) {
+			fmt.Println(w)
+			a.paths.Log("WARN", w)
+		}
+	}
+
 	if len(targets) == 0 {
+		// An app-tree-only run is COMPLETE here: nothing is staged, nothing needs
+		// a reboot, and the packages are already installed.
+		if len(appChanged) > 0 {
+			status := a.buildStatus(pkgs)
+			a.paths.WriteStatus(status + appTreeStatusNote(a.launcherWarnings(appTreePkgs(appTargets))))
+			fmt.Print(status)
+			n.toast(fmt.Sprintf("kpm: %d package(s) installed", len(appChanged)))
+			if !jsonMode {
+				fmt.Printf("%d package(s) installed\n", len(appChanged))
+			}
+			if jsonMode {
+				errMsg := ""
+				if failed > 0 {
+					errMsg = "some packages failed"
+				}
+				// staged/reboot_required describe THE RUN, and this run staged
+				// nothing — so the hook prompts for no reboot (§11.2).
+				emitMutationWithSkips(sortedUnion(appChanged, nil), failures, skips, false, false, errMsg)
+			}
+			// A stale file the prune could not remove leaves the package INSTALLED
+			// but not fully tidy: the new files are there, so it is partial, not a
+			// failure (§9.2).
+			if failed > 0 || appPartial {
+				return exitPartial
+			}
+			return exitOK
+		}
+
 		if err := a.state.Save(); err != nil {
 			if jsonMode {
 				jsonError("state: " + err.Error())
@@ -328,7 +386,7 @@ func (a *App) cmdUpdate(args []string) int {
 		os.Remove(r.cache) // clear merged cache file
 	}
 	status := a.buildStatus(pkgs)
-	a.paths.WriteStatus(status)
+	a.paths.WriteStatus(status + appTreeStatusNote(a.launcherWarnings(appTreePkgs(appTargets))))
 	fmt.Print(status)
 	n.toast(fmt.Sprintf("kpm: %d package(s) staged", len(targets)))
 
@@ -344,11 +402,18 @@ func (a *App) cmdUpdate(args []string) int {
 		if failed > 0 {
 			errMsg = "some packages failed"
 		}
-		emitMutationWithSkips(changed, failures, skips, true, true, errMsg)
+		// A mixed run's `changed` is the UNION, sorted; `staged`/`reboot_required`
+		// describe THE RUN, and this run did stage something, so both are true.
+		// The hook prompts once — correctly, for the tgz package that needs it;
+		// the app-tree package in the same array is already installed (§6.4).
+		emitMutationWithSkips(sortedUnion(changed, appChanged), failures, skips, true, true, errMsg)
 	}
 
 	// 5. Reboot. At least one package staged, so a reboot is worthwhile even if
-	// some others failed (F2).
+	// some others failed (F2). An app-tree-only run never gets here: it returned
+	// above, so `update koreader --reboot` — and the NickelMenu "Update all" entry,
+	// which always passes --reboot — completes without rebooting the device for no
+	// reason (§6.1, §6.5).
 	if *reboot {
 		a.paths.Log("REBOOT", fmt.Sprintf("staging %d package(s)", len(targets)))
 		n.toast("kpm: rebooting to install…")
@@ -366,9 +431,13 @@ func (a *App) cmdUpdate(args []string) int {
 		// In JSON mode this line would trail the §2.3 payload emitted above;
 		// BEGIN_JSON must stay the final stdout line (JSON-OUTPUT.md §1). The
 		// staged summary already went out via fmt.Print(status) pre-marker.
-		fmt.Printf("%d package(s) staged — reboot to install\n", len(targets))
+		if len(appChanged) > 0 {
+			fmt.Printf("%d package(s) installed, %d staged — reboot to install\n", len(appChanged), len(targets))
+		} else {
+			fmt.Printf("%d package(s) staged — reboot to install\n", len(targets))
+		}
 	}
-	if failed > 0 {
+	if failed > 0 || appPartial {
 		return exitPartial // mixed: some staged, some failed (F2)
 	}
 	return exitOK
@@ -457,10 +526,15 @@ func (a *App) selectPackages(ids []string, all bool) ([]*config.Package, error) 
 // refusal sentence, for the caller to grade as a skip or a failure (§4.3).
 // conflicts is the run's conflict graph; a nil graph simply blocks nothing.
 // staging is the C1 in-run pending set.
-func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]string, staging map[string]bool) (resolved, bool, string, error) {
+//
+// Exactly one of the first two results is populated: `app` is non-nil for an
+// app-tree package (APP-TREE.md §6.1), in which case the zip has been downloaded
+// and apptree.Compute has already validated every entry it contains — so a
+// hostile or broken archive fails the package HERE, before anything is written.
+func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]string, staging map[string]bool) (resolved, *resolvedApp, bool, string, error) {
 	// Unconfigured (e.g. self-update with empty source): skip silently (F7).
 	if !a.configured(p) {
-		return resolved{}, true, "", nil
+		return resolved{}, nil, true, "", nil
 	}
 	// Honor the def's min_kpm: an old kpm skips a package that needs a newer one
 	// (with a note) rather than staging it blindly (§9.8). install/sync gate too,
@@ -468,26 +542,26 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	if !registry.MinKpmSatisfied(version.Version, p.MinKpm) && version.Version != "dev" {
 		fmt.Printf("%s: requires kpm >= %s (running %s) — skipped; update kpm first\n", p.ID, p.MinKpm, version.Version)
 		a.paths.Log("WARN", fmt.Sprintf("%s  requires kpm >= %s — skipped", p.ID, p.MinKpm))
-		return resolved{}, true, "", nil
+		return resolved{}, nil, true, "", nil
 	}
 	// B: refuse to fetch software that would collide with something already on
 	// the device (INTEGRITY.md §4.3). Required here as well as at install because
 	// a def can be hand-`add`ed, or can predate the field. Cheap and offline, so
 	// it fails fast — before the network resolve.
 	if blockers := a.blockingConflicts(p.ID, conflicts, staging); len(blockers) > 0 {
-		return resolved{}, true, a.conflictRefusal(blockers), nil
+		return resolved{}, nil, true, a.conflictRefusal(blockers), nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	rel, err := a.resolveRelease(ctx, p)
 	cancel()
 	if err != nil {
-		return resolved{}, false, "", err
+		return resolved{}, nil, false, "", err
 	}
 	// A 2xx that decodes to an empty tag (a misconfigured proxy, or a non-forge
 	// endpoint on a hand-edited source) must not read as "up to date" via
 	// tagsEqual("", "") for a never-installed package — fail loudly (§11).
 	if rel.Tag == "" {
-		return resolved{}, false, "", fmt.Errorf("forge returned a release with an empty tag")
+		return resolved{}, nil, false, "", fmt.Errorf("forge returned a release with an empty tag")
 	}
 
 	ps := a.state.Get(p.ID)
@@ -516,7 +590,7 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	// actually about to happen.
 	asset, assetErr := rel.MatchAsset(p.Asset)
 	if assetErr != nil && errors.Is(assetErr, path.ErrBadPattern) {
-		return resolved{}, false, "", assetErr
+		return resolved{}, nil, false, "", assetErr
 	}
 	var matched *forge.Asset
 	if assetErr == nil {
@@ -537,20 +611,20 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	rebuilt := rebuildDetected(p, pin, ps.InstalledFingerprint, fp)
 
 	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt {
-		return resolved{}, true, "", nil // up to date
+		return resolved{}, nil, true, "", nil // up to date
 	}
 	// A pin freezes the staged payload too: without the pin term a pinned
 	// package whose release was rebuilt would fall through and re-download
 	// (rebuildDetected covers the installed comparison above).
 	if ps.StagedVersion != "" && tagsEqual(ps.StagedVersion, rel.Tag) &&
 		(pin != "" || !forge.FingerprintChanged(ps.StagedFingerprint, fp)) {
-		return resolved{}, true, "", nil // already staged, awaiting reboot
+		return resolved{}, nil, true, "", nil // already staged, awaiting reboot
 	}
 
 	// Past every short-circuit: this package IS about to be downloaded, so an
 	// unresolved asset is now fatal (see the MatchAsset comment above).
 	if assetErr != nil {
-		return resolved{}, false, "", assetErr
+		return resolved{}, nil, false, "", assetErr
 	}
 
 	// C: the checksum the registry attests for THIS release, "" when the tag is
@@ -573,9 +647,26 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 			"%s  checksums entry for tag %s is not a 64-character hex sha256 — downloading unverified", p.ID, rel.Tag))
 	}
 
+	// APP-TREE: the archive is a directory tree, not a tarball for rcS. Fetch it
+	// as a .zip (calling it a .tgz would be a lie the IsZip sniffer disagrees
+	// with) and PLAN it here, so a malformed or hostile archive fails the package
+	// exactly where a bad tgz fails today — before anything is written or staged.
+	if p.IsAppTree() {
+		cachePath, sum, err := a.fetchAsset(p.ID, rel.Tag, ".zip", wantSHA, declared, len(p.Checksums) > 0, asset)
+		if err != nil {
+			return resolved{}, nil, false, "", err
+		}
+		plan, perr := apptree.Compute(cachePath, p.Install.Root, p.Install.Dest)
+		if perr != nil {
+			os.Remove(cachePath)
+			return resolved{}, nil, false, "", fmt.Errorf("refusing %s: %w", p.ID, perr)
+		}
+		return resolved{}, &resolvedApp{pkg: p, tag: rel.Tag, cache: cachePath, sha256: sum, plan: plan, fingerprint: fp}, false, "", nil
+	}
+
 	cachePath, manifest, err := a.download(p.ID, rel.Tag, wantSHA, declared, len(p.Checksums) > 0, asset)
 	if err != nil {
-		return resolved{}, false, "", err
+		return resolved{}, nil, false, "", err
 	}
 	// No package other than kpm itself may write kpm's reserved paths (its
 	// install tree or NickelMenu drop-in). This makes the "kpm merged last"
@@ -585,10 +676,10 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	if p.ID != selfID {
 		if hit := firstReservedPath(manifest); hit != "" {
 			os.Remove(cachePath)
-			return resolved{}, false, "", fmt.Errorf("refusing %s: its archive writes to kpm's reserved path %q", p.ID, hit)
+			return resolved{}, nil, false, "", fmt.Errorf("refusing %s: its archive writes to kpm's reserved path %q", p.ID, hit)
 		}
 	}
-	return resolved{pkg: p, tag: rel.Tag, asset: asset, cache: cachePath, manifest: manifest, fingerprint: fp}, false, "", nil
+	return resolved{pkg: p, tag: rel.Tag, asset: asset, cache: cachePath, manifest: manifest, fingerprint: fp}, nil, false, "", nil
 }
 
 // firstReservedPath returns the first manifest member that lands in a path only
@@ -657,48 +748,8 @@ func fresh(lastCheck string) bool {
 // carries a table at all) only distinguish the unverified situations in the log
 // line; see verifiedSuffix.
 func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, []string, error) {
-	final := a.paths.CacheDir() + "/" + id + "-" + safeTag(tag) + ".tgz"
-	part := final + ".part"
-	f, err := os.Create(part)
+	final, _, err := a.fetchAsset(id, tag, ".tgz", wantSHA, declaredForTag, hasChecksums, asset)
 	if err != nil {
-		return "", nil, err
-	}
-	ctx := context.Background()
-	_, derr := a.client.Download(ctx, asset.DownloadURL, f)
-	if derr == nil {
-		derr = f.Sync() // durable before the rename to the final name (B3)
-	}
-	cerr := f.Close()
-	if derr != nil {
-		os.Remove(part)
-		return "", nil, fmt.Errorf("download: %w", derr)
-	}
-	if cerr != nil {
-		os.Remove(part)
-		return "", nil, cerr
-	}
-	// Checksum the asset EXACTLY as the forge publishes it — before the zip
-	// unwrap (which rewrites the file) and before the rename, so a mismatch never
-	// produces a file at the final cache name at all (INTEGRITY.md §5.4). There
-	// is no retry: Download's own retry loop already succeeded, so the bytes are
-	// what the server serves and re-fetching would produce the same result.
-	sum, _, err := sha256AndSize(part)
-	if err != nil {
-		os.Remove(part)
-		return "", nil, err
-	}
-	if wantSHA != "" && !strings.EqualFold(sum, wantSHA) {
-		os.Remove(part)
-		a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  MISMATCH want=%s got=%s", id, tag, wantSHA, sum))
-		return "", nil, fmt.Errorf(
-			"checksum mismatch for asset %q of %s %s: registry declares sha256 %s, downloaded %s — refusing to install",
-			asset.Name, id, tag, wantSHA, sum)
-	}
-	// Emitted on every successful download, verified or not: a curator with the
-	// package installed reads the hash straight out of `kpm log` (§5.5).
-	a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  sha256=%s%s", id, tag, sum, verifiedSuffix(wantSHA, declaredForTag, hasChecksums)))
-	if err := os.Rename(part, final); err != nil {
-		os.Remove(part) // don't leak the full-size .part on a rename failure (#9)
 		return "", nil, err
 	}
 	// The asset may be a zip wrapping the real KoboRoot.tgz (e.g. NickelClock's
@@ -729,6 +780,64 @@ func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums boo
 		a.paths.Log("WARN", fmt.Sprintf("%s  unusual path: %s", id, w))
 	}
 	return final, res.Manifest, nil
+}
+
+// fetchAsset streams the asset to cache/<id>-<tag><ext> (via .part), verifies the
+// registry-declared sha256 if there is one, and returns the cache path AND the
+// digest of the bytes that landed there. It is the half of download() that is
+// identical for both install shapes: an app-tree package needs the download and
+// the checksum but none of the tgz unwrap/verify, and it lands as .zip rather
+// than .tgz because that is what it is.
+//
+// The digest is returned even when the registry attests nothing: it is not an
+// attestation of WHAT was downloaded but a record of what this process wrote, so
+// a later reader of the cache file can tell it is still the same bytes.
+func (a *App) fetchAsset(id, tag, ext, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, string, error) {
+	final := a.paths.CacheDir() + "/" + id + "-" + safeTag(tag) + ext
+	part := final + ".part"
+	f, err := os.Create(part)
+	if err != nil {
+		return "", "", err
+	}
+	ctx := context.Background()
+	_, derr := a.client.Download(ctx, asset.DownloadURL, f)
+	if derr == nil {
+		derr = f.Sync() // durable before the rename to the final name (B3)
+	}
+	cerr := f.Close()
+	if derr != nil {
+		os.Remove(part)
+		return "", "", fmt.Errorf("download: %w", derr)
+	}
+	if cerr != nil {
+		os.Remove(part)
+		return "", "", cerr
+	}
+	// Checksum the asset EXACTLY as the forge publishes it — before the zip
+	// unwrap (which rewrites the file) and before the rename, so a mismatch never
+	// produces a file at the final cache name at all (INTEGRITY.md §5.4). There
+	// is no retry: Download's own retry loop already succeeded, so the bytes are
+	// what the server serves and re-fetching would produce the same result.
+	sum, _, err := sha256AndSize(part)
+	if err != nil {
+		os.Remove(part)
+		return "", "", err
+	}
+	if wantSHA != "" && !strings.EqualFold(sum, wantSHA) {
+		os.Remove(part)
+		a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  MISMATCH want=%s got=%s", id, tag, wantSHA, sum))
+		return "", "", fmt.Errorf(
+			"checksum mismatch for asset %q of %s %s: registry declares sha256 %s, downloaded %s — refusing to install",
+			asset.Name, id, tag, wantSHA, sum)
+	}
+	// Emitted on every successful download, verified or not: a curator with the
+	// package installed reads the hash straight out of `kpm log` (§5.5).
+	a.paths.Log("CHECKSUM", fmt.Sprintf("%s  %s  sha256=%s%s", id, tag, sum, verifiedSuffix(wantSHA, declaredForTag, hasChecksums)))
+	if err := os.Rename(part, final); err != nil {
+		os.Remove(part) // don't leak the full-size .part on a rename failure (#9)
+		return "", "", err
+	}
+	return final, sum, nil
 }
 
 // verifiedSuffix annotates the CHECKSUM log line with what the hash proves.
@@ -875,8 +984,12 @@ func sha256AndSize(path string) (string, int64, error) {
 }
 
 // cleanCache removes stale cache artifacts at the start of an update run: all
-// .part files (interrupted downloads) and any .tgz older than 7 days (F3).
-// It only touches *.part / *.tgz to stay registry-compatible (REGISTRY.md §7.5).
+// .part files (interrupted downloads) and any .tgz/.zip older than 7 days (F3).
+// It only touches *.part / *.tgz / *.zip to stay registry-compatible
+// (REGISTRY.md §7.5) — the registry caches use a registry-<name>.toml prefix.
+// .zip joined the sweep in 0.11.0: an app-tree asset is cached as
+// <id>-<tag>.zip, and a 42 MiB KOReader zip left behind forever would be the
+// largest thing in .adds/kpm (APP-TREE.md §6.1).
 func (a *App) cleanCache() {
 	entries, err := os.ReadDir(a.paths.CacheDir())
 	if err != nil {
@@ -892,7 +1005,7 @@ func (a *App) cleanCache() {
 		switch {
 		case strings.HasSuffix(name, ".part"):
 			os.Remove(full)
-		case strings.HasSuffix(name, ".tgz"):
+		case strings.HasSuffix(name, ".tgz"), strings.HasSuffix(name, ".zip"):
 			if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
 				os.Remove(full)
 			}

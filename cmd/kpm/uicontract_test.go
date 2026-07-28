@@ -231,6 +231,11 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantArray(t, pkg, "conflicts")
 	wantArray(t, pkg, "conflicts_active")
 	wantBool(t, pkg, "rolling")
+	// APP-TREE.md §11.1: a STRING, never null, from a closed set. The hook labels
+	// the action with it and suppresses reboot copy for "app-tree".
+	if m := wantStr(t, pkg, "install_method"); m != "tgz" && m != "app-tree" {
+		t.Fatalf("install_method = %q, want \"tgz\" or \"app-tree\"", m)
+	}
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")
 }
@@ -1190,5 +1195,159 @@ func TestUIContractRemoveUnregisteredIsHardError(t *testing.T) {
 	// With no payload to read a sentence out of, stderr IS the hook's dialog text.
 	if strings.TrimSpace(stderr) == "" {
 		t.Error("a failing remove must explain itself on stderr — the hook has no payload to fall back on")
+	}
+}
+
+// ---- 16. app-tree: the reboot truth table (APP-TREE.md §11.2) ------------
+//
+// jsonMutation gains NOTHING for app-tree: `staged` and `reboot_required`
+// already carry exactly the right semantics, and the hook already derives its
+// prompt from `reboot_required || staged` (browsedialog.cc:201,
+// detaildialog.cc:322). These blocks extend the pinned truth table rather than
+// altering it.
+
+// update <id> on an app-tree package: BOTH false, so no reboot prompt fires.
+func TestUIContractUpdateAppTree(t *testing.T) {
+	z := zipAsset(t, map[string]string{"r/a": "1"})
+	a, _, host := appTreeApp(t, map[string][]byte{"koreader": z})
+	appTreePkg(t, a, host, "koreader", "r", "/mnt/onboard/.adds/koreader", nil)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUpdate([]string{"koreader", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("update --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	if wantBool(t, m, "staged") != false || wantBool(t, m, "reboot_required") != false {
+		t.Errorf("an app-tree update stages nothing and needs no reboot: %v", m)
+	}
+	changed := wantArray(t, m, "changed")
+	if len(changed) != 1 || changed[0] != "koreader" {
+		t.Errorf("changed = %v, want [koreader]", changed)
+	}
+	if len(wantArray(t, m, "failed")) != 0 {
+		t.Errorf("failed = %v", m["failed"])
+	}
+}
+
+// update --all with one package of each shape: the run DID stage something, so
+// both bools are true and the hook prompts once — correctly, for the tgz package
+// that genuinely needs it. `changed` is the sorted union.
+func TestUIContractUpdateMixed(t *testing.T) {
+	z := zipAsset(t, map[string]string{"r/a": "1"})
+	a, _, host := appTreeApp(t, map[string][]byte{"koreader": z})
+	appTreePkg(t, a, host, "koreader", "r", "/mnt/onboard/.adds/koreader", nil)
+	fakeForgePkg(t, a, host, "nickelclock", "")
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUpdate([]string{"--all", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("mixed update --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	if wantBool(t, m, "staged") != true || wantBool(t, m, "reboot_required") != true {
+		t.Errorf("a mixed run staged something, so both bools are true: %v", m)
+	}
+	changed := wantArray(t, m, "changed")
+	if len(changed) != 2 || changed[0] != "koreader" || changed[1] != "nickelclock" {
+		t.Errorf("changed = %v, want the sorted union [koreader nickelclock]", changed)
+	}
+}
+
+// uninstall of an app-tree package removes its files NOW, so neither bool is set.
+func TestUIContractUninstallAppTree(t *testing.T) {
+	z := zipAsset(t, map[string]string{"r/a": "1"})
+	a, _, host := appTreeApp(t, map[string][]byte{"koreader": z})
+	appTreePkg(t, a, host, "koreader", "r", "/mnt/onboard/.adds/koreader", nil)
+	if code := a.cmdUpdate([]string{"koreader"}); code != exitOK {
+		t.Fatalf("setup update exit = %d", code)
+	}
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdUninstall([]string{"koreader", "--yes", "--json"}) })
+	if code != exitOK {
+		t.Fatalf("uninstall --json exit = %d, want %d", code, exitOK)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	if wantBool(t, m, "staged") != false || wantBool(t, m, "reboot_required") != false {
+		t.Errorf("an app-tree uninstall is immediate: %v", m)
+	}
+}
+
+// search --json carries install_method for every row: a string, never null,
+// "tgz" for a package with no [install] block.
+func TestUIContractSearchInstallMethod(t *testing.T) {
+	a := newTestApp(t)
+	setVersion(t, "0.11.0")
+	seedRegistry(t, a, "main", `schema_version = 1
+
+[packages.nickelclock]
+name = "NickelClock"
+source = "github.com/shermp/NickelClock"
+forge = "github"
+asset = "KoboRoot.tgz"
+
+[packages.koreader]
+name = "KOReader"
+source = "github.com/koreader/koreader"
+forge = "github"
+asset = "koreader-kobo-*.zip"
+min_kpm = "0.11.0"
+
+  [packages.koreader.install]
+  method = "app-tree"
+  root = "koreader"
+  dest = "/mnt/onboard/.adds/koreader"
+`)
+	// plato has a LOCAL packages.d def and no registry entry at all: the local
+	// snapshot is what `update` acts on, so it is the authority for this field.
+	appTreePkg(t, a, "example.com", "plato", "", "/mnt/onboard/.adds/plato", nil)
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdSearch([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("search --json exit = %d", code)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	got := map[string]string{}
+	for _, raw := range wantArray(t, m, "packages") {
+		pkg := raw.(map[string]any)
+		assertSearchPkg(t, pkg)
+		got[pkg["id"].(string)] = pkg["install_method"].(string)
+	}
+	if got["koreader"] != "app-tree" {
+		t.Errorf("koreader install_method = %q, want app-tree (from the registry def)", got["koreader"])
+	}
+	if got["plato"] != "app-tree" {
+		t.Errorf("plato install_method = %q, want app-tree (from the LOCAL snapshot)", got["plato"])
+	}
+	if got["nickelclock"] != "tgz" {
+		t.Errorf("nickelclock install_method = %q, want the tgz default", got["nickelclock"])
+	}
+}
+
+// status --json carries the identical field, from the LOCAL snapshot.
+func TestUIContractStatusInstallMethod(t *testing.T) {
+	a, _ := newUninstallApp(t)
+	setVersion(t, "0.11.0")
+	appTreePkg(t, a, "example.com", "koreader", "r", "/mnt/onboard/.adds/koreader", nil)
+	fakeForgePkg(t, a, "example.com", "nickelclock", "v1")
+
+	var code int
+	out := captureStdout(t, func() { code = a.cmdStatus([]string{"--json"}) })
+	if code != exitOK {
+		t.Fatalf("status --json exit = %d", code)
+	}
+	m := decodeJSON(t, lastJSON(t, out))
+	got := map[string]string{}
+	for _, raw := range wantArray(t, m, "packages") {
+		pkg := raw.(map[string]any)
+		if v := present(t, pkg, "install_method"); v == nil {
+			t.Fatalf("install_method must never be null: %v", pkg)
+		}
+		got[wantStr(t, pkg, "id")] = wantStr(t, pkg, "install_method")
+	}
+	if got["koreader"] != "app-tree" || got["nickelclock"] != "tgz" {
+		t.Errorf("install_method = %v, want koreader:app-tree nickelclock:tgz", got)
 	}
 }

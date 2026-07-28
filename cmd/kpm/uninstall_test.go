@@ -10,6 +10,7 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/state"
+	"kpm/internal/testenv"
 	"kpm/internal/uninstall"
 )
 
@@ -205,7 +206,7 @@ func TestUninstallExecSkipRetainsRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(real, filepath.Join(pkgDir, "link")); err != nil {
-		t.Skipf("symlink creation unsupported on this host: %v", err)
+		testenv.SkipUnsupported(t, "symlink creation unsupported on this host: %v", err)
 	}
 	registerPkg(t, a, "pkg", config.Uninstall{}, []string{"opt/pkg/link/secret"})
 

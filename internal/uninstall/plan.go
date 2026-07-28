@@ -67,8 +67,13 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 		allowExtra = append(allowExtra, abs)
 	}
 
-	// No-manifest fallback / refusal (manifest method only, §2).
-	if method == config.MethodManifest && len(manifest) == 0 && len(cfg.ExtraPaths) == 0 {
+	// No-manifest fallback / refusal (manifest method only, §2). purge_paths
+	// counts as a recipe exactly when --purge is in force: an app-tree install
+	// that died mid-extraction (ENOSPC, USB pulled) can leave 80 MiB on disk with
+	// nothing recorded, and refusing there left the user no way to clean up
+	// through kpm at all — although the shipped def says precisely how.
+	if method == config.MethodManifest && len(manifest) == 0 && len(cfg.ExtraPaths) == 0 &&
+		!(purge && len(cfg.PurgePaths) > 0) {
 		return Plan{}, fmt.Errorf("no manifest recorded and no [uninstall].extra_paths configured; " +
 			"update this package through kpm once, or set [uninstall].extra_paths")
 	}
@@ -122,7 +127,25 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 		}
 	}
 
-	seen := map[string]bool{}
+	// The dedupe key carries `recursive`, and folds case on the FAT32 partition.
+	//
+	// Keying on the path ALONE silently disarmed recursion: manifest candidates
+	// are visited first, so any purge_paths/extra_paths entry whose base coincided
+	// with a manifest member — and an app-tree manifest records every directory it
+	// creates — was dropped as "already seen", and its /** was lost with it. The
+	// result was `--purge` reporting success while leaving the whole subtree on
+	// disk. A recursive and a non-recursive delete of the same path are different
+	// actions, so they are different keys; the non-recursive one runs first and is
+	// a no-op on a directory, which is what makes the pair safe.
+	//
+	// Folding matters for the same reason every other comparison here folds (C2):
+	// two spellings of one FAT32 file are one file, and deduping case-sensitively
+	// produced two deletion actions for it — with keep_paths, one kept and one not.
+	type seenKey struct {
+		path      string
+		recursive bool
+	}
+	seen := map[seenKey]bool{}
 	for _, c := range cands {
 		abs, err := cleanDeviceAbs(c.raw)
 		if err != nil {
@@ -136,10 +159,11 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 			plan.Skipped = append(plan.Skipped, Skipped{c.raw, "malformed"})
 			continue
 		}
-		if seen[abs] {
+		key := seenKey{foldPath(abs), c.recursive}
+		if seen[key] {
 			continue
 		}
-		seen[abs] = true
+		seen[key] = true
 		if isKept(abs, keeps) {
 			plan.Skipped = append(plan.Skipped, Skipped{abs, "kept"})
 			continue

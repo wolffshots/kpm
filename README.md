@@ -19,10 +19,15 @@ telnet/SSH.
 ## How it works
 
 Kobo's boot script extracts `/mnt/onboard/.kobo/KoboRoot.tgz` over the root
-filesystem once per reboot, then deletes it. kpm never installs files itself: it
-downloads each package's `KoboRoot.tgz`, **merges all pending packages into one**
-staged archive, and reboots. On the next run it notices the staged archive is
-gone and promotes those packages from *staged* to *installed*.
+filesystem once per reboot, then deletes it. For most packages kpm never installs
+files itself: it downloads each package's `KoboRoot.tgz`, **merges all pending
+packages into one** staged archive, and reboots. On the next run it notices the
+staged archive is gone and promotes those packages from *staged* to *installed*.
+
+A few packages — KOReader and Plato — do not ship a `KoboRoot.tgz` at all. They
+ship a plain directory tree in a release zip that lives entirely under
+`/mnt/onboard/.adds/<name>/`. kpm extracts those itself, **immediately and with
+no reboot**. See [App-tree installs](#app-tree-installs).
 
 Everything kpm owns lives under `/mnt/onboard/.adds/kpm/` so you can inspect or
 repair it over USB:
@@ -34,8 +39,8 @@ repair it over USB:
   state.json           installed/staged versions, manifests, last check
   kpm.log              append-only history
   status               last summary (shown by the NickelMenu Status dialog)
-  cache/               package downloads (*.tgz/*.part, swept selectively) and
-                       registry caches (registry-<name>.toml, never swept)
+  cache/               package downloads (*.tgz/*.zip/*.part, swept selectively)
+                       and registry caches (registry-<name>.toml, never swept)
 /mnt/onboard/.adds/nm/kpm   NickelMenu drop-in
 ```
 
@@ -541,6 +546,105 @@ don't take the lock and never write state.
 `KPM_ROOT` overrides the `/mnt/onboard` root (used by tests and for dev runs off
 the device). `KPM_SYSROOT` overrides the rootfs `/` so `uninstall` deletions land
 inside a sandbox during tests.
+
+## App-tree installs
+
+Most packages install by staging a `KoboRoot.tgz` for the firmware to unpack on
+the next reboot. **KOReader** and **Plato** do not: their releases are a plain
+directory tree in a zip that lives under `/mnt/onboard/.adds/<name>/`, with no
+root files and nothing for the firmware to do. kpm extracts those itself.
+
+The practical differences:
+
+| | tgz packages | app-tree packages |
+|---|---|---|
+| When it takes effect | after a reboot | immediately |
+| `kpm update` reports | `staged — reboot to install` | `installed` |
+| `--reboot` | reboots | does nothing |
+| `kpm uninstall` | removes files on the next reboot | removes them now |
+| `install_method` in `--json` | `"tgz"` | `"app-tree"` |
+
+A def opts in with an `[install]` table:
+
+```toml
+[packages.koreader.install]
+method = "app-tree"
+root   = "koreader"                       # the prefix inside the zip to extract
+dest   = "/mnt/onboard/.adds/koreader"    # where its contents land
+
+  [packages.koreader.install.launcher]    # optional NickelMenu entry
+  nm_file  = "/mnt/onboard/.adds/nm/koreader"
+  nm_entry = "menu_item:main:KOReader:cmd_spawn:quiet:exec /mnt/onboard/.adds/koreader/koreader.sh"
+```
+
+`dest` must be inside kpm's writable allowlist (`.adds`/`.kobo` on the user
+partition, `/usr/local`, `/opt` on the rootfs) and must be a package-specific
+directory, never a shared root like `.adds` itself. Every entry in the zip is
+validated **before a single byte is written**: absolute paths, `..` traversal,
+backslashes, control characters, symlinks, device nodes and setuid entries are all
+refused, and each destination is re-checked against the same path policy
+`kpm uninstall` uses immediately before the write that uses it. Any violation
+fails the whole install — a half-extracted app is worse than none.
+
+Because these packages install as soon as `kpm update` finishes, a run that only
+updates app-tree packages never asks you to reboot, and the "Update all"
+NickelMenu entry completes without one.
+
+### What survives an update
+
+**kpm deletes only files it previously installed.** Everything else inside
+`.adds/koreader` — your settings, statistics, annotations, downloaded plugins,
+Plato's `Settings.toml` and `dictionaries/` — is user data by definition and is
+never touched. kpm knows exactly what it installed because it records a manifest
+every time, so this needs no configuration and cannot be got wrong by a curator.
+
+A plain `kpm uninstall koreader` therefore removes the app and leaves your data;
+`--purge` removes the whole directory.
+
+### Launching them
+
+kpm writes the NickelMenu entry the def declares, and **never overwrites one that
+already exists** — if you have customised your entry, it is left alone and kpm
+says so. `kpm update <id> --force-launcher` rewrites it.
+
+If NickelMenu is not installed, kpm writes the drop-in anyway (it is inert until
+NickelMenu arrives) and warns:
+
+```
+koreader: NickelMenu not detected — install it ("kpm install nickelmenu") to get a launch entry
+```
+
+If you use **KFMon** instead, its shipped config already points at
+`/mnt/onboard/.adds/koreader/koreader.sh` and `/mnt/onboard/.adds/plato/plato.sh`,
+so a kpm install/update keeps working. The one thing kpm cannot do is place the
+launcher *icon*: KFMon watches `/mnt/onboard/koreader.png` and
+`/mnt/onboard/icons/plato.png`, which sit at the root of the user partition —
+outside kpm's writable allowlist. Copy them from the release zip over USB.
+`kpm doctor` tells you if that step is missing.
+
+### Firmware 4.17+ and your library
+
+From firmware 4.17 Nickel indexes files inside hidden folders, so an app tree
+under `.adds/` can show up as junk "books" in your library. The fix is one line in
+`/mnt/onboard/.kobo/Kobo/Kobo eReader.conf`:
+
+```
+[FeatureSettings]
+ExcludeSyncFolders=(\\.(?!kobo|adobe).+|([^.][^/]*/)+\\..+)
+```
+
+**kpm deliberately does not make this edit.** Nickel owns that file, rewrites it,
+and reverts changes made while it is running — and kpm's own UI runs *inside*
+Nickel, so an edit from there would often appear to work and then silently revert.
+Edit it over USB with the Kobo idle. `kpm doctor` detects whether the line is
+present and prints exactly what to add if it is not.
+
+### Firmware 5.x
+
+KOReader publishes a separate `koreader-kobov5-*.zip` for firmware 5.x. The
+registry entry tracks the 4.x build; on a firmware 5 device kpm shows the
+"untested on your firmware" note at install time. The failure mode if you ignore
+it is an app that does not start — not a brick, and uninstall still works.
 
 ## Uninstalling packages
 

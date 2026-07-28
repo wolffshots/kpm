@@ -218,3 +218,38 @@ func TestReadStatusFallsBackToLegacy(t *testing.T) {
 		t.Errorf("ReadStatus must not remove the legacy file: %v", err)
 	}
 }
+
+// WriteReaderAtomic's limit is a HARD STOP with a clear error, never a silent
+// truncation: it is the bound that actually holds when an app-tree zip's declared
+// sizes are lies (APP-TREE.md §5.2 step 3).
+func TestWriteReaderAtomicLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+
+	// Under the limit: written, and no temp file survives.
+	if err := WriteReaderAtomic(path, strings.NewReader("hello"), 16); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "hello" {
+		t.Errorf("content = %q", b)
+	}
+	// Exactly the limit is fine (the limiter reads limit+1 to detect overflow).
+	if err := WriteReaderAtomic(path, strings.NewReader("0123456789abcdef"), 16); err != nil {
+		t.Errorf("a stream exactly at the limit must be accepted: %v", err)
+	}
+
+	// Over the limit: error, previous bytes intact, nothing left behind.
+	err := WriteReaderAtomic(path, strings.NewReader(strings.Repeat("z", 64)), 16)
+	if err == nil {
+		t.Fatal("a stream over the limit must error, never truncate silently")
+	}
+	if b, _ := os.ReadFile(path); string(b) != "0123456789abcdef" {
+		t.Errorf("the previous content must survive a rejected write, got %q", b)
+	}
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".kpm-") {
+			t.Errorf("temp file %s survived the rejected write", e.Name())
+		}
+	}
+}

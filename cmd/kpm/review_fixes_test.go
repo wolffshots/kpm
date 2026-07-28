@@ -86,7 +86,7 @@ func TestResolveEmptyTagIsError(t *testing.T) {
 	if _, err := a.resolveCheckRelease(p); err == nil {
 		t.Error("resolveCheckRelease should error on an empty tag")
 	}
-	if _, _, _, err := a.resolveAndDownload(p, nil, nil); err == nil {
+	if _, _, _, _, err := a.resolveAndDownload(p, nil, nil); err == nil {
 		t.Error("resolveAndDownload should error on an empty tag")
 	}
 }

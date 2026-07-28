@@ -127,6 +127,177 @@ func (u Uninstall) Validate() error {
 	return nil
 }
 
+// Install methods (APP-TREE.md §2). The default is MethodTgz: a package stages a
+// KoboRoot.tgz that rcS unpacks at the next boot, which is every def written
+// before 0.11.0.
+const (
+	MethodTgz     = "tgz"      // default: stage a KoboRoot.tgz for rcS
+	MethodAppTree = "app-tree" // kpm extracts a directory tree from the release zip
+)
+
+// MaxNmEntry caps a launcher drop-in body (4 KiB). NickelMenu configs are a
+// handful of short lines; this is a hostile-registry bound, not a real limit.
+const MaxNmEntry = 4 * 1024
+
+// Launcher is the [install.launcher] sub-table: the NickelMenu drop-in kpm
+// writes so an app-tree package is launchable after install (APP-TREE.md §8).
+type Launcher struct {
+	NmFile  string `toml:"nm_file"`  // device-absolute; must be under /mnt/onboard/.adds/nm
+	NmEntry string `toml:"nm_entry"` // literal drop-in body
+}
+
+// Install is the per-package [install] table (APP-TREE.md §2). A nil *Install
+// means the default tgz shape — every def written before 0.11.0.
+//
+// The POINTER is mandatory, not stylistic. Uninstall is a value field with no
+// omitempty, so every def already encodes an (empty) [uninstall] table. A value
+// Install would add an empty [install] table to the canonical encoding of EVERY
+// def and change EVERY synced_def_sha256 — the false-drift bug fixed in 0.5.0,
+// which would make sync skip every package forever. registry.HashDef's
+// TestHashDefNilInstallUnchanged pins that a nil *Install emits nothing.
+type Install struct {
+	Method   string    `toml:"method"`             // "tgz" (default) | "app-tree"
+	Root     string    `toml:"root,omitempty"`     // zip prefix to extract ("" = whole zip)
+	Dest     string    `toml:"dest"`               // device-absolute dir Root lands in
+	Launcher *Launcher `toml:"launcher,omitempty"` // optional NickelMenu registration
+}
+
+// Clone deep-copies an Install (including its Launcher), so a registry def and
+// the local packages.d snapshot never share the pointer — a mutation on one
+// would silently alter the other's hash input (APP-TREE.md §12.2).
+func (i *Install) Clone() *Install {
+	if i == nil {
+		return nil
+	}
+	out := *i
+	if i.Launcher != nil {
+		l := *i.Launcher
+		out.Launcher = &l
+	}
+	return &out
+}
+
+// IsZero reports whether an Install carries no information at all, so a registry
+// that writes a bare `[install]` table normalizes to nil and hashes identically
+// to omitting it (APP-TREE.md §12.1).
+func (i *Install) IsZero() bool {
+	return i == nil || (i.Method == "" && i.Root == "" && i.Dest == "" && i.Launcher == nil)
+}
+
+// Validate checks the method enum, the root shape, and the launcher body. The
+// PATH POLICY for dest and nm_file lives in internal/uninstall (it needs the
+// denylist), exactly as Uninstall.Validate defers allow_paths — so the end-to-end
+// check every call site uses is uninstall.ValidateInstallDecl, never this alone.
+func (i Install) Validate() error {
+	method := i.Method
+	if method == "" {
+		method = MethodTgz
+	}
+	switch method {
+	case MethodTgz, MethodAppTree:
+	default:
+		return fmt.Errorf("invalid install method %q (want %q or %q)", i.Method, MethodTgz, MethodAppTree)
+	}
+	if method == MethodAppTree && strings.TrimSpace(i.Dest) == "" {
+		return fmt.Errorf("install method %q requires dest", MethodAppTree)
+	}
+	if err := ValidateInstallRoot(i.Root); err != nil {
+		return err
+	}
+	return i.Launcher.validate()
+}
+
+// ValidateInstallRoot checks the zip-prefix shape: a slash-separated relative
+// path with no ".." segment and no trailing "/". "" (the whole zip) is valid.
+// Backslash is rejected here as it is in the extractor: on the Linux target it is
+// a filename byte, on a Windows host a separator, and a prefix that means two
+// things is a prefix kpm must not accept (APP-TREE.md §5.1 rule 1).
+//
+// Exported so internal/apptree re-checks the root it is handed immediately before
+// using it, against this ONE implementation. The local packages.d snapshot is
+// user-editable, so the parse-time check is not the last word.
+func ValidateInstallRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+	bad := strings.HasPrefix(root, "/") || strings.HasSuffix(root, "/") ||
+		strings.Contains(root, "\\") || strings.TrimSpace(root) != root
+	if !bad {
+		for _, seg := range strings.Split(root, "/") {
+			if seg == ".." || seg == "" {
+				bad = true
+				break
+			}
+		}
+	}
+	if bad {
+		return fmt.Errorf(`install root %q must be a relative path without ".." or a trailing "/"`, root)
+	}
+	return nil
+}
+
+// validate checks the launcher body: both fields required, a bounded, non-binary
+// drop-in, and the PLAN.md §8 rule that a menu_item label must not contain ':'.
+// A nil launcher (the common case) is valid.
+func (l *Launcher) validate() error {
+	if l == nil {
+		return nil
+	}
+	if strings.TrimSpace(l.NmFile) == "" || strings.TrimSpace(l.NmEntry) == "" {
+		return fmt.Errorf("install launcher requires nm_file and nm_entry")
+	}
+	if len(l.NmEntry) > MaxNmEntry {
+		return fmt.Errorf("install launcher nm_entry is %d bytes, over the %d-byte limit", len(l.NmEntry), MaxNmEntry)
+	}
+	if strings.IndexByte(l.NmEntry, 0) >= 0 {
+		return fmt.Errorf("install launcher nm_entry contains a NUL byte (binary), refusing")
+	}
+	for n, raw := range strings.Split(strings.ReplaceAll(l.NmEntry, "\r\n", "\n"), "\n") {
+		if err := checkMenuItemLine(strings.TrimSpace(raw), n+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// nmActionRE matches a NickelMenu action identifier: the cmd_/dbg_/nickel_
+// families plus the three standalone actions (power, skip, kfmon, and kfmon's
+// kfmon_id variant, which the families already cover).
+//
+// It is a shape rather than an enumeration so a NickelMenu release that adds an
+// action to an existing family does not invalidate a valid registry entry — but
+// the shape is anchored to the family PREFIX, because a bare [a-z][a-z0-9_]*
+// was not narrow enough to do the job it exists for. This check detects a ':' in
+// the label by its consequence: the label's tail lands in the action slot. With
+// the loose shape, `menu_item:main:ko:reader:cmd_spawn:exec /x` passed — "reader"
+// is a plausible identifier — and NickelMenu, which reads exactly the same field
+// as the action, then rejected the user's WHOLE menu config, every other
+// package's entries included.
+var nmActionRE = regexp.MustCompile(`^(cmd|dbg|nickel)_[a-z0-9_]+$|^(power|skip|kfmon)$`)
+
+// checkMenuItemLine enforces PLAN.md §8 on one line: NickelMenu splits a
+// menu_item into menu_item:location:label:action:arg, so a ':' inside the LABEL
+// silently shifts every later field and breaks the whole config (res/nm-config
+// carries the same warning; build/package.go asserts it for kpm's own drop-in).
+//
+// A colon in the label is not directly observable — ':' IS the separator — so it
+// is detected by its consequence: the field that lands in the action position
+// stops looking like an action identifier. That check is exact for the failure
+// mode ("KOReader: the reader" puts " the reader" in the action slot) and stays
+// forward-compatible with actions NickelMenu has not shipped yet. A line with
+// fewer than five fields cannot parse as a menu_item at all and is refused the
+// same way. Non-menu_item lines (comments, chain_success continuations) pass.
+func checkMenuItemLine(line string, n int) error {
+	if !strings.HasPrefix(line, "menu_item") {
+		return nil
+	}
+	fields := strings.SplitN(line, ":", 5)
+	if len(fields) == 5 && nmActionRE.MatchString(strings.TrimSpace(fields[3])) {
+		return nil
+	}
+	return fmt.Errorf("install launcher nm_entry line %d: a menu_item label must not contain ':' (NickelMenu field separator)", n)
+}
+
 // Config formats (CONFIG.md §2). Only ini and text are editable in this
 // release; env/keyvalue are reserved for a future additive extension and are
 // deliberately rejected by Validate for now (forward-compat: bump min_kpm when a
@@ -276,12 +447,35 @@ type Package struct {
 	// absent tag is simply unverified.
 	Checksums map[string]string `toml:"checksums,omitempty"`
 
+	// Install is the optional [install] table (APP-TREE.md §2): how kpm puts this
+	// package on the device. NIL means the default tgz shape. The pointer +
+	// omitempty is load-bearing — see the type's doc comment.
+	Install *Install `toml:"install,omitempty"`
+
 	Uninstall Uninstall   `toml:"uninstall"`
 	Configs   []ModConfig `toml:"configs,omitempty"` // editable config declarations (CONFIG.md §2)
 
 	// ID is the filename stem; not serialized into the TOML body.
 	ID string `toml:"-"`
 }
+
+// EffectiveInstallMethod returns the package's install method with the default
+// applied. A nil *Install (every def written before 0.11.0) is MethodTgz. The
+// default is applied HERE and nowhere else: materializing it into a stored def
+// would make every package that omits the table hash differently from its
+// registry entry and read as permanently drifted (APP-TREE.md §2.3).
+func (p Package) EffectiveInstallMethod() string {
+	if p.Install == nil || p.Install.Method == "" {
+		return MethodTgz
+	}
+	return p.Install.Method
+}
+
+// IsAppTree reports whether this package installs by tree extraction rather than
+// by staging a KoboRoot.tgz. It is the single predicate every call site in
+// cmd_update.go / statusreport.go / json.go branches on — a second spelling is
+// how the two shapes drift apart (APP-TREE.md §2.3).
+func (p Package) IsAppTree() bool { return p.EffectiveInstallMethod() == MethodAppTree }
 
 // EffectiveUpdateCheck returns UpdateCheck with the default ("tag") applied.
 // The default is applied HERE and nowhere else: materializing it into a stored
@@ -503,6 +697,10 @@ func Save(path string, p *Package) error {
 	setOptionalSlice(m, "conflicts", p.Conflicts)
 	setOptionalMap(m, "checksums", p.Checksums)
 
+	// Merge the [install] table the same way, so a hand-added package never grows
+	// an empty [install] and a future unknown key inside it survives (§12.2).
+	setInstall(m, p.Install, false)
+
 	// Merge the [uninstall] table: overlay only non-zero known fields onto any
 	// existing (possibly unknown-key-bearing) table; never inject empty keys.
 	uni := asMap(m["uninstall"])
@@ -524,9 +722,16 @@ func Save(path string, p *Package) error {
 // authoritatively: any of them absent from the written Package is deleted from
 // the on-disk file. Every other key (unknown top-level tables/fields, unknown
 // [uninstall] keys) is preserved (A1).
+//
+// [install] is treated like [uninstall], NOT like a top-level key: its known
+// sub-keys are cleared and re-overlaid so a field the registry dropped disappears
+// locally, while an unknown key inside the table survives (APP-TREE.md §12.2).
+// Deleting "install" wholesale via knownTopKeys would have destroyed those
+// unknown keys.
 var (
 	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
+	knownInstallKeys   = []string{"method", "root", "dest", "launcher"}
 )
 
 // SaveReplace writes p with replace-semantics: unknown top-level keys and unknown
@@ -557,6 +762,10 @@ func SaveReplace(path string, p *Package) error {
 	setOptional(m, "update_check", p.UpdateCheck)
 	setOptionalSlice(m, "conflicts", p.Conflicts)
 	setOptionalMap(m, "checksums", p.Checksums)
+
+	// Clear known [install] keys, overlay: an [install] block a registry dropped
+	// disappears locally, unknown keys inside it survive (§12.2).
+	setInstall(m, p.Install, true)
 
 	// Clear known [uninstall] keys (unknown keys in the table survive), overlay.
 	uni := asMap(m["uninstall"])
@@ -691,6 +900,59 @@ func overlayUninstall(dst map[string]any, u Uninstall) {
 	}
 	setStr("run_before", u.RunBefore)
 	setStr("run_after", u.RunAfter)
+}
+
+// setInstall writes the [install] table into m: it takes the existing (possibly
+// unknown-key-bearing) table, optionally clears the known keys first (replace
+// semantics — SaveReplace), overlays i's non-zero fields, and writes the result
+// back or removes the key when nothing is left. A nil *Install therefore removes
+// the block under replace semantics and leaves it untouched under merge, exactly
+// mirroring [uninstall] (APP-TREE.md §12.2).
+func setInstall(m map[string]any, i *Install, replace bool) {
+	dst := asMap(m["install"])
+	if replace {
+		for _, k := range knownInstallKeys {
+			delete(dst, k)
+		}
+	}
+	overlayInstall(dst, i)
+	if len(dst) > 0 {
+		m["install"] = dst
+	} else {
+		delete(m, "install")
+	}
+}
+
+// overlayInstall writes only the non-zero fields of i into dst, so a package with
+// no launcher never emits an empty [install.launcher] table and unknown keys
+// already in dst survive. A nil i writes nothing (E1).
+func overlayInstall(dst map[string]any, i *Install) {
+	if i == nil {
+		return
+	}
+	setStr := func(key, val string) {
+		if val != "" {
+			dst[key] = val
+		}
+	}
+	setStr("method", i.Method)
+	setStr("root", i.Root)
+	setStr("dest", i.Dest)
+	if i.Launcher == nil {
+		return
+	}
+	l := asMap(dst["launcher"])
+	if i.Launcher.NmFile != "" {
+		l["nm_file"] = i.Launcher.NmFile
+	}
+	if i.Launcher.NmEntry != "" {
+		l["nm_entry"] = i.Launcher.NmEntry
+	}
+	if len(l) > 0 {
+		dst["launcher"] = l
+	} else {
+		delete(dst, "launcher")
+	}
 }
 
 // SkippedDefs names the packages.d entries LoadAll did not return, SPLIT BY

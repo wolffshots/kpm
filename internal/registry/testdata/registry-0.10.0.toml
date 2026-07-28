@@ -1,0 +1,382 @@
+# kpm registry — schema_version 1
+#
+# Package definitions pulled by `kpm registry refresh` / `kpm search` /
+# `kpm install` / `kpm sync`. Definitions only — never binaries; the actual
+# KoboRoot.tgz comes from each package's own release page over TLS.
+# Format reference: https://github.com/wolffshots/kpm/blob/main/REGISTRY.md
+schema_version = 1
+
+# kpm itself — carries the canonical source so `kpm install kpm --adopt`
+# wires up self-update on-device (closes the bootstrap placeholder in the
+# shipped kpm.toml).
+[packages.kpm]
+name        = "kpm"
+description = "Kobo package manager — install and update mods from the device"
+source      = "github.com/wolffshots/kpm"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelKPM"
+
+# NickelClock ships its KoboRoot.tgz wrapped in a release zip (kpm >= 0.4.0
+# unwraps those) and self-uninstalls when its shipped trigger file is deleted
+# ("delete the uninstall file from the .adds/nickelclock directory, then
+# restart your Kobo" — README).
+[packages.nickelclock]
+name        = "NickelClock"
+description = "Show the current time in the reading header/footer"
+source      = "github.com/shermp/NickelClock"
+forge       = "github"
+asset       = "NickelClock-*.zip"
+min_kpm     = "0.4.0"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelClock"
+
+  [packages.nickelclock.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/nickelclock/uninstall"
+  purge_paths = ["/mnt/onboard/.adds/nickelclock/**"]
+
+  # Clock/battery display options; NickelClock re-reads them at boot.
+  [[packages.nickelclock.configs]]
+  name        = "Settings"
+  path        = "/mnt/onboard/.adds/nickelclock/settings.ini"
+  format      = "ini"
+  reload      = "reboot"
+  description = "Clock and battery display options."
+
+# NickelDBus self-uninstalls when its shipped version-marker file is deleted
+# ("delete the file called nickeldbus in the .adds directory, and reboot").
+[packages.nickeldbus]
+name        = "NickelDBus"
+description = "D-Bus interface for scripting and automating the Nickel UI"
+source      = "github.com/shermp/NickelDBus"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+min_kpm     = "0.4.0"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelDBus"
+
+  [packages.nickeldbus.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/nickeldbus"
+
+# NickelNote ships its KoboRoot.tgz wrapped in a release zip (kpm >= 0.4.0
+# unwraps those). Its documented uninstall is a /mnt/onboard/nn_uninstall
+# trigger file, which sits outside kpm's deletable allowlist (.adds/.kobo only),
+# so removal goes through the manifest instead — the tarball's sole payload is
+# the imageformats plugin, and purge_paths clears the user's templates dir the
+# mod's own uninstaller would have removed.
+[packages.nickelnote]
+name        = "NickelNote"
+description = "Show a custom note on the sleep/lock screen"
+source      = "github.com/onatbas/nickelnote"
+forge       = "github"
+asset       = "NickelNote-*.zip"
+min_kpm     = "0.4.0"
+# tested_fw is an estimate: v0.0.4 (2024-05) predates FW 4.45 and is confirmed
+# NON-functional on 4.45.23697 (Libra Colour). 4.38.23429 is a real firmware
+# from the mod's era used as an upper bound so the "untested on your firmware"
+# warning fires. Not a first-party pass.
+tested_fw   = "4.38.23429"
+nh_name     = "NickelNote"
+
+  [packages.nickelnote.uninstall]
+  method      = "manifest"
+  purge_paths = ["/mnt/onboard/.adds/nickelnote/**"]
+
+  # User-created templates: kpm may create them on first save (create = true).
+  # The sleep-screen note needs both content and style present to render.
+  [[packages.nickelnote.configs]]
+  name        = "Note content"
+  path        = "/mnt/onboard/.adds/nickelnote/content.template"
+  format      = "text"
+  reload      = "auto"
+  create      = true
+  description = "Rich text shown on the sleep screen. Needs Style too."
+  template = '''
+<span>Your Name</span><br />
+<span style="font-size: 32px">If found, Please return at</span><br />
+<span style="font-size: 32px;">+1 555 000 0000</span>
+'''
+
+  [[packages.nickelnote.configs]]
+  name        = "Style"
+  path        = "/mnt/onboard/.adds/nickelnote/style.template"
+  format      = "text"
+  reload      = "auto"
+  create      = true
+  description = "Stylesheet for the sleep-screen note."
+  template = '''
+#infoWidget {
+  color: black;
+  background-color: rgba(255,255,255,170);
+  min-height: 290px;
+  max-height: 290px;
+
+  margin-top: 200px;
+  margin-left: -30px;
+}
+
+#infoWidget[powerOffView=true]{
+  background-color: rgba(0,0,0,170);
+}
+
+QLabel{
+	min-width: 400px;
+	min-height: 300px;
+}
+'''
+
+  [[packages.nickelnote.configs]]
+  name        = "PIN screen message"
+  path        = "/mnt/onboard/.adds/nickelnote/pin.template"
+  format      = "text"
+  reload      = "auto"
+  create      = true
+  description = "Message shown on the lock-PIN screen."
+  template = '''
+<p style="font-size: 32px;">
+This tablet is protected and belongs to <br/>
+<b>Your Name</b>
+<br/>
+<br/>
+If found, please return to <br/>
+US: +1 555 000 0000<br/>
+CA: +1 555 000 0000<br/>
+</p>
+'''
+
+# Uninstall is NickelMenu's own: create .adds/nm/uninstall (nh_info.uninstall_flag
+# = NM_CONFIG_DIR "/uninstall" in src/nickelmenu.cc, and the shipped .adds/nm/doc
+# says the same) and reboot. NickelHook then unlinks that file and deletes
+# libnm.so; NickelMenu registers no nh uninstall callback, so nothing else goes.
+[packages.nickelmenu]
+name        = "NickelMenu"
+description = "Add custom entries to the Kobo home and reading menus"
+source      = "github.com/pgaskin/NickelMenu"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelMenu"
+
+  [packages.nickelmenu.uninstall]
+  method      = "marker"
+  marker_file = "/mnt/onboard/.adds/nm/uninstall"
+  # No purge_paths, for two independent reasons — both traps for any future
+  # `marker` entry:
+  #  1. Execute writes the marker BEFORE running deletions, so purge_paths
+  #     covering the marker's own directory would delete the very trigger file
+  #     the next reboot is supposed to act on, and the uninstall would silently
+  #     never happen. A `marker` entry must never purge its marker's tree.
+  #  2. .adds/nm is SHARED, not NickelMenu's private tree: kpm itself
+  #     (.adds/nm/kpm), Kscribbler (.adds/nm/kscribbler) and Kobo Wi-Fi Remote
+  #     (.adds/nm/wifiremote) all install menu fragments there, so a recursive
+  #     purge would delete other packages' files.
+  # NickelMenu's shipped .adds/nm/doc and the user's own menu config files are
+  # therefore left in place, exactly as an upstream uninstall leaves them.
+
+# Uninstall per README: create .adds/screensaver/uninstall.txt, reboot; the
+# generated .kobo/screensaver png is an artifact kpm removes alongside.
+[packages.nickel-screensaver]
+name        = "Nickel Screensaver"
+description = "Use your own images as the Kobo sleep/screensaver screen"
+source      = "github.com/redphx/nickel-screensaver"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+# nh_name has an embedded space (the mod's nh_info.name is "Nickel Screensaver",
+# not a CamelCase token) — set explicitly so doctor's dump-log glob matches; the
+# display-name fallback would wrongly strip the space to "NickelScreensaver".
+nh_name     = "Nickel Screensaver"
+
+  [packages.nickel-screensaver.uninstall]
+  method      = "marker"
+  marker_file = "/mnt/onboard/.adds/screensaver/uninstall.txt"
+  extra_paths = ["/mnt/onboard/.kobo/screensaver/nickel-screensaver.png"]
+
+# NickelTypeFix self-uninstalls when its shipped trigger file is deleted
+# ("Delete KOBOeReader/.adds/nickel-type-fix/uninstall and reboot").
+[packages.nickeltypefix]
+name        = "NickelTypeFix"
+description = "Correct inconsistent font weights in the Nickel UI"
+source      = "github.com/nicoverbruggen/NickelTypeFix"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+min_kpm     = "0.4.0"
+nh_name     = "NickelTypeFix"
+
+  [packages.nickeltypefix.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/nickel-type-fix/uninstall"
+  purge_paths = ["/mnt/onboard/.adds/nickel-type-fix/**"]
+
+# NickelHardcover's documented uninstall is a trigger file at the partition root
+# ("create a file called nickelhardcover_uninstall on the root of your device and
+# manually restart your Kobo" — README), i.e. /mnt/onboard/nickelhardcover_uninstall.
+# That path sits outside kpm's deletable allowlist (.adds/.kobo only) — the same
+# situation as nickelnote's nn_uninstall — so this must NOT be converted to
+# method = "marker": Compute requires marker_file to classify as allowed and
+# would refuse the plan outright. Removal goes through the manifest instead; the
+# tarball ships .adds/NickelHardcover/{cli,config_example.ini} plus the
+# imageformats plugin, and purge_paths clears the user's config dir.
+[packages.nickelhardcover]
+name        = "NickelHardcover"
+description = "Sync your Kobo reading progress to a Hardcover account"
+source      = "codeberg.org/StrayRose/NickelHardcover"
+forge       = "forgejo"
+asset       = "KoboRoot.tgz"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelHardcover"
+
+  [packages.nickelhardcover.uninstall]
+  method      = "manifest"
+  purge_paths = ["/mnt/onboard/.adds/NickelHardcover/**"]
+
+# Requires NickelMenu — its menu entries are the only way to invoke it. No
+# uninstall mechanism of its own, so removal is by manifest: the tarball ships
+# .adds/kscribbler/{config.env.example,toggle-debug.sh,upgrade.sh},
+# .adds/nm/kscribbler and the /opt/bin/kscribbler binary. purge_paths clears the
+# runtime files the manifest can't know about (config.env with the Hardcover API
+# token, kscribblerdb, kscribbler.log); extra_paths catches the extra NickelMenu
+# fragment that toggle-debug.sh writes when debug options are switched on.
+[packages.kscribbler]
+name        = "Kscribbler"
+description = "Sync your Kobo highlights and notes to a Hardcover account"
+source      = "github.com/GianniBYoung/kscribbler"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+tested_fw   = "4.45.23697"
+
+  [packages.kscribbler.uninstall]
+  method      = "manifest"
+  extra_paths = ["/mnt/onboard/.adds/nm/kscribbler-debug"]
+  purge_paths = ["/mnt/onboard/.adds/kscribbler/**"]
+
+# Ships its KoboRoot.tgz wrapped in a release zip alongside LICENSE, README.html
+# and an Uninstaller.zip — only the single inner *.tgz is unwrapped, the other
+# entries are ignored (kpm >= 0.4.0). The daemon is started by its udev rule, so
+# NickelMenu is a convenience entry here, not a requirement. Upstream's own
+# uninstaller only drops the udev rule and leaves the daemon to self-clean on the
+# next boot, which kpm can't trigger — manifest removal takes out everything the
+# tarball placed (/etc/udev/rules.d/98-wifiremote.rules, .adds/wifiremote,
+# .adds/nm/wifiremote, /opt/wifiremote) directly instead.
+[packages.kobowifiremote]
+name        = "Kobo Wi-Fi Remote"
+description = "Web-based remote control and page-turner served over Wi-Fi"
+source      = "github.com/sublipri/kobo-wifi-remote"
+forge       = "github"
+asset       = "KoboWiFiRemote-*.zip"
+min_kpm     = "0.4.0"
+
+  [packages.kobowifiremote.uninstall]
+  method      = "manifest"
+  purge_paths = ["/mnt/onboard/.adds/wifiremote/**"]
+
+# NickelDissolve self-uninstalls when its shipped trigger file is deleted
+# ("delete the file KOBOeReader/.adds/nickel-dissolve/uninstall and reboot" —
+# README); the trigger is present in the tarball, confirmed.
+[packages.nickel-dissolve]
+name        = "NickelDissolve"
+description = "Add Kindle-style page-turn animations to supported Kobo devices"
+source      = "github.com/nicoverbruggen/NickelDissolve"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+tested_fw   = "4.45.23697"
+nh_name     = "NickelDissolve"
+
+  [packages.nickel-dissolve.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/nickel-dissolve/uninstall"
+  purge_paths = ["/mnt/onboard/.adds/nickel-dissolve/**"]
+
+# NickelHome uninstalls when a trigger file is CREATED (nh_info.uninstall_flag =
+# NHM_CONFIG_DIR "/uninstall" in src/nickelhome.cc); the tarball ships only doc +
+# default, no trigger, so this is "marker", not "marker-remove".
+# Deliberately no purge_paths: the marker is written into this same directory and
+# Execute creates it before running deletions, so purging the tree would remove
+# the trigger before the reboot that acts on it. NickelHome registers no
+# NickelHook uninstall callback, so the reboot removes only the marker and
+# libnickelhome.so — .adds/nickel-home/{doc,default,config} stay behind.
+[packages.nickel-home]
+name        = "NickelHome"
+description = "Hide configurable widgets and rows on the Kobo home screen"
+source      = "github.com/nicoverbruggen/NickelHome"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+nh_name     = "NickelHome"
+
+  [packages.nickel-home.uninstall]
+  method      = "marker"
+  marker_file = "/mnt/onboard/.adds/nickel-home/uninstall"
+
+# KoboCloud publishes every build under the permanent tag "latest" (verified
+# against the GitHub releases API on 2026-07-27: the current release is tag
+# "latest", cut by github-actions, published 2026-06-03; the numbered 0.2–0.5
+# tags stopped in 2020), so tag comparison can never detect an update —
+# update_check = "rolling" compares the release's published_at and asset size
+# instead. min_kpm is mandatory: an older kpm ignores update_check and would
+# report this package up to date forever.
+# Note for a future curator: get.sh silently installs NickelDBus 0.2.0 over the
+# rootfs (curl -k | tar xz -C /) when /usr/bin/qndb is missing, so a device can
+# end up with an untracked, older copy of a package kpm also ships. That is an
+# install-behind-kpm's-back, not a deletion, so it is not a `conflicts` case.
+[packages.kobocloud]
+name         = "KoboCloud"
+description  = "Sync books to your Kobo from Dropbox, Google Drive and other cloud storage"
+source       = "github.com/fsantini/KoboCloud"
+forge        = "github"
+asset        = "KoboRoot.tgz"
+update_check = "rolling"
+min_kpm      = "0.10.0"
+
+  # Upstream's own uninstall is "uncomment the UNINSTALL line in
+  # .add/kobocloud/kobocloudrc", which get.sh acts on at the next network-up
+  # udev event — an edit inside a config file, not a file kpm can create or
+  # delete, so removal goes through the manifest. That deletes exactly what
+  # upstream's uninstall.sh deletes: /etc/udev/rules.d/97-kobocloud.rules and
+  # /usr/local/kobocloud (both allowlisted; the lowercase /usr/local/kobocloud
+  # is not the denied /usr/local/Kobo firmware tree).
+  # No purge_paths: the runtime dir is /mnt/onboard/.add/kobocloud — singular
+  # ".add", deliberately outside the deletable allowlist (.adds/.kobo only) — so
+  # the synced Library, kobocloudrc and logs stay. Upstream's uninstall.sh
+  # leaves them too, so this matches upstream behaviour.
+  [packages.kobocloud.uninstall]
+  method = "manifest"
+
+# kobo-tweaks auto-uninstalls NickelClock as part of its own install, which
+# would delete a kpm-tracked package's files behind kpm's back. min_kpm is
+# mandatory: an older kpm ignores `conflicts` and would let that happen.
+# Verified in v1.1.1's shipped libtweaks.so and in src/tweaks.cc:41-49:
+# tweaksInit() unconditionally deletes /usr/local/Kobo/imageformats/
+# libnickelclock.so and its .failsafe sibling whenever they exist — on every
+# Nickel start, not only the first — and that .so is the whole of NickelClock's
+# binary payload and a recorded manifest entry, so kpm would be left with a
+# nickelclock state record whose files are gone.
+[packages.kobo-tweaks]
+name        = "Kobo Tweaks"
+description = "Header/footer tweaks, reading widgets, custom bookmarks and dark mode"
+source      = "github.com/redphx/kobo-tweaks"
+forge       = "github"
+asset       = "KoboRoot.tgz"
+conflicts   = ["nickelclock"]
+min_kpm     = "0.10.0"
+# nh_name has an embedded space (nh_info.name is "Kobo Tweaks"), the same case
+# as nickel-screensaver — set explicitly so doctor's dump-log glob matches; the
+# display-name fallback strips the space to "KoboTweaks".
+nh_name     = "Kobo Tweaks"
+
+  # Uninstall is upstream's own: delete .adds/tweaks/DELETE_TO_UNINSTALL.txt and
+  # restart (README §Uninstallation). The file is shipped in the tarball
+  # (confirmed in v1.1.1) and is nh_info.uninstall_xflag, so its ABSENCE is the
+  # trigger — marker-remove, not marker. Do NOT switch this to method = "marker"
+  # on the mod's other trigger (.adds/tweaks/uninstall, nh_info.uninstall_flag):
+  # Execute writes the marker before running deletions, so a marker in this same
+  # directory plus the purge below would delete the trigger the next reboot is
+  # supposed to act on. NickelHook removes libtweaks.so itself at that reboot.
+  # .adds/tweaks is private to this mod (DATA_DIR in src/common.h — settings.ini,
+  # images/ and the two trigger files; no other tracked package writes there), so
+  # the recursive purge cannot reach another package's files.
+  [packages.kobo-tweaks.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/tweaks/DELETE_TO_UNINSTALL.txt"
+  purge_paths = ["/mnt/onboard/.adds/tweaks/**"]

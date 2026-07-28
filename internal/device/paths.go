@@ -109,6 +109,23 @@ func (p Paths) NmConfig() string { return filepath.Join(p.Root, ".adds", "nm", "
 // StagedTgz is the boot-time install slot rcS consumes.
 func (p Paths) StagedTgz() string { return filepath.Join(p.Root, ".kobo", "KoboRoot.tgz") }
 
+// NickelConf is Nickel's own Qt settings file. kpm READS it (for the
+// ExcludeSyncFolders advisory, APP-TREE.md §10) and deliberately never writes it:
+// Nickel owns the file and rewrites it, and kpm's UI runs inside a live Nickel,
+// so an edit made from here would frequently appear to succeed and then revert.
+func (p Paths) NickelConf() string {
+	return filepath.Join(p.Root, ".kobo", "Kobo", "Kobo eReader.conf")
+}
+
+// KfmonBin is KFMon's binary on the rootfs. Its presence is the signal doctor
+// uses for the launcher-icon advisory; KFMon itself is not installable by kpm
+// (it publishes no forge releases), so this is read-only detection.
+const KfmonBin = "/usr/local/kfmon/bin/kfmon"
+
+// NickelMenuSO is NickelMenu's actual payload on the rootfs — the stronger of the
+// two NickelMenu-presence signals (APP-TREE.md §8.2).
+const NickelMenuSO = "/usr/local/Kobo/imageformats/libnm.so"
+
 // VersionFile is the firmware descriptor Nickel writes at .kobo/version: one
 // comma-separated line whose third field is the firmware version (confirmed
 // against calibre + KOReader readers). kpm reads it advisorily for the

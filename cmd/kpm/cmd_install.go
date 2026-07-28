@@ -296,6 +296,18 @@ func printInstallDef(w io.Writer, id, regName string, p *config.Package, provena
 	for _, c := range normalizeConflicts(p.Conflicts, id) {
 		fmt.Fprintf(w, "  conflicts %s\n", c)
 	}
+	// The destination is the most safety-relevant thing in the whole def — it is
+	// where kpm will write bulk payload as root — so it goes ABOVE the uninstall
+	// recipe, where the confirm pause puts it in front of the user (§12.2).
+	if i := p.Install; i != nil {
+		fmt.Fprintf(w, "  install  %s  ->  %s\n", p.EffectiveInstallMethod(), i.Dest)
+		if i.Root != "" {
+			fmt.Fprintf(w, "    root      %s\n", i.Root)
+		}
+		if i.Launcher != nil {
+			fmt.Fprintf(w, "    nm_file   %s\n", i.Launcher.NmFile)
+		}
+	}
 	u := p.Uninstall
 	if u.EffectiveMethod() != config.MethodManifest || u.MarkerFile != "" ||
 		len(u.ExtraPaths) > 0 || len(u.PurgePaths) > 0 || len(u.KeepPaths) > 0 ||

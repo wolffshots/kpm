@@ -817,3 +817,62 @@ func TestIntegrityFieldsRoundTripThroughTOML(t *testing.T) {
 		t.Errorf("SaveReplace must clear dropped integrity fields: %+v / %+v", after.Conflicts, after.Checksums)
 	}
 }
+
+// TestCheckMenuItemLineColonInLabel is the registry-side half of the PLAN.md §8
+// rule. NickelMenu splits a menu_item into menu_item:location:label:action:arg,
+// so a ':' inside the label shifts every later field right by one and NickelMenu
+// rejects the whole config — every OTHER package's menu entry included.
+//
+// The shape-only check accepted `menu_item:main:ko:reader:cmd_spawn:exec /x`:
+// the label's tail ("reader") landed in the action slot and matched a bare
+// [a-z][a-z0-9_]* identifier. The shape has to be narrow enough that a word
+// which is not a NickelMenu action family cannot pass for one.
+func TestCheckMenuItemLineColonInLabel(t *testing.T) {
+	bad := []string{
+		"menu_item:main:ko:reader:cmd_spawn:exec /x", // the demonstrated bypass
+		"menu_item:main:KOReader: the reader:cmd_spawn:x",
+		"menu_item:main:a:b:c",
+		"menu_item:main:KOReader:x:y",
+		"menu_item:main:label",
+		"menu_item",
+	}
+	for _, line := range bad {
+		if err := checkMenuItemLine(line, 1); err == nil {
+			t.Errorf("checkMenuItemLine(%q) = nil, want a refusal", line)
+		}
+	}
+	// Every shape the spec's own defs use must still pass, including the
+	// six-field cmd_spawn/cmd_output entries whose ARG legitimately holds a ':'.
+	good := []string{
+		"menu_item:main:KOReader:cmd_spawn:quiet:exec /mnt/onboard/.adds/koreader/koreader.sh",
+		"menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh",
+		"menu_item:main:K:cmd_spawn:x",
+		"menu_item:main:kpm - Status:cmd_output:9000:/bin/kpm status",
+		"menu_item:main:kpm - Check:nickel_wifi:autoconnect",
+		"menu_item:main:Reboot:power:reboot",
+		"menu_item:main:Nothing:skip:1",
+		"menu_item:main:Log:dbg_syslog:hello",
+		"menu_item:main:App:kfmon:koreader.png",
+		"  menu_item : main : Spaced : cmd_spawn : x",
+		"# a comment",
+		"chain_success:cmd_spawn:quiet:x",
+		"",
+	}
+	for _, line := range good {
+		if err := checkMenuItemLine(strings.TrimSpace(line), 1); err != nil {
+			t.Errorf("checkMenuItemLine(%q) = %v, want nil", line, err)
+		}
+	}
+}
+
+// TestLauncherValidateRejectsMisSplitEntry drives the same rule through the
+// exported path a registry def actually travels.
+func TestLauncherValidateRejectsMisSplitEntry(t *testing.T) {
+	l := &Launcher{
+		NmFile:  "/mnt/onboard/.adds/nm/koreader",
+		NmEntry: "menu_item:main:ko:reader:cmd_spawn:exec /mnt/onboard/.adds/koreader/koreader.sh",
+	}
+	if err := l.validate(); err == nil {
+		t.Error("a menu_item whose label contains ':' must be refused")
+	}
+}

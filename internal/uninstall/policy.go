@@ -92,6 +92,17 @@ func pathEqual(a, b string) bool {
 	return a == b
 }
 
+// foldPath returns a comparison key for abs that honors the onboard case rule
+// (C2): identical for two spellings of one FAT32 file, unchanged on the
+// case-sensitive rootfs. It is what a map keyed by device path must use, since
+// pathEqual cannot be a map key.
+func foldPath(abs string) string {
+	if onOnboard(abs) {
+		return strings.ToLower(abs)
+	}
+	return abs
+}
+
 // under (aliased pathUnder) reports whether abs is at or below prefix (exact
 // match or prefix/ ...), applying the onboard case rule (C2).
 func under(abs, prefix string) bool {

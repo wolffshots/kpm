@@ -2,6 +2,7 @@ package device
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,55 @@ func WriteFileAtomic(path string, data []byte) error {
 		return err
 	}
 	FsyncDir(dir)
+	return nil
+}
+
+// WriteReaderAtomic is WriteFileAtomic for a STREAM: same temp-file + fsync +
+// rename discipline, but the content is copied through an io.LimitedReader rather
+// than buffered, so an 83.9 MiB app tree is never held in RAM on a device with
+// 512 MB (APP-TREE.md §5.2 step 3).
+//
+// limit is a hard stop with a clear error, never a silent truncation — the same
+// rule tgz.Unwrap applies to a zip-wrapped tarball. A declared size in a zip
+// header is attacker-controlled; this limiter is what actually holds.
+//
+// Unlike WriteFileAtomic it does NOT fsync the parent directory: the extractor
+// writes hundreds of files per directory and fsyncs each directory once at the
+// end, so paying it per file would be hundreds of redundant syncs on FAT32.
+// Callers that write a single file should use WriteFileAtomic.
+func WriteReaderAtomic(path string, r io.Reader, limit int64) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".kpm-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	fail := func(e error) error {
+		tmp.Close()
+		os.Remove(tmpName)
+		return e
+	}
+	limited := &io.LimitedReader{R: r, N: limit + 1}
+	if _, err := io.Copy(tmp, limited); err != nil {
+		return fail(err)
+	}
+	if limited.N <= 0 {
+		return fail(fmt.Errorf("%s exceeds the %d-byte write limit", path, limit))
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
 	return nil
 }
 
