@@ -70,10 +70,17 @@ public Q_SLOTS:
 private:
   DetailDialog(QJsonObject package, const QHash<QString, QJsonObject> &packages);
 
-  void run(KpmProcess *proc);      // shared action runner (§6 steps 2-3)
-  void setBusy(bool busy);
+  // busyLabel is the status text shown while the action runs; empty means the
+  // generic "Working…" (APP-TREE.md §11.3 item 3).
+  void run(KpmProcess *proc, const QString &busyLabel = QString()); // shared action runner (§6 steps 2-3)
+  void setBusy(bool busy, const QString &busyLabel = QString());
   void addActionButton(const QString &text, const char *slot);
   void addBlockerButton(const QString &blocker);
+  // actionLabel decorates an Install/Update button label with the app-tree
+  // "(no reboot)" suffix; installBusyLabel picks that action's busy text. Both
+  // read `appTree` and nothing else (APP-TREE.md §11.3 items 2-3).
+  QString actionLabel(const QString &verb) const;
+  QString installBusyLabel() const;
   QString displayName(const QString &packageId) const;
   // blockerStagedOnly reports whether a conflict blocker is present only as a
   // STAGED change (files landing at the next reboot) rather than installed — the
@@ -82,6 +89,11 @@ private:
 
   QJsonObject pkg;
   QString id;
+  // appTree is the payload's install_method == "app-tree" (APP-TREE.md §11.1): this
+  // package is extracted straight into .adds/<name>/ and is live the moment the
+  // command returns, rather than staged in a KoboRoot.tgz for the next boot. Absent
+  // on a pre-0.11.0 kpm, which reads as false — i.e. today's wording everywhere.
+  bool appTree = false;
   QHash<QString, QJsonObject> packageIndex;
   QLabel *statusLabel = nullptr;
   QHBoxLayout *actionsLayout = nullptr; // buttons can still be added after the probe

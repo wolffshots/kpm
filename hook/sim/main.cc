@@ -30,6 +30,10 @@
 //   --exercise-badges          offscreen: assert the "files missing" browse badge
 //                              (samplemod) and the "Untested on your firmware"
 //                              detail warning (nickelnote) render (A + D)
+//   --exercise-apptree <dir>   offscreen: drive the app-tree copy (APP-TREE.md §11.3):
+//                              the "(no reboot)" action suffix, the "Installing…"
+//                              busy label, an uninstall that promises no reboot, and
+//                              the prompt after a run that installed AND staged (§6.4)
 //   --exercise-rowrepaint      offscreen: drive an uninstall, then assert the row
 //                              widgets SURVIVED and the acted-on row repainted in
 //                              place (flash-reduction win 4)
@@ -100,14 +104,24 @@ static void waitForRows(std::function<void()> onReady, std::function<void()> onT
   timer->start(200);
 }
 
-static void saveGrab(const QString &path) {
-  QPixmap pm = nickelstub_mainWindow()->grab();
+// saveGrabOf grabs any widget. A confirmation dialog is a separate top-level
+// window in the stub (nickelstub.cc), so grabbing the main window alone captures
+// the page behind it and not the prompt — which is the whole subject of some
+// assertions.
+static void saveGrabOf(QWidget *w, const QString &path) {
+  if (w == nullptr) {
+    std::fprintf(stderr, "sim: nothing to grab for %s\n", qPrintable(path));
+    return;
+  }
+  QPixmap pm = w->grab();
   if (!pm.save(path)) {
     std::fprintf(stderr, "sim: failed to save %s\n", qPrintable(path));
   } else {
     std::fprintf(stderr, "sim: wrote %s (%dx%d)\n", qPrintable(path), pm.width(), pm.height());
   }
 }
+
+static void saveGrab(const QString &path) { saveGrabOf(nickelstub_mainWindow(), path); }
 
 // findLabelByText returns the first tappable label with exactly this text (button
 // labels are QLabel subclasses in both device and sim — see nickelstub.h).
@@ -1198,6 +1212,262 @@ static void runExerciseStaged() {
       });
 }
 
+// ---- --exercise-apptree (APP-TREE.md §11.3) ------------------------------
+//
+// 0.11.0 gives kpm a second install shape. An app-tree package (KOReader, Plato) is
+// extracted straight into .adds/<name>/ and is live the moment the command returns;
+// every package before it staged a KoboRoot.tgz the firmware unpacks at the next
+// boot. The hook's entire share of that difference is COPY — one button suffix, one
+// busy label, one uninstall sentence, and the wording of the reboot prompt after a
+// run that did both — so this exercise reads strings, off real widgets, after a real
+// `kpm search --json`.
+//
+// The fixture seeds plato with an [install] table (fixture/seed.go). Whether the
+// shipped kpm binary turns that into `install_method` depends on which lane landed
+// first — the Go half of §11.1 is built in parallel with this. So the payload is
+// used as found when the field is there and the field is INJECTED when it is not,
+// with the choice printed either way: a green run must never hide which of the two
+// it was. Everything past onSearch is device code in both cases, and that is the
+// half this can pin.
+
+// platoCheckPayload is `kpm check --json`'s shape: an available update for the
+// app-tree package and for a tgz one, so the detail pages of both are reachable and
+// the "(no reboot)" suffix can be shown to apply to exactly one of them. check needs
+// the network (see the README), so it is synthesized — but it is fed through the
+// real onCheckDone/mergeCheck, which means install_method has to SURVIVE the merge
+// for anything below to pass.
+static QJsonObject platoCheckPayload() {
+  QJsonObject plato;
+  plato.insert("id", QStringLiteral("plato"));
+  plato.insert("installed", QStringLiteral("0.9.45"));
+  plato.insert("latest", QStringLiteral("0.9.46"));
+  plato.insert("update", true);
+  QJsonObject sample;
+  sample.insert("id", QStringLiteral("samplemod"));
+  sample.insert("installed", QStringLiteral("v1.0.0"));
+  sample.insert("latest", QStringLiteral("v1.1.0"));
+  sample.insert("update", true);
+  QJsonObject payload;
+  payload.insert("packages", QJsonArray{plato, sample});
+  return payload;
+}
+
+// mixedUpdateAllPayload is `kpm update --all --json` for the run APP-TREE.md §6.4
+// describes: plato was extracted and is already live, nickelclock was merged into
+// the staged KoboRoot.tgz. `changed` is the sorted union, and staged/
+// reboot_required describe the RUN — so both are true even though half of it is
+// finished. §11.2 is explicit that jsonMutation gains nothing here, so this is the
+// complete payload the hook has to word a prompt from.
+static QJsonObject mixedUpdateAllPayload() {
+  QJsonObject payload;
+  payload.insert("changed", QJsonArray{QStringLiteral("nickelclock"), QStringLiteral("plato")});
+  payload.insert("failed", QJsonArray());
+  payload.insert("staged", true);
+  payload.insert("reboot_required", true);
+  return payload;
+}
+
+// appTreeSearchPayload returns real `kpm search --json` output with plato's
+// install_method guaranteed present, and reports whether it had to put it there.
+// An empty return means plato is missing from the payload entirely — a broken
+// fixture, not a UI failure.
+static QJsonObject appTreeSearchPayload(bool *injected) {
+  QJsonObject payload = runKpmSearch();
+  *injected = false;
+  bool sawPlato = false;
+  QJsonArray packages;
+  for (const QJsonValue &v : payload.value("packages").toArray()) {
+    QJsonObject o = v.toObject();
+    if (o.value("id").toString() == QStringLiteral("plato")) {
+      sawPlato = true;
+      if (o.value("install_method").toString() != QStringLiteral("app-tree")) {
+        o.insert("install_method", QStringLiteral("app-tree"));
+        *injected = true;
+      }
+    }
+    packages.append(o);
+  }
+  if (!sawPlato) {
+    return QJsonObject();
+  }
+  payload.insert("packages", packages);
+  return payload;
+}
+
+// feedAppTreeSearch pushes the search payload and then the check payload through
+// the public slots, in the order a Refresh does it on device.
+static void feedAppTreeSearch(BrowseDialog *browse, const QJsonObject &payload) {
+  QMetaObject::invokeMethod(browse, "onSearch", Q_ARG(int, 0), Q_ARG(QJsonObject, payload));
+  QMetaObject::invokeMethod(browse, "onCheckDone", Q_ARG(int, 0), Q_ARG(QJsonObject, platoCheckPayload()));
+}
+
+static void runExerciseAppTree(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        bool injected = false;
+        QJsonObject payload = appTreeSearchPayload(&injected);
+        if (!browse || payload.isEmpty()) {
+          std::fprintf(stderr, "sim: no BrowseDialog / plato missing from `kpm search --json`\n");
+          qApp->exit(4);
+          return;
+        }
+        std::fprintf(stderr, "sim: install_method source: %s\n",
+                     injected ? "INJECTED — this kpm emits none (the Go half of §11.1 has not landed here)"
+                              : "the real `kpm search --json` payload");
+        feedAppTreeSearch(browse, payload);
+
+        // (1) §6.4 — the mixed run. One "Update all" extracted plato (live now) and
+        // staged nickelclock (needs the boot). The run staged something, so the
+        // prompt fires and SHOULD; what it must not do is describe the whole run as
+        // pending, because a user who taps Later would then believe plato is still
+        // waiting on a reboot it does not need.
+        QTimer::singleShot(500, qApp, [dir, browse, payload]() {
+          QMetaObject::invokeMethod(browse, "onActionDone", Q_ARG(int, 0), Q_ARG(QJsonObject, mixedUpdateAllPayload()));
+          QTimer::singleShot(600, qApp, [dir, browse, payload]() {
+            if (!g_lastConfirmation) {
+              std::fprintf(stderr, "sim: FAIL — a mixed run staged something and never offered the reboot\n");
+              qApp->exit(5);
+              return;
+            }
+            if (labelIn(g_lastConfirmation, QStringLiteral("Changes staged. Reboot now?"))) {
+              std::fprintf(stderr, "sim: FAIL — a mixed run is described as if nothing had been installed yet\n");
+              qApp->exit(5);
+              return;
+            }
+            if (!labelContaining(g_lastConfirmation, QStringLiteral("1 package installed and ready")) ||
+                !labelContaining(g_lastConfirmation, QStringLiteral("1 more needs a reboot"))) {
+              std::fprintf(stderr, "sim: FAIL — the mixed-run prompt does not account for both halves\n");
+              qApp->exit(5);
+              return;
+            }
+            std::fprintf(stderr, "sim: PASS — a mixed run reports what is already installed AND what still needs a "
+                                 "reboot\n");
+            // The prompt itself, not the page behind it: this sentence is the one
+            // piece of genuinely new copy in the hook's share of 0.11.0.
+            saveGrabOf(g_lastConfirmation, dir + "/reboot-mixed.png");
+            g_lastConfirmation->reject(); // Later: do not simulate the reboot
+
+            // onActionDone reloads the list from the real kpm, which drops the
+            // injected field again — re-feed before touching a detail page.
+            QTimer::singleShot(2000, qApp, [dir, browse, payload]() {
+              feedAppTreeSearch(browse, payload);
+
+              // (2) §11.3 items 1-2 — the app-tree detail page.
+              QTimer::singleShot(700, qApp, [dir, browse]() {
+                QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("plato")));
+                QTimer::singleShot(900, qApp, [dir, browse]() {
+                  DetailDialog *detail = currentDetail();
+                  if (!labelIn(detail, QStringLiteral("Update (no reboot)"))) {
+                    std::fprintf(stderr, "sim: FAIL — an app-tree package's Update button does not say (no reboot)\n");
+                    qApp->exit(6);
+                    return;
+                  }
+                  std::fprintf(stderr, "sim: PASS — the app-tree Update button sets the expectation before the tap\n");
+                  saveGrab(dir + "/detail-apptree.png");
+
+                  QLabel *uninstall = labelIn(detail, QStringLiteral("Uninstall"));
+                  if (!uninstall) {
+                    std::fprintf(stderr, "sim: FAIL — no Uninstall button on the app-tree detail page\n");
+                    qApp->exit(6);
+                    return;
+                  }
+                  sendClick(uninstall);
+                  QTimer::singleShot(500, qApp, [browse]() {
+                    if (!g_lastConfirmation) {
+                      std::fprintf(stderr, "sim: FAIL — Uninstall did not confirm first\n");
+                      qApp->exit(7);
+                      return;
+                    }
+                    if (labelContaining(g_lastConfirmation, QStringLiteral("removed on reboot"))) {
+                      std::fprintf(stderr, "sim: FAIL — an app-tree uninstall promises a reboot that never comes\n");
+                      qApp->exit(7);
+                      return;
+                    }
+                    if (!labelContaining(g_lastConfirmation, QStringLiteral("Its files will be removed now."))) {
+                      std::fprintf(stderr, "sim: FAIL — the app-tree uninstall copy does not say when files go\n");
+                      qApp->exit(7);
+                      return;
+                    }
+                    std::fprintf(stderr, "sim: PASS — an app-tree uninstall says its files go now, not on reboot\n");
+                    g_lastConfirmation->reject(); // keep the fixture installed for the rest of the run
+
+                    // (3) The control: a tgz package must be untouched by all of it.
+                    QTimer::singleShot(400, qApp, [browse]() {
+                      QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("samplemod")));
+                      QTimer::singleShot(900, qApp, [browse]() {
+                        DetailDialog *tgz = currentDetail();
+                        if (labelIn(tgz, QStringLiteral("Update (no reboot)")) ||
+                            !labelIn(tgz, QStringLiteral("Update"))) {
+                          std::fprintf(stderr, "sim: FAIL — a tgz package's Update button was relabelled\n");
+                          qApp->exit(8);
+                          return;
+                        }
+                        QLabel *tgzUninstall = labelIn(tgz, QStringLiteral("Uninstall"));
+                        if (!tgzUninstall) {
+                          std::fprintf(stderr, "sim: FAIL — no Uninstall button on the tgz detail page\n");
+                          qApp->exit(8);
+                          return;
+                        }
+                        sendClick(tgzUninstall);
+                        QTimer::singleShot(500, qApp, [browse]() {
+                          if (!labelContaining(g_lastConfirmation, QStringLiteral("removed on reboot"))) {
+                            std::fprintf(stderr, "sim: FAIL — a tgz uninstall lost its reboot wording\n");
+                            qApp->exit(8);
+                            return;
+                          }
+                          std::fprintf(stderr, "sim: PASS — a tgz package keeps every 0.10.0 string\n");
+                          g_lastConfirmation->reject();
+
+                          // (4) §11.3 item 3 — the busy label. Asserted the instant
+                          // the tap lands: `kpm update` needs the network and will
+                          // fail here, but setBusy runs synchronously inside the tap,
+                          // so the label is on screen before the process can answer.
+                          QTimer::singleShot(400, qApp, [browse]() {
+                            QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("plato")));
+                            QTimer::singleShot(900, qApp, []() {
+                              DetailDialog *appTree = currentDetail();
+                              QLabel *update = labelIn(appTree, QStringLiteral("Update (no reboot)"));
+                              if (!update) {
+                                std::fprintf(stderr, "sim: FAIL — the app-tree page lost its Update button\n");
+                                qApp->exit(9);
+                                return;
+                              }
+                              sendClick(update);
+                              if (labelIn(appTree, QStringLiteral("Working…"))) {
+                                std::fprintf(stderr, "sim: FAIL — an app-tree install still reports the generic "
+                                                     "'Working…'\n");
+                                qApp->exit(9);
+                                return;
+                              }
+                              if (!labelIn(appTree, QStringLiteral("Installing…"))) {
+                                std::fprintf(stderr, "sim: FAIL — no 'Installing…' busy label on an app-tree "
+                                                     "update\n");
+                                qApp->exit(9);
+                                return;
+                              }
+                              std::fprintf(stderr, "sim: PASS — an app-tree update reports 'Installing…' while it "
+                                                   "writes the tree\n");
+                              qApp->exit(0);
+                            });
+                          });
+                        });
+                      });
+                    });
+                  });
+                });
+              });
+            });
+          });
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -1493,6 +1763,7 @@ int main(int argc, char **argv) {
   QString configId;
   QString conflictsDir;
   QString orphanDir;
+  QString appTreeDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -1527,6 +1798,8 @@ int main(int argc, char **argv) {
       conflictsDir = args.at(++i);
     } else if (a == "--exercise-orphan" && i + 1 < args.size()) {
       orphanDir = args.at(++i);
+    } else if (a == "--exercise-apptree" && i + 1 < args.size()) {
+      appTreeDir = args.at(++i);
     } else if (a == "--exercise-sync") {
       exerciseSync = true;
     } else if (a == "--exercise-staged") {
@@ -1565,6 +1838,8 @@ int main(int argc, char **argv) {
     runExerciseConflicts(conflictsDir);
   } else if (!orphanDir.isEmpty()) {
     runExerciseOrphan(orphanDir);
+  } else if (!appTreeDir.isEmpty()) {
+    runExerciseAppTree(appTreeDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

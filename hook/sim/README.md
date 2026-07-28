@@ -184,6 +184,29 @@ Offscreen staged-blocker copy and route (INTEGRITY.md §4.3):
 # blocker's staged page offers "Reboot now" — the action that actually resolves it.
 ```
 
+Offscreen app-tree copy (APP-TREE.md §11.3) — the second install shape:
+
+```sh
+./run.sh --exercise-apptree out
+# 0.11.0 adds a package shape that is extracted into .adds/<name>/ and is live with
+# NO reboot. The hook's entire share of that is copy, so this reads strings off real
+# widgets after a real `kpm search --json`. Asserts, in order:
+#   §6.4   a MIXED "Update all" (plato extracted + nickelclock staged) is prompted
+#          with what is ALREADY installed as well as what still needs the reboot —
+#          never the bare "Changes staged", which would read as if nothing landed
+#   §11.3  the app-tree detail page's action reads "Update (no reboot)"
+#   §11.3  its Uninstall confirmation says the files go NOW, and never "on reboot"
+#   §11.3  a tgz package (samplemod) keeps every 0.10.0 string: a plain "Update"
+#          button and the "removed on reboot" confirmation
+#   §11.3  tapping the app-tree Update shows "Installing…", not the generic "Working…"
+# Writes detail-apptree.png and reboot-mixed.png (the prompt itself) into <dir>.
+#
+# The Go half of §11.1 (`install_method` on search --json) is built in a parallel
+# lane. The exercise uses the field when the binary emits it and INJECTS it when it
+# does not, printing which happened — so a green run never hides that the payload
+# was synthesized. Everything past onSearch is device code either way.
+```
+
 Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
 
 ```sh
@@ -229,7 +252,7 @@ uninstalls never touch the real filesystem.
 
 ## Seeded fixture (offline)
 
-`kpm search --json` returns seven packages in mixed states (plus `ghostmod`, which
+`kpm search --json` returns eight packages in mixed states (plus `ghostmod`, which
 is seeded into `state.json` only and therefore never appears):
 
 | id | state | detail action |
@@ -239,7 +262,8 @@ is seeded into `state.json` only and therefore never appears):
 | nickelclock | installed v0.4.0, `update_check = "rolling"`, half of the installed conflict pair | Uninstall (marker-remove) + Settings (ini config — the config-edit target); badge priority: conflict outranks "rebuilt ↑" |
 | nickelmenu | not installed, blocked by `ghostmod` (installed, state-only ⇒ invisible to search) | Manage ghostmod (raw-id fallback) |
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path); registry def carries an old `tested_fw` (4.38) vs the seeded `.kobo/version` (4.45) → **firmware badge** ("Untested on your firmware") |
-| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge |
+| plato | installed 0.9.45, **app-tree** | the only package whose def carries an `[install]` table (`method = "app-tree"`, `dest = /mnt/onboard/.adds/plato`, plus a NickelMenu drop-in) → `install_method = "app-tree"`, driving the `(no reboot)` action suffix, the `Installing…` busy label and the immediate-removal uninstall copy — the `--exercise-apptree` target. Its manifest names the extracted files and the drop-in; `Settings.toml` sits in the same directory and is deliberately **absent** from it (APP-TREE.md §9.1's preservation invariant) |
+| samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge; also the tgz **control** for `--exercise-apptree` |
 | kpm | installed 0.7.0 | un-adopted self row: sourceless `packages.d/kpm.toml` + empty state source (the registry offers a kpm def with a real source) → `is_self=true`, `self_configured=false` → **"self-update off"** badge + **Enable self-update** button — the `--exercise-enroll` target |
 
 ## Which of the fifteen UI actions work end-to-end

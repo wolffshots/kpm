@@ -62,6 +62,12 @@ private:
   // skipNotices renders a mutation payload's `skipped` array (INTEGRITY.md §6.4) as
   // one human line per package.
   QStringList skipNotices(const QJsonObject &payload) const;
+  // rebootPromptText words the post-action reboot prompt for the run that just
+  // finished — the mixed app-tree + tgz case needs more than "Changes staged"
+  // (APP-TREE.md §6.4). showRebootPrompt raises it; rebootConfirm() stays the
+  // no-argument slot the staged banner's button connects to by name.
+  QString rebootPromptText(const QJsonObject &payload) const;
+  void showRebootPrompt(const QString &text);
 
   PagedStack *pages = nullptr;
   TouchLineEdit *lineEdit = nullptr;

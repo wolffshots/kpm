@@ -211,10 +211,64 @@ void BrowseDialog::onActionDone(int exitCode, QJsonObject payload) {
   // loadSearch, so the render it triggers already draws them.
   skipNotes = skipNotices(payload);
   bool reboot = payload.value("reboot_required").toBool() || payload.value("staged").toBool();
+  // Worded BEFORE loadSearch: rebootPromptText partitions this run's `changed[]`
+  // against the rows currently on screen, and loadSearch replaces those rows with a
+  // fresh search. The reload is asynchronous so reading afterwards would happen to
+  // work today, but the dependency would be invisible and one event-loop turn from
+  // being wrong.
+  QString rebootText = reboot ? rebootPromptText(payload) : QString();
   loadSearch(false);
   if (reboot) {
-    rebootConfirm();
+    showRebootPrompt(rebootText);
   }
+}
+
+// rebootPromptText decides what the reboot prompt says about the run that just
+// finished. Since 0.11.0 a single "Update all" can do two different things
+// (APP-TREE.md §6.4): app-tree packages are extracted into .adds/<name>/ and are
+// live the moment the command returns, while tgz packages are merged into one
+// KoboRoot.tgz the firmware unpacks at the next boot. The run's `staged` and
+// `reboot_required` describe the RUN, so both are true whenever any tgz was staged
+// — correct, and exactly why the prompt must not keep saying only "Changes staged":
+// on a mixed run that reads as if nothing had landed, and a user who taps Later is
+// left believing KOReader is still pending when it is already installed and
+// launchable.
+//
+// The split is derived, not asked for: `changed[]` crossed with each row's
+// install_method, both of which the hook already holds. §11.2 is explicit that
+// jsonMutation gains nothing, and this needs nothing. A kpm that predates the field
+// omits install_method entirely, so every id reads as tgz, `live` stays 0, and the
+// sentence is byte-identical to 0.10.0's.
+//
+// Only a genuinely mixed run is reworded. An app-tree-only run does not reach here
+// (both bools false, no prompt); a tgz-only run, or one where `changed` is empty
+// while something else is staged, keeps the original sentence — which is still true.
+QString BrowseDialog::rebootPromptText(const QJsonObject &payload) const {
+  QHash<QString, QJsonObject> index = packageIndex();
+  int live = 0, staged = 0;
+  for (const QJsonValue &v : payload.value("changed").toArray()) {
+    QString changedId = v.toString();
+    if (changedId.isEmpty()) {
+      continue;
+    }
+    if (index.value(changedId).value("install_method").toString() == QStringLiteral("app-tree")) {
+      live++;
+    } else {
+      staged++;
+    }
+  }
+  if (live == 0 || staged == 0) {
+    return QStringLiteral("Changes staged. Reboot now?");
+  }
+  // Two short clauses and the question, mirroring the CLI's own mixed tail
+  // ("N package(s) installed, M staged — reboot to install", §6.4 step 3). Counts
+  // rather than names: a name list grows with the run and this is an e-ink
+  // confirmation box, while the browse list behind it already names every row.
+  QString done = live == 1 ? QStringLiteral("1 package installed and ready")
+                           : QString("%1 packages installed and ready").arg(live);
+  QString pending = staged == 1 ? QStringLiteral("1 more needs a reboot")
+                                : QString("%1 more need a reboot").arg(staged);
+  return done + ". " + pending + ". Reboot now?";
 }
 
 // skipNotices renders a mutation payload's `skipped` array as one line per package
@@ -297,10 +351,16 @@ void BrowseDialog::updateAll() {
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
 }
 
-void BrowseDialog::rebootConfirm() {
+// rebootConfirm is the staged banner's button target — connected by NAME through
+// the string-based SIGNAL/SLOT macros, so its signature is fixed. The banner only
+// appears for an already-staged tgz, which is what makes the plain sentence right
+// there; the per-run wording lives in showRebootPrompt.
+void BrowseDialog::rebootConfirm() { showRebootPrompt(QStringLiteral("Changes staged. Reboot now?")); }
+
+void BrowseDialog::showRebootPrompt(const QString &text) {
   ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
   ConfirmationDialog__setTitle(d, "kpm");
-  ConfirmationDialog__setText(d, "Changes staged. Reboot now?");
+  ConfirmationDialog__setText(d, text);
   ConfirmationDialog__setAcceptButtonText(d, "Reboot now");
   ConfirmationDialog__setRejectButtonText(d, "Later");
   QObject::connect(d, &QDialog::accepted, [] { rebootDevice(); });

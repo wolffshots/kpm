@@ -22,6 +22,15 @@
 //	                                    while still blocking nickelmenu: the
 //	                                    `kpm remove`d-but-not-uninstalled case, §4.3)
 //	nickelmenu   not installed        (registry def declaring conflicts=[ghostmod])
+//	plato        installed 0.9.45     (the APP-TREE fixture: [install] method =
+//	                                    "app-tree", extracted into .adds/plato and
+//	                                    live without a reboot, plus the NickelMenu
+//	                                    drop-in it declares. Its manifest names the
+//	                                    extracted files, so uninstall is a real
+//	                                    manifest delete; a Settings.toml the manifest
+//	                                    does NOT name sits alongside them as the
+//	                                    user-data-survives invariant of APP-TREE.md
+//	                                    §9.1. Drives --exercise-apptree)
 //	nickelnote   installed v1.2.0     (packages.d def + three text templates;
 //	                                    pin.template absent — the create path; its
 //	                                    registry def carries an OLD tested_fw vs the
@@ -151,6 +160,33 @@ conflicts = ["nickelclock"]
 # the "Untested on your firmware" warning — the firmware-badge fixture.
 tested_fw = "4.38.23429"
 
+# plato: the app-tree fixture (APP-TREE.md §2). Its release zip is a raw directory
+# tree, so kpm extracts it into .adds/plato itself and it is live with NO reboot —
+# the whole point of install_method in the UI contract (§11.1). Modelled on the real
+# Plato: a flat zip (no "root" prefix), a location-independent plato.sh, and a
+# NickelMenu drop-in kpm writes so the app is launchable after install (§8.2).
+#
+# min_kpm is deliberately NOT set here even though §12.3 makes it mandatory on a
+# real registry entry: the sim's kpm is built as version "dev", which compares BELOW
+# any min_kpm, so search would report min_kpm_ok=false and the detail page would
+# render the "Requires kpm >= …" branch instead of the Install/Update button this
+# fixture exists to exercise.
+[packages.plato]
+name = "Plato"
+source = "github.com/baskerville/plato"
+forge = "github"
+asset = "plato-*.zip"
+description = "A document reader for e-ink devices, installed as a directory tree — no reboot needed."
+homepage = "https://github.com/baskerville/plato"
+
+  [packages.plato.install]
+  method = "app-tree"
+  dest = "/mnt/onboard/.adds/plato"
+
+    [packages.plato.install.launcher]
+    nm_file = "/mnt/onboard/.adds/nm/plato"
+    nm_entry = "menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh"
+
 [packages.samplemod]
 name = "Sample Mod"
 source = "codeberg.org/o/samplemod"
@@ -249,6 +285,50 @@ CA: +1 555 000 0000<br/>
 </p>
 `
 
+// platoInstallTable is plato's [install] block, appended verbatim to the
+// packages.d def config.Save writes.
+//
+// Written as RAW TOML on purpose. The Go side of 0.11.0 (config.Install and the
+// install_method JSON field) is being built in parallel with this fixture, and
+// seed.go is compiled by the Go lane's own `go test ./...`; referencing a struct
+// whose fields are still moving would break that build every time it moved. TOML
+// text costs this file nothing and is what kpm actually parses, so the local
+// snapshot is the same shape a real `kpm install plato` would leave behind — one
+// that older kpm binaries simply ignore (plain toml.Unmarshal, no Undecoded check,
+// APP-TREE.md §12.3).
+const platoInstallTable = `
+[install]
+method = "app-tree"
+dest = "/mnt/onboard/.adds/plato"
+
+  [install.launcher]
+  nm_file = "/mnt/onboard/.adds/nm/plato"
+  nm_entry = "menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh"
+`
+
+// The extracted plato tree: a launcher script, one shipped stylesheet, and the
+// NickelMenu drop-in kpm writes (§8.2). All three are in the recorded manifest, so
+// `kpm uninstall plato` is a real manifest delete against the sandbox.
+const platoLauncherScript = `#!/bin/sh
+DIR="$(dirname "$0")"
+exec "$DIR/plato"
+`
+
+const platoShippedCSS = `@page { margin: 0; }
+body { text-align: justify; }
+`
+
+const platoNmEntry = "menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh\n"
+
+// platoUserSettings is NOT in plato's manifest. KOReader and Plato both keep user
+// data inside their own install tree (APP-TREE.md §9.1), so the rule that makes
+// updates safe is "kpm deletes only what it installed" — and this file is the
+// fixture's standing proof: it must survive an update and a plain uninstall alike.
+const platoUserSettings = `# Written by Plato, never by kpm.
+[home]
+summary-size = 2
+`
+
 const registryConfig = `[[registries]]
 name = "main"
 url = "codeberg.org/o/kpm-registry"
@@ -270,6 +350,15 @@ func writeDev(sysroot, devPath, content string) {
 	host := filepath.Join(sysroot, filepath.FromSlash(devPath))
 	must(os.MkdirAll(filepath.Dir(host), 0o755))
 	must(os.WriteFile(host, []byte(content), 0o644))
+}
+
+// appendRaw appends literal text to a file config.Save has already written. Used
+// for the one table this fixture states as TOML rather than as a Go struct — see
+// platoInstallTable.
+func appendRaw(path, extra string) {
+	b, err := os.ReadFile(path)
+	must(err)
+	must(os.WriteFile(path, append(b, extra...), 0o644))
 }
 
 func main() {
@@ -368,6 +457,27 @@ func main() {
 	}))
 	writeDev(sysroot, "/mnt/onboard/.adds/nickelclock/settings.ini", clockSettings)
 
+	// plato: the app-tree fixture (APP-TREE.md §11). Installed, registry-managed, and
+	// carrying the [install] table that makes `kpm search --json` report
+	// install_method = "app-tree" for it — the field the whole hook-side feature
+	// keys off. The struct write covers every field config.Package models; the
+	// [install] table is appended as TOML (see platoInstallTable).
+	must(config.Save(p.PackageFile("plato"), &config.Package{
+		Name:     "Plato",
+		Source:   "github.com/baskerville/plato",
+		Forge:    config.ForgeGitHub,
+		Asset:    "plato-*.zip",
+		Registry: "main",
+	}))
+	appendRaw(p.PackageFile("plato"), platoInstallTable)
+	// The tree kpm extracted, plus the drop-in it wrote. These are the manifest
+	// members, so an uninstall really deletes them out of the sandbox.
+	writeDev(sysroot, "/mnt/onboard/.adds/plato/plato.sh", platoLauncherScript)
+	writeDev(sysroot, "/mnt/onboard/.adds/plato/css/epub.css", platoShippedCSS)
+	writeDev(sysroot, "/mnt/onboard/.adds/nm/plato", platoNmEntry)
+	// ...and one file kpm never installed, sitting in the same directory.
+	writeDev(sysroot, "/mnt/onboard/.adds/plato/Settings.toml", platoUserSettings)
+
 	// nickelnote: an installed package declaring three text templates (create=true).
 	// content/style are written; pin.template is left absent to exercise the
 	// not-created + create-on-first-save path. This is the multi-file / text
@@ -424,6 +534,17 @@ func main() {
 	// the un-adopted self row (self_configured=false). adopt-self fills Source from
 	// the registry def — the --exercise-enroll assertion (state gains kpm.source).
 	st.Get("kpm").InstalledVersion = "0.7.0"
+	// plato: installed with the manifest an app-tree extraction records (tar-style,
+	// no leading slash — APP-TREE.md §5.2 step 6, the same convention tgz.Verify
+	// produces and internal/uninstall consumes). Settings.toml is deliberately
+	// absent from it: that is the whole preservation rule (§9.1).
+	pl := st.Get("plato")
+	pl.InstalledVersion = "0.9.45"
+	pl.Manifest = []string{
+		"mnt/onboard/.adds/plato/plato.sh",
+		"mnt/onboard/.adds/plato/css/epub.css",
+		"mnt/onboard/.adds/nm/plato",
+	}
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
@@ -444,7 +565,7 @@ func main() {
 	fmt.Println("seed: sandbox ready")
 	fmt.Println("  KPM_ROOT    =", os.Getenv("KPM_ROOT"))
 	fmt.Println("  KPM_SYSROOT =", sysroot)
-	fmt.Println("  packages: koreader(registered, NOT installed) kobocloud(latest, rolling) nickelclock(v0.4.0, rolling) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0) kpm(0.7.0, un-adopted) ghostmod(v1.0.0, state-only)")
+	fmt.Println("  packages: koreader(registered, NOT installed) kobocloud(latest, rolling) nickelclock(v0.4.0, rolling) nickelmenu(not-installed) nickelnote(v1.2.0) plato(0.9.45, app-tree) samplemod(v1.0.0) kpm(0.7.0, un-adopted) ghostmod(v1.0.0, state-only)")
 	fmt.Println("  conflicts: koreader->nickelclock (blocked install) · nickelnote<->nickelclock (installed pair) · nickelmenu->ghostmod (invisible blocker)")
 	fmt.Println("  orphaned def: koreader (packages.d def, no state entry — the 'Drop registration' target)")
 	fmt.Println("  rolling: kobocloud (clean 'rebuilt' badge) · nickelclock (rolling + conflict — badge priority)")
@@ -454,4 +575,5 @@ func main() {
 	fmt.Println("  files-missing badge: samplemod (seeded MissingFiles)")
 	fmt.Println("  firmware badge: nickelnote (tested_fw 4.38 < device 4.45)")
 	fmt.Println("  self-enrol target: kpm (un-adopted: sourceless kpm.toml + empty state source; registry offers kpm)")
+	fmt.Println("  app-tree target: plato ([install] method=app-tree, dest=/mnt/onboard/.adds/plato, nm drop-in; Settings.toml is user data, not in the manifest)")
 }

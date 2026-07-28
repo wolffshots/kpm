@@ -97,6 +97,12 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   bool selfUnenrolled = pkg.value("is_self").toBool() && !pkg.value("self_configured").toBool();
   // min_kpm gate (§2.1): don't offer an Install/Update kpm itself would refuse.
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
+  // APP-TREE.md §11.1: install_method is a closed-set string, never null, and is
+  // the ONE new field the feature adds. It changes copy only — which action verb
+  // the button carries, how long the wait is described, and whether an uninstall
+  // promises a reboot — never which buttons exist. A kpm that predates the field
+  // omits it, so this is false and every string below is the pre-0.11.0 one.
+  appTree = pkg.value("install_method").toString() == QStringLiteral("app-tree");
   // Settings opens the config editor; shown only when installed and the package
   // declares an editable config (has_config, from the search payload — CONFIG.md §4).
   bool hasConfig = !installed.isEmpty() && pkg.value("has_config").toBool();
@@ -346,10 +352,10 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
       QObject::connect(probe, &KpmProcess::response, this, &DetailDialog::onRegistered);
     }
   } else if (installed.isEmpty()) {
-    addActionButton("Install", SLOT(install()));
+    addActionButton(actionLabel("Install"), SLOT(install()));
   } else {
     if (updateAvailable) {
-      addActionButton("Update", SLOT(update()));
+      addActionButton(actionLabel("Update"), SLOT(update()));
     }
     // Enable self-update (kpm-self-enrol-plan §5): for an un-adopted kpm this is
     // the only button on the page — Uninstall is suppressed for self and, with no
@@ -386,6 +392,28 @@ void DetailDialog::addActionButton(const QString &text, const char *slot) {
   buttons.append(button);
 }
 
+// actionLabel appends "(no reboot)" to an Install/Update button for an app-tree
+// package (APP-TREE.md §11.3 item 2). This is the single visible payoff of the new
+// field, and it is on the button on purpose: every other kpm install ends in a
+// reboot prompt, so the expectation to set is the one the user has before the tap,
+// not an advisory line they read after it. Only Install and Update take it —
+// Uninstall says its piece in its confirmation, and the reboot/blocked/min_kpm
+// branches never offer either verb.
+QString DetailDialog::actionLabel(const QString &verb) const {
+  return appTree ? verb + QStringLiteral(" (no reboot)") : verb;
+}
+
+// installBusyLabel names what an Install/Update is actually doing while the button
+// is disabled (APP-TREE.md §11.3 item 3). An app-tree install writes the whole tree
+// itself — 84 MiB for KOReader — where a tgz install downloads a few MB and hands
+// them to the firmware, so the wait is appreciably longer and the generic "Working…"
+// undersells it. Deliberately NOT used by uninstall/enrol/drop: "Installing…" during
+// a removal would be worse than saying nothing specific. Returns EMPTY for a tgz
+// package — setBusy resolves that to "Working…", so the default lives in one place.
+QString DetailDialog::installBusyLabel() const {
+  return appTree ? QStringLiteral("Installing…") : QString();
+}
+
 // addBlockerButton adds a button routing to ANOTHER package's detail page
 // (INTEGRITY.md §4). The Nickel tapped(bool) signal is only reachable through the
 // string-based connect, which cannot bind a lambda, so the target id rides on the
@@ -403,22 +431,25 @@ void DetailDialog::addBlockerButton(const QString &blocker) {
   buttons.append(button);
 }
 
-void DetailDialog::setBusy(bool busy) {
+// setBusy disables the footer and shows what the action is doing. An empty
+// busyLabel means the generic "Working…", which is every action except an app-tree
+// Install/Update (see installBusyLabel).
+void DetailDialog::setBusy(bool busy, const QString &busyLabel) {
   busyNow = busy;
   for (QWidget *b : buttons) {
     b->setEnabled(!busy);
   }
   if (statusLabel) {
-    statusLabel->setText(busy ? QStringLiteral("Working…") : QString());
+    statusLabel->setText(busy ? (busyLabel.isEmpty() ? QStringLiteral("Working…") : busyLabel) : QString());
   }
 }
 
-void DetailDialog::run(KpmProcess *proc) {
+void DetailDialog::run(KpmProcess *proc, const QString &busyLabel) {
   if (!proc) {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
-  setBusy(true);
+  setBusy(true, busyLabel);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onResponse);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -433,7 +464,7 @@ void DetailDialog::install() {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
-  setBusy(true);
+  setBusy(true, installBusyLabel());
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onInstallRegistered);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -449,10 +480,10 @@ void DetailDialog::onInstallRegistered(int exitCode, QJsonObject payload) {
   // Defer one event-loop turn: response() is emitted before the install
   // process clears the mutating guard, so starting update synchronously here
   // would bounce off it.
-  QTimer::singleShot(0, this, [this] { run(KpmProcess::update(id)); });
+  QTimer::singleShot(0, this, [this] { run(KpmProcess::update(id), installBusyLabel()); });
 }
 
-void DetailDialog::update() { run(KpmProcess::update(id)); }
+void DetailDialog::update() { run(KpmProcess::update(id), installBusyLabel()); }
 
 // enableSelfUpdate enrols kpm's own self-update (kpm-self-enrol-plan §5). It does
 // NOT reuse the shared run()/onResponse: that path closes the view and reboots on
@@ -588,14 +619,21 @@ void DetailDialog::openConfig() {
   });
 }
 
+// uninstall confirms first, and the confirmation has to be honest about WHEN the
+// files go (APP-TREE.md §6.5 / §11.3 item 1). An app-tree package is deleted from
+// .adds/<name>/ by kpm itself while the command runs, so "removed on reboot" is
+// simply false for it — and telling a user to reboot for something already done is
+// how a reboot prompt stops meaning anything. The tgz wording is unchanged.
 void DetailDialog::uninstall() {
   QString name = pkg.value("name").toString();
   if (name.isEmpty()) {
     name = id;
   }
+  QString removal = appTree ? QStringLiteral("Its files will be removed now.")
+                            : QStringLiteral("Its files will be removed on reboot.");
   ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
   ConfirmationDialog__setTitle(d, "kpm");
-  ConfirmationDialog__setText(d, "Uninstall " + name + "? Its files will be removed on reboot.");
+  ConfirmationDialog__setText(d, "Uninstall " + name + "? " + removal);
   ConfirmationDialog__setAcceptButtonText(d, "Uninstall");
   ConfirmationDialog__setRejectButtonText(d, "Cancel");
   QObject::connect(d, &QDialog::accepted, this, [this] { run(KpmProcess::uninstall(id)); });

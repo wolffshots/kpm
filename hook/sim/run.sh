@@ -9,6 +9,7 @@
 #   ./run.sh --exercise-conflicts out         offscreen: drive the conflicts UI + screenshots
 #   ./run.sh --exercise-orphan out            offscreen: drive the skip notice + orphaned-def drop
 #   ./run.sh --exercise-staged                offscreen: drive the staged-blocker advisory + reboot route
+#   ./run.sh --exercise-apptree out           offscreen: drive the app-tree copy (APP-TREE.md §11.3)
 #   ./run.sh --exercise-init         offscreen: drive the "Create from example" flow (nickelnote pin)
 #   ./run.sh --exercise-sync         offscreen: drive the Sync flow (samplemod)
 #   ./run.sh --exercise-enroll       offscreen: drive the Enable-self-update flow (kpm)
@@ -77,7 +78,7 @@ export NKPM_KPM="$BUILD/kpm"
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-rowrepaint "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-rowrepaint "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="
