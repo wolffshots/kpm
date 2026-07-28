@@ -33,7 +33,7 @@ repair it over USB:
   packages.d/          one TOML file per registered package (kpm.toml = itself)
   state.json           installed/staged versions, manifests, last check
   kpm.log              append-only history
-  status.txt           last summary (shown by the NickelMenu Status dialog)
+  status               last summary (shown by the NickelMenu Status dialog)
   cache/               package downloads (*.tgz/*.part, swept selectively) and
                        registry caches (registry-<name>.toml, never swept)
 /mnt/onboard/.adds/nm/kpm   NickelMenu drop-in
@@ -180,7 +180,8 @@ name = "NickelHardcover"
 source = "codeberg.org/StrayRose/NickelHardcover"
 forge = "forgejo"
 asset = "KoboRoot.tgz"
-pin = ""                # empty = track latest; else an exact tag
+pin = ""                # empty = track latest; else an exact tag (frozen: even a
+                        # rolling package is not re-fetched while a pin is set)
 
 # [uninstall]           # optional — customizes "kpm uninstall" (see below)
 # purge_paths = ["/mnt/onboard/.adds/NickelHardcover/**"]
@@ -208,6 +209,15 @@ its entries yourself: a def chooses the source repo and the uninstall recipe
 signing** in this version, just as there is no asset signing — TLS with the
 embedded CA bundle protects the fetch, not the maintainer's intent.
 
+**Checksum verification narrows that gap; it does not close it.** From 0.10.0 a
+registry entry may carry a per-release `sha256` (see below), which kpm verifies
+against the downloaded bytes and hard-fails on a mismatch. It raises the bar
+against a compromised CDN or a silent upstream re-upload, but it is a *curator
+attestation* rather than a signature: it authenticates the asset against a
+registry you already chose to trust, it is opt-in per release, and it is
+best-effort across kpm versions — an older kpm ignores the field and downloads
+with TLS-only verification, so it binds nobody who has not updated.
+
 **A registry repo** has one file at its root, `registry.toml`:
 
 ```toml
@@ -230,6 +240,70 @@ Package ids follow the `[a-z0-9-]+` rule. Fields match the local schema except
 there is **no `pin`** (pins are a local decision, never distributed) and the
 optional `min_kpm`. `schema_version` must be `1`; a newer schema tells you to
 update kpm.
+
+**Three optional fields change what install/update actually do** (0.10.0). Unlike
+`description`/`homepage`/`tested_fw`, they are functional: they are copied into
+your local `packages.d` def and a curator edit to them propagates via `kpm sync`.
+A def whose declarations are malformed is dropped from the registry entirely, so
+a typo makes the package disappear rather than misbehave — kpm logs a `WARN`
+naming the id and the reason on every refresh and every cache read, so a
+vanished package is diagnosable from `kpm log`.
+
+| Field | What it does | `min_kpm = "0.10.0"` required? |
+|---|---|---|
+| `update_check = "rolling"` | detect a changed release when the tag never moves | **yes** |
+| `conflicts = ["<id>", …]` | refuse to install alongside a named package | **yes** |
+| `checksums` (tag → sha256) | verify the downloaded asset against a curator-recorded hash | no |
+
+```toml
+# KoboCloud publishes every build under the permanent tag "latest", so comparing
+# tags can never detect an update. "rolling" compares the release's published_at
+# and asset size instead. min_kpm is mandatory: an older kpm ignores the key and
+# would report this package up to date forever.
+[packages.kobocloud]
+name         = "KoboCloud"
+source       = "github.com/fsantini/KoboCloud"
+forge        = "github"
+asset        = "KoboRoot.tgz"
+update_check = "rolling"
+min_kpm      = "0.10.0"
+
+# kobo-tweaks auto-uninstalls NickelClock as part of its own install, which would
+# delete a kpm-tracked package's files behind kpm's back. min_kpm is mandatory:
+# an older kpm ignores `conflicts` and would let that happen.
+[packages.kobo-tweaks]
+name      = "Kobo Tweaks"
+source    = "github.com/…/kobo-tweaks"
+forge     = "github"
+asset     = "KoboRoot.tgz"
+conflicts = ["nickelclock"]
+min_kpm   = "0.10.0"
+
+# A checksum is a per-release curator attestation, keyed by the exact upstream
+# tag (a single leading "v" is insignificant). Releases you have not verified are
+# simply absent — they install unverified, exactly as before.
+[packages.nickelclock.checksums]
+"v0.4.0" = "3b1f8c…64 lowercase hex chars…"
+```
+
+Curator notes:
+
+- `conflicts` is declared **once**, on whichever side is natural. kpm checks both
+  directions, so the counterpart entry needs no edit.
+- Get a hash with `curl -sL <browser_download_url> | sha256sum`, or read it out
+  of `kpm log` — every successful download logs a `CHECKSUM` line with the hash
+  it saw, whether or not a checksum was declared. Hash the asset **exactly as
+  published** (for a zip-wrapped asset, the zip — not the tgz inside it).
+  GitHub also shows a `sha256:`-prefixed digest on recent asset uploads; you can
+  paste that verbatim — the prefix and any surrounding whitespace are stripped.
+- Never put a `checksums` block on a `rolling` def: a rolling tag's asset changes
+  with no registry edit, so the hash would be correct exactly once. kpm treats
+  the combination as a parse error and drops the def. (A *local* def hand-edited
+  to carry both degrades to unverified with a `WARN` instead, so a bad edit can
+  never make a package permanently un-installable.)
+- `update_check = "rolling"` without `min_kpm` is also a parse error and drops
+  the def. An older kpm ignores the key and would report the package up to date
+  forever, which is the exact failure the field exists to fix.
 
 **Using registries** (CLI/telnet — there is no NickelMenu entry for these):
 
@@ -290,13 +364,13 @@ menu:
   background. With NickelDBus you get a toast; otherwise tap **Status**.
 - **Update all** — brings Wi-Fi up, runs `kpm update --all --reboot --notify`.
   This stages every pending package and reboots to install them.
-- **Status** — shows `status.txt` in a dialog (offline, instant).
+- **Status** — shows the status file in a dialog (offline, instant).
 - **Package manager** — runs `kpm ui`, which opens the graphical browser (see
   "Graphical UI"). This is the launch point for the NickelKPM hook.
 
 Because NickelMenu's `cmd_spawn` reports success on *spawn*, not on completion,
 long-running work can't report back through the menu — kpm signals completion via
-`status.txt` (always) and NickelDBus toasts (if `qndb` exists).
+its status file (always) and NickelDBus toasts (if `qndb` exists).
 
 ## Graphical UI (NickelKPM)
 
@@ -389,7 +463,7 @@ kpm remove <id>             unregister only (deletes the TOML; files stay — se
 kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]
                             delete a package's installed files (see "Uninstalling")
 kpm list                    offline table: id, installed, staged, latest, pin
-kpm check [--notify]        query forges for all packages; update state + status.txt
+kpm check [--notify]        query forges for all packages; update state + status file
 kpm update [<id>...] [--all] [--reboot] [--notify]
                             download, verify, merge and stage updates; reboot to install
                             (after a reboot promotes a staged install, kpm existence-checks
@@ -421,7 +495,7 @@ kpm config set <id> <file> (--key K [--section S] | --line N [--append|--delete]
 kpm config init <id> <file> [--force]  create a missing config file from the example
                             template its registry entry ships (refuses to overwrite)
 kpm log [-n N]              print the last N log lines (default 12)
-kpm status                  print status.txt + any pending staging; fast/offline
+kpm status                  print the status summary + any pending staging; fast/offline
 kpm ui                      signal the NickelKPM hook to open the graphical browser
 kpm version                 print the compiled-in version
 ```
@@ -517,6 +591,12 @@ runs — it never breaks `add`/`check`/`update`. And a package file that is
 entirely unreadable (malformed TOML, or a filename that isn't a valid id) is
 skipped with a warning in the log rather than making every package invisible;
 that one package simply doesn't exist until you fix the file.
+
+One exception: a file with **malformed TOML** blocks `kpm install` and
+`kpm update` with a message naming it, because kpm cannot see what conflicts that
+package declares and will not answer the question from a partial view. Fix the
+file or `kpm remove` it. A file whose *filename* isn't a valid id is only warned
+about — it was never registered, so it cannot declare anything.
 
 (`kpm pin`/`unpin` rewrite the package's TOML, preserving unknown fields but
 **not comments** — a TOML-library limitation.)
@@ -630,15 +710,15 @@ After the bootstrap reboot, connect over telnet/SSH (as root) and confirm:
 
 ```
 # kpm version
-0.3.0
+0.9.2
 
 # kpm add https://codeberg.org/StrayRose/NickelHardcover
 registered nickelhardcover -> codeberg.org/StrayRose/NickelHardcover [forgejo], asset "KoboRoot.tgz"
 
 # kpm check
-kpm 0.3.0 — checked 2026-07-19 10:30
+kpm 0.9.2 — checked 2026-07-19 10:30
 nickelhardcover  - -> v0.5.1  UPDATE AVAILABLE
-kpm              0.3.0        self-update not configured
+kpm              0.9.2        self-update not configured
 1 update available. Use "Update all" to install (reboots).
 
 # kpm update --all           # stage without rebooting
@@ -670,6 +750,40 @@ Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
   version re-seeds automatically. If an update was staged but not yet installed
   when the corruption happened, its `.kobo/KoboRoot.tgz` becomes "foreign"
   afterward — reboot to install it, or delete that file by hand.
+- **"conflicts with installed package".** A package whose registry def declares a
+  `conflicts` entry is refused while the named package is still on the device,
+  because installing it would delete that package's files behind kpm's back:
+
+  ```
+  kpm install: "kobo-tweaks" conflicts with installed package "nickelclock" — uninstall it first: kpm uninstall nickelclock
+  ```
+
+  Run the command it names, then retry — the block is a pure function of live
+  state, so it clears itself with no fixup. (If the blocker was `kpm remove`d, its
+  files remain but its def is gone, so `kpm uninstall` alone cannot work; the
+  message then names the re-register step first.) `--yes` deliberately does
+  **not** override it (the graphical UI always passes `--yes`), and there is no
+  force flag: kpm cannot make "install anyway" safe, because the *other*
+  package's installer does the deleting, so kpm never learns which files went
+  away.
+
+  `kpm update` enforces the same rule for a package that is registered but not
+  yet installed. Naming it explicitly (`kpm update <id>`) is an error; under
+  `kpm update --all` it is **skipped with a note** and the run still succeeds — a
+  conflict is permanent, so failing the whole run would make "Update all" error
+  out forever. A pair that is *already* installed is reported by `kpm status`
+  (`CONFLICT: … cannot both be installed`) but never blocked — the collision has
+  already happened, and refusing would strand both.
+- **"checksum mismatch for asset …".** The registry declares a `sha256` for that
+  release and the downloaded bytes did not match. kpm deletes the partial file
+  and refuses to install; other packages in the same run still stage. There is no
+  retry (the bytes are what the server serves), and no override. Either the
+  upstream release was re-uploaded — tell the curator, the entry needs updating —
+  or something between you and the forge is serving different bytes.
+- **`status.txt` is now `status`.** The last-summary file lost its extension in
+  0.10.0, so Nickel's `ExcludeSyncFolders` firmware variant stops importing it as
+  a book. The first command that writes a status removes the old file for you;
+  until then `kpm status` still reads it.
 - **The log.** `kpm.log` rotates to `kpm.log.1` once it passes 256 KiB (a single
   older file is kept). `kpm log` only reads the current file; open `kpm.log.1`
   over USB for older history.
