@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"kpm/internal/config"
@@ -66,12 +67,18 @@ func (a *App) cmdCheck(args []string) int {
 	okCount := 0
 	available := 0
 	checkPkgs := []jsonCheckPkg{} // §2.2: per-package latest, in pkgs order
+	// Unconfigured (e.g. self-update with empty source): skip silently (F7).
+	todo := make([]*config.Package, 0, len(pkgs))
 	for _, p := range pkgs {
-		// Unconfigured (e.g. self-update with empty source): skip silently (F7).
-		if !a.configured(p) {
-			continue
+		if a.configured(p) {
+			todo = append(todo, p)
 		}
-		rel, err := a.resolveCheckRelease(p)
+	}
+	// The release lookups — the only network work here — run concurrently and
+	// bounded; everything below stays exactly as it was, in pkgs order.
+	fetched := a.prefetchReleases(todo)
+	for i, p := range todo {
+		rel, err := fetched[i].rel, fetched[i].err
 		ps := a.state.Get(p.ID)
 		pin := a.effectivePin(p)
 		if err != nil {
@@ -171,21 +178,55 @@ func (a *App) cmdCheck(args []string) int {
 // to: the pinned tag (confirmed to exist) or the latest release. check needs
 // more than the tag now — the rolling fingerprint is built from the release's
 // published_at and its matched asset's size (INTEGRITY.md §3.6).
+//
+// It is the two halves below run back to back, which is what every non-check
+// caller wants. check itself runs them apart: the App half must stay on the main
+// goroutine (see checkTarget), only the network half fans out.
 func (a *App) resolveCheckRelease(p *config.Package) (forge.Release, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	return a.checkTargetFor(p).resolve()
+}
+
+// checkTarget is everything a release lookup needs that lives on App, captured
+// so the lookup itself touches nothing shared and mutable.
+//
+// This split is not decoration. effectiveForge/effectiveSource/effectivePin all
+// go through a.state.Get for kpm's own id, and State.Get CREATES the map entry
+// when it is absent — a write to a map the whole run shares. Resolving packages
+// concurrently with that inside a worker is a data race, so it is hoisted here
+// instead.
+type checkTarget struct {
+	f   forge.Forge
+	src string
+	pin string
+	err error // an unknown forge identifier, surfaced at the package's turn
+}
+
+// checkTargetFor captures one package's lookup inputs. MAIN GOROUTINE ONLY.
+func (a *App) checkTargetFor(p *config.Package) checkTarget {
 	f, err := a.forgeFor(p)
 	if err != nil {
-		return forge.Release{}, err
+		return checkTarget{err: err}
 	}
 	// Split the effective source so an adopted kpm resolves from state (§1/§3).
-	src := a.effectiveSource(p)
-	pin := a.effectivePin(p)
+	return checkTarget{f: f, src: a.effectiveSource(p), pin: a.effectivePin(p)}
+}
+
+// resolve performs the lookup. It reads only its own fields and the shared
+// *forge.Client (whose http.Client is concurrency-safe and whose cache dir is
+// fixed before the first request), so it is safe to run concurrently. The
+// per-package 60s budget lives here, one per package, exactly as before.
+func (t checkTarget) resolve() (forge.Release, error) {
+	if t.err != nil {
+		return forge.Release{}, t.err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	var rel forge.Release
-	if pin != "" {
-		rel, err = f.ReleaseByTag(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src), pin)
+	var err error
+	if t.pin != "" {
+		rel, err = t.f.ReleaseByTag(ctx, config.SourceHost(t.src), config.SourceOwner(t.src), config.SourceRepo(t.src), t.pin)
 	} else {
-		rel, err = f.LatestRelease(ctx, config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src))
+		rel, err = t.f.LatestRelease(ctx, config.SourceHost(t.src), config.SourceOwner(t.src), config.SourceRepo(t.src))
 	}
 	if err != nil {
 		return forge.Release{}, err
@@ -194,4 +235,45 @@ func (a *App) resolveCheckRelease(p *config.Package) (forge.Release, error) {
 		return forge.Release{}, fmt.Errorf("forge returned a release with an empty tag")
 	}
 	return rel, nil
+}
+
+// checkResult is one package's lookup outcome, held until the ordered apply
+// pass so state, counters, stderr and the log stay single-threaded.
+type checkResult struct {
+	rel forge.Release
+	err error
+}
+
+// checkConcurrency bounds how many release lookups check has in flight. Four,
+// not one per package: the device CPU is weak and the TLS handshake is the
+// expensive part of each lookup, and GitHub applies secondary limits to
+// aggressive concurrency. It is the knob if hardware says otherwise.
+const checkConcurrency = 4
+
+// prefetchReleases resolves every package's release concurrently, bounded by
+// checkConcurrency, and returns the outcomes INDEXED BY POSITION so the caller
+// applies them in pkgs order (JSON-OUTPUT.md §2.2).
+//
+// Only the network call fans out. Every App read is done here on this goroutine,
+// and no worker writes state, logs, or prints — those all stay in the ordered
+// apply pass, or state.json races and log lines interleave nondeterministically.
+func (a *App) prefetchReleases(pkgs []*config.Package) []checkResult {
+	targets := make([]checkTarget, len(pkgs))
+	for i, p := range pkgs {
+		targets[i] = a.checkTargetFor(p)
+	}
+	out := make([]checkResult, len(pkgs))
+	sem := make(chan struct{}, checkConcurrency)
+	var wg sync.WaitGroup
+	for i := range pkgs {
+		sem <- struct{}{} // bounds live goroutines, not just live requests
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i].rel, out[i].err = targets[i].resolve()
+		}(i)
+	}
+	wg.Wait()
+	return out
 }

@@ -264,6 +264,10 @@ func newApp(mutating bool) (*App, error) {
 		a.readOnly = true // pure read: no lock, no reconcile/seedSelf, no writes
 		return a, nil
 	}
+	// Conditional forge API requests: replay the previous ETag so a forge that
+	// answers 304 costs no rate-limit budget. Enabled for MUTATING commands only
+	// — a cache entry is a write, and a read-only command writes nothing (B1).
+	a.client.SetCacheDir(p.CacheDir())
 
 	locked, err := acquireLock(p.LockFile())
 	if err != nil {

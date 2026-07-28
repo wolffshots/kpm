@@ -29,7 +29,26 @@ const apiTimeout = 30 * time.Second
 // available), 2 retries with backoff, and a kpm User-Agent.
 type Client struct {
 	hc *http.Client
+	// cacheDir is where conditional-request entries live (see cache.go). The
+	// caller injects it so this package stays free of device paths. Empty — the
+	// default from every constructor — disables response caching entirely:
+	// unconditional GETs, nothing read, nothing written.
+	cacheDir string
 }
+
+// SetCacheDir turns on conditional forge API requests, storing one entry per
+// request under dir. cmd/kpm passes device.CacheDir(); leaving it unset keeps
+// the pre-0.11 behaviour, which is what the non-device callers and most tests
+// want.
+//
+// Call it once, before the first request. The field is read-only afterwards,
+// which is what makes concurrent getJSON calls (check's bounded fan-out) safe.
+func (c *Client) SetCacheDir(dir string) { c.cacheDir = dir }
+
+// CacheDir reports where conditional-request entries are stored, or "" when
+// response caching is off. It exists so cmd/kpm can assert the wiring — in
+// particular that a read-only command never gets one (B1).
+func (c *Client) CacheDir() string { return c.cacheDir }
 
 // NewClient builds the shared client with the embedded CA bundle. It panics if
 // no usable CA pool can be assembled (a build-time invariant: the embedded
@@ -131,7 +150,16 @@ func wrapReleaseErr(err error, host, owner, repo string) error {
 // getJSON fetches url with the given Accept header and returns the body,
 // retrying twice on transient network errors. Non-2xx is a permanent error (no
 // retry); 404 and GitHub rate-limit responses map to sentinel errors (D7).
+//
+// When a cache dir is set (see cache.go) the request is CONDITIONAL: the
+// previous ETag rides as If-None-Match and a 304 returns the cached body, which
+// costs no GitHub rate-limit budget. With no cache dir, or nothing usable
+// cached, this is the same unconditional GET it has always been.
 func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error) {
+	// Load the previous body BEFORE the first attempt: a 304 carries none of its
+	// own, so If-None-Match may only be sent when the fallback body is already in
+	// hand. cached is nil whenever anything at all is wrong with the entry.
+	cached := c.loadCache(url, accept)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -151,14 +179,27 @@ func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
+		if cached != nil {
+			req.Header.Set("If-None-Match", cached.Etag)
+		}
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			cancel()
 			lastErr = err
 			continue // network error: retry
 		}
+		// 304 is the whole point: the cached body is still current. It must be
+		// handled BEFORE the status checks below, which would otherwise call it a
+		// permanent non-2xx error. Only ever taken when we asked conditionally —
+		// an unsolicited 304 still falls through to that error, as it always did.
+		if resp.StatusCode == http.StatusNotModified && cached != nil {
+			resp.Body.Close()
+			cancel()
+			return cached.Body, nil
+		}
 		// Bound the read: one byte past the cap tells us it overflowed (B4).
 		body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes+1))
+		etag := resp.Header.Get("ETag")
 		resp.Body.Close()
 		cancel()
 		if rerr != nil {
@@ -179,6 +220,7 @@ func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, fmt.Errorf("http %d from %s: %s", resp.StatusCode, url, snippet(body))
 		}
+		c.storeCache(url, accept, etag, body)
 		return body, nil
 	}
 	return nil, fmt.Errorf("request failed after retries: %w", lastErr)
