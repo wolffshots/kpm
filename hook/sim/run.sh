@@ -6,9 +6,13 @@
 #   ./run.sh --screenshot out        offscreen: write browse/detail/config png's
 #   ./run.sh --exercise-uninstall samplemod   offscreen: drive the uninstall flow
 #   ./run.sh --exercise-config nickelclock    offscreen: drive the config-edit flow
+#   ./run.sh --exercise-conflicts out         offscreen: drive the conflicts UI + screenshots
+#   ./run.sh --exercise-orphan out            offscreen: drive the skip notice + orphaned-def drop
+#   ./run.sh --exercise-staged                offscreen: drive the staged-blocker advisory + reboot route
 #   ./run.sh --exercise-init         offscreen: drive the "Create from example" flow (nickelnote pin)
 #   ./run.sh --exercise-sync         offscreen: drive the Sync flow (samplemod)
 #   ./run.sh --exercise-enroll       offscreen: drive the Enable-self-update flow (kpm)
+#   ./run.sh --exercise-rowrepaint   offscreen: drive the win-4 in-place row repaint
 #   ./run.sh --exercise-wake         offscreen: drive the sleep/wake chrome guard
 #   ./run.sh --exercise-badges       offscreen: assert the files-missing + firmware badges
 #   ./run.sh --size 600x800          override the Kobo-portrait window size
@@ -73,7 +77,7 @@ export NKPM_KPM="$BUILD/kpm"
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-rowrepaint "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="

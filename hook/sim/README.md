@@ -116,6 +116,74 @@ Offscreen end-to-end self-enrol (drives DetailDialog -> **Enable self-update** -
 # the warm pre-seeded registry cache, then adopts from the cache.
 ```
 
+Offscreen conflicts UI (INTEGRITY.md §4/§6.1), driven by **real `kpm search
+--json` output** — the sandbox declares the conflicts and the rolling defs
+(`fixture/seed.go`) and the shipped kpm computes `conflicts` /
+`conflicts_active` / `rolling` from them, so a divergence between what the Go core
+emits and what the hook consumes fails here rather than on a device:
+
+```sh
+./run.sh --exercise-conflicts out
+# Asserts, in order:
+#   §6.1  four "conflict" badges straight off `kpm search --json` — the blocked
+#         package, BOTH halves of the already-installed pair (the relation is
+#         symmetric, §4.2, so nickelclock reports a conflict it never declared),
+#         and the unresolvable-blocker case below
+#   §6.3  feeding a CHECK-shaped payload (latest/update only — check is the one
+#         thing that still needs the network) through BrowseDialog::onCheckDone
+#         badges kobocloud "latest rebuilt ↑", which can only happen if the real
+#         mergeCheck preserved the search payload's `rolling`
+#   §6.1  nickelclock is rolling AND rebuilt AND conflicted: its badge stays
+#         "conflict", pinning the documented priority (packagerow.cc)
+#   §4.3  a blocker that is NOT in the search list (a `kpm remove`d but never
+#         uninstalled package still blocks) falls back to its raw id, so the
+#         button reads "Manage ghostmod" rather than "Manage "
+#   §4.3  routing to that unreachable blocker reports the miss AND keeps the page
+#         that explained the conflict, with its button live again
+#   §4.3  the blocked package's detail page shows the advisory, has NO Install
+#         button (kpm hard-refuses it and --yes does not override), and offers a
+#         "Manage NickelClock" route — the blocker's DISPLAY name, not its id
+#   §4.4  following that route (tapped twice, as on an unresponsive e-ink screen)
+#         lands ONCE on the blocker's own page, which reports the pair and offers
+#         the Uninstall that actually clears the block
+# Writes browse-conflict.png, detail-conflict.png and detail-conflict-pair.png into
+# <dir>.
+```
+
+Offscreen failed-install trap — the skip notice and the orphaned def
+(INTEGRITY.md §4.3/§6.4):
+
+```sh
+./run.sh --exercise-orphan out
+# The hook's Install is two commands (`install` writes the def, `update` fetches),
+# so a failed fetch leaves a package REGISTERED BUT NOT INSTALLED. If its
+# conflicting counterpart is then installed, that package can be neither installed
+# nor uninstalled, and every `kpm update --all` skips it for good. Asserts:
+#   §6.4  an update-all payload carrying `skipped` renders one line per package in
+#         the list, with kpm's own refusal sentence — not an error dialog, and not
+#         silence (the command succeeded)
+#   §4.3  the orphan's detail page offers "Drop registration", and tapping it
+#         (through its confirmation) actually removes packages.d/koreader.toml —
+#         a real `kpm remove` against the sandbox, the one hook command with no
+#         --json mode
+#   §4.3  a blocked package that was NEVER registered is offered no such button
+#         (the gate is a real `kpm list --json` probe, not a guess)
+# Writes browse-skipped.png and detail-orphan.png into <dir>.
+```
+
+Offscreen staged-blocker copy and route (INTEGRITY.md §4.3):
+
+```sh
+./run.sh --exercise-staged
+# conflicts_active counts a blocker that is merely STAGED, so the advisory must not
+# call it installed and the page the route lands on must not be a label with no
+# buttons. The sandbox cannot stage anything offline (staging needs a download), so
+# this is the ONE exercise that edits the real payload: it flips the blocker to
+# staged and feeds it back through BrowseDialog::onSearch. Asserts the advisory says
+# "staged to install at the next reboot" (never "installed package"), and that the
+# blocker's staged page offers "Reboot now" — the action that actually resolves it.
+```
+
 Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
 
 ```sh
@@ -124,6 +192,23 @@ Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
 # MissingFiles) and nickelnote's detail page shows "Untested on your firmware"
 # (D, an older registry tested_fw than the seeded .kobo/version). Read-only, so
 # the seeded MissingFiles never self-clears (exit 0 = PASS, missing label = fail).
+```
+
+Offscreen in-place row repaint (flash-reduction **win 4**: after an action, repaint
+only the rows whose badge changed instead of rebuilding the page):
+
+```sh
+./run.sh --exercise-rowrepaint
+# uninstalls samplemod through the detail page, then asserts (a) samplemod's badge
+# became "not installed" (it starts at the seeded "files missing") and (b) EVERY
+# PackageRow widget captured before the action is still alive — i.e. the acted-on
+# row repainted in place instead of the page being rebuilt. The QPointer check is
+# what makes this a real gate: with win 4 disabled it reports
+# "6 of 6 rows were destroyed" and exits 8.
+#
+# The sim cannot show e-ink refreshes, so this proves the state-correctness half of
+# win 4 (no stale row after a mutation), NOT that the flashing actually dropped —
+# only the device can show that.
 ```
 
 Offscreen end-to-end sleep/wake chrome guard (drives the status bar + nav-bar
@@ -144,24 +229,28 @@ uninstalls never touch the real filesystem.
 
 ## Seeded fixture (offline)
 
-`kpm search --json` returns six packages in mixed states:
+`kpm search --json` returns seven packages in mixed states (plus `ghostmod`, which
+is seeded into `state.json` only and therefore never appears):
 
 | id | state | detail action |
 |----|-------|---------------|
-| koreader | not installed | Install |
-| nickelclock | installed v0.4.0 | Uninstall (marker-remove) + Settings (ini config — the config-edit target) |
-| nickelmenu | not installed | Install |
+| koreader | **registered but NOT installed** (packages.d def, no state entry) and blocked by nickelclock → the orphaned-def fixture | Manage NickelClock + **Drop registration** |
+| kobocloud | installed `latest`, `update_check = "rolling"`, no conflicts | the clean §6.3 "rebuilt ↑" badge fixture |
+| nickelclock | installed v0.4.0, `update_check = "rolling"`, half of the installed conflict pair | Uninstall (marker-remove) + Settings (ini config — the config-edit target); badge priority: conflict outranks "rebuilt ↑" |
+| nickelmenu | not installed, blocked by `ghostmod` (installed, state-only ⇒ invisible to search) | Manage ghostmod (raw-id fallback) |
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path); registry def carries an old `tested_fw` (4.38) vs the seeded `.kobo/version` (4.45) → **firmware badge** ("Untested on your firmware") |
 | samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge |
 | kpm | installed 0.7.0 | un-adopted self row: sourceless `packages.d/kpm.toml` + empty state source (the registry offers a kpm def with a real source) → `is_self=true`, `self_configured=false` → **"self-update off"** badge + **Enable self-update** button — the `--exercise-enroll` target |
 
-## Which of the thirteen UI actions work end-to-end
+## Which of the fifteen UI actions work end-to-end
 
-The thirteen commands the hook issues (`hook/src/kpmprocess.cc`):
+The fifteen commands the hook issues (`hook/src/kpmprocess.cc`):
 
 | action | works in sim | notes |
 |--------|:---:|-------|
 | **search** (browse) | ✅ | offline, read-only; drives the whole browse/detail view |
+| **list** | ✅ | offline read-only probe: the only command that reports which ids are *registered*, used to detect an orphaned def (`--exercise-orphan`) |
+| **remove** | ✅ | offline mutation; the one command with **no `--json` mode**, so `KpmProcess` runs it with `expectsPayload=false` and treats exit 0 with no `BEGIN_JSON` as success; `--exercise-orphan` verifies the def file is gone |
 | **uninstall** | ✅ | offline mutation; confined to `KPM_SYSROOT`; validated end-to-end |
 | **adopt-self** | ✅ | offline mutation (best-effort refresh no-ops / soft-fails on the warm cache, then adopts from it); `--exercise-enroll` verifies kpm gains `self_configured=true` |
 | **sync** | ✅ | offline mutation; reads the registry cache + rewrites packages.d; `--exercise-sync` verifies samplemod gains its config |
@@ -185,7 +274,11 @@ CLI has no hook for. So the sim seeds state **offline** (via `fixture/seed.go`,
 importing `internal/*`) rather than through a fixture server.
 
 The browse list therefore shows installed / not-installed states but **not**
-"update available" badges (those come only from a live `kpm check`).
+"update available" badges (those come only from a live `kpm check`). The conflict
+and rolling *declarations* are a different matter: those are registry/state facts,
+they are seeded, and the real kpm computes `conflicts_active` / `rolling` from
+them — so only `check`'s latest/update pair is ever synthesized, and only by
+`--exercise-conflicts`, in `check`'s own shape through the real `mergeCheck`.
 
 ## Fidelity gaps (out of scope by design)
 
@@ -199,7 +292,7 @@ The browse list therefore shows installed / not-installed states but **not**
   dialog paths aren't exercised.
 - **Keyboard**: the desktop's real keyboard types into the search box; Return
   commits (drives `commitRequested()`). The on-device virtual keyboard is a no-op.
-- Build artifacts (`build/`, `nkpm-sim`, `shots/`) and the `/tmp` sandbox are
+- Build artifacts (`build/`, `nkpm-sim`, `out/`) and the `/tmp` sandbox are
   untracked.
 
 ## Device-source note

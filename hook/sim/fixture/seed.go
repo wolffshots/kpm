@@ -2,15 +2,33 @@
 // simulator (hook/sim) can drive real `kpm search`/`kpm uninstall` against it,
 // entirely offline. It seeds packages in mixed states:
 //
-//	koreader     not installed        (registry def, rich description)
+//	koreader     ORPHANED             (registry def declaring conflicts=[nickelclock]
+//	                                    + a packages.d def but NO state entry: exactly
+//	                                    what a failed two-step install leaves behind —
+//	                                    registered, not installed, and blocked from
+//	                                    re-installing. The --exercise-conflicts
+//	                                    "Drop registration" target, INTEGRITY.md §4.3)
 //	nickelclock  installed v0.4.0     (packages.d def + settings.ini on disk —
-//	                                    the ini config-editing target)
-//	nickelmenu   not installed        (registry def)
+//	                                    the ini config-editing target; its registry def
+//	                                    is update_check = "rolling" AND it is half of
+//	                                    the already-installed conflict pair, so it is
+//	                                    also the badge-priority fixture: conflict must
+//	                                    outrank "rebuilt ↑")
+//	kobocloud    installed latest     (registry def with update_check = "rolling" and
+//	                                    no conflicts — the clean §6.3 rebuilt-badge
+//	                                    fixture, modelled on the real KoboCloud)
+//	ghostmod     installed v1.0.0     (STATE ONLY — no registry entry and no
+//	                                    packages.d def, so it never appears in search
+//	                                    while still blocking nickelmenu: the
+//	                                    `kpm remove`d-but-not-uninstalled case, §4.3)
+//	nickelmenu   not installed        (registry def declaring conflicts=[ghostmod])
 //	nickelnote   installed v1.2.0     (packages.d def + three text templates;
 //	                                    pin.template absent — the create path; its
 //	                                    registry def carries an OLD tested_fw vs the
 //	                                    seeded .kobo/version — search reports
-//	                                    fw_untested=true, the firmware-badge fixture)
+//	                                    fw_untested=true, the firmware-badge fixture;
+//	                                    it also declares conflicts=[nickelclock], the
+//	                                    already-installed pair of INTEGRITY.md §4.5)
 //	samplemod    installed v1.0.0     (packages.d def + manifest + a real file
 //	                                    under KPM_SYSROOT — the uninstall target;
 //	                                    also registry-managed with a STALE local
@@ -34,6 +52,12 @@
 // https-only and trusts an embedded CA bundle (internal/forge/http.go), so a
 // local fixture forge cannot be trusted without patching the binary. See the sim
 // README for which of the seven UI flows this supports.
+//
+// Everything the conflicts/rolling UI reads (INTEGRITY.md §6.1) IS seeded here and
+// computed by the real kpm, so --exercise-conflicts asserts against `kpm search
+// --json` output rather than against a payload the simulator wrote itself. Only
+// `check`'s latest/update pair is still synthesized by the exercise, because it is
+// the one thing that genuinely requires the network.
 package main
 
 import (
@@ -59,13 +83,23 @@ forge = "github"
 asset = "koreader-kobo-*.zip"
 description = "A document viewer for PDF, DjVu, EPUB, FB2 and more, with a rich feature set for e-ink readers."
 homepage = "https://github.com/koreader/koreader"
+# B (INTEGRITY.md §4): koreader is NOT installed and nickelclock IS, so
+# conflicts_active is non-empty and "kpm install koreader" hard-refuses — the
+# blocked-install fixture. Declared on one side only: the relation is symmetric
+# (§4.2), which is what makes nickelclock report the pair without declaring it.
+conflicts = ["nickelclock"]
 
 [packages.nickelclock]
 name = "NickelClock"
 source = "github.com/shermp/NickelClock"
 forge = "github"
 asset = "NickelClock-*.zip"
-min_kpm = "0.4.0"
+# update_check REQUIRES min_kpm or ParseManifest drops the entry (§3.8), so this
+# is 0.10.0 rather than the 0.4.0 the def used to carry. nickelclock is rolling AND
+# conflicted, which is the combination PackageRow's badge priority has to resolve:
+# "conflict" outranks "rebuilt ↑" (packagerow.cc).
+min_kpm = "0.10.0"
+update_check = "rolling"
 description = "Show the time in the reading header."
 homepage = "https://github.com/shermp/NickelClock"
 
@@ -80,6 +114,25 @@ forge = "github"
 asset = "KoboRoot.tgz"
 description = "A launcher that adds custom menu items to the Kobo home screen."
 homepage = "https://github.com/pgaskin/NickelMenu"
+# The blocker named here is seeded into state.json ONLY (no registry entry, no
+# packages.d def), so it blocks while being invisible to search — the
+# removed-but-not-uninstalled case of §4.3. The UI must fall back to the raw id.
+conflicts = ["ghostmod"]
+
+# The rolling fixture with NOTHING else on it: kobocloud republishes under the
+# permanently constant tag "latest", so check reports update=true with latest
+# EQUAL to installed and the badge must read "latest rebuilt ↑" rather than
+# "latest → latest ↑" (§6.3). Modelled on the real KoboCloud, the package feature A
+# exists for. update_check requires min_kpm (§3.8).
+[packages.kobocloud]
+name = "KoboCloud"
+source = "github.com/fsantini/KoboCloud"
+forge = "github"
+asset = "KoboRoot.tgz"
+min_kpm = "0.10.0"
+update_check = "rolling"
+description = "Sync books from cloud storage. Republishes under a rolling tag."
+homepage = "https://github.com/fsantini/KoboCloud"
 
 [packages.nickelnote]
 name = "NickelNote"
@@ -88,6 +141,10 @@ forge = "github"
 asset = "KoboRoot.tgz"
 description = "Show a custom note and stylesheet on the sleep and PIN screens."
 homepage = "https://github.com/kbanh/NickelNote"
+# Both halves of this pair are installed, so it is REPORTED and never blocked
+# (§4.5): every action stays available on both detail pages. nickelclock declares
+# nothing — the reverse direction is what surfaces it there.
+conflicts = ["nickelclock"]
 # tested_fw is advisory registry-only metadata (D): the newest firmware this
 # release was confirmed working on. Seeded OLDER than the sandbox's .kobo/version
 # firmware (below) so search reports fw_untested=true and the detail page shows
@@ -256,6 +313,37 @@ func main() {
 	must(os.MkdirAll(filepath.Dir(hostFile), 0o755))
 	must(os.WriteFile(hostFile, []byte("sample payload\n"), 0o644))
 
+	// koreader: an ORPHANED def — registered in packages.d with NO state entry.
+	// That is precisely what the hook's two-step Install leaves behind when the
+	// second command fails (`install` writes the def, `update` fetches; a network
+	// drop or a checksum mismatch ends it there — INTEGRITY.md §4.3). Because
+	// nickelclock is installed and koreader conflicts with it, koreader can no
+	// longer be installed either, so the detail page has no Install and no
+	// Uninstall: without a way to drop the registration it is a dead end, and every
+	// `kpm update --all` skips it forever. The --exercise-conflicts target for the
+	// "Drop registration" button (`kpm remove`).
+	must(config.Save(p.PackageFile("koreader"), &config.Package{
+		Name:      "KOReader",
+		Source:    "github.com/koreader/koreader",
+		Forge:     config.ForgeGitHub,
+		Asset:     "koreader-kobo-*.zip",
+		Registry:  "main",
+		Conflicts: []string{"nickelclock"},
+	}))
+
+	// kobocloud: installed, rolling, and conflict-free — the clean §6.3 fixture.
+	// Its local def mirrors the registry's update_check so the local snapshot is
+	// coherent (search reads `rolling` off the registry entry either way).
+	must(config.Save(p.PackageFile("kobocloud"), &config.Package{
+		Name:        "KoboCloud",
+		Source:      "github.com/fsantini/KoboCloud",
+		Forge:       config.ForgeGitHub,
+		Asset:       "KoboRoot.tgz",
+		Registry:    "main",
+		MinKpm:      "0.10.0",
+		UpdateCheck: config.UpdateCheckRolling,
+	}))
+
 	// nickelclock: a packages.d def carrying its ini config declaration (so
 	// has_config is true and `kpm config` can edit it), plus the marker-remove
 	// uninstall recipe from the registry, and the real settings.ini on disk. This
@@ -324,6 +412,14 @@ func main() {
 	must(err)
 	st.Get("nickelclock").InstalledVersion = "v0.4.0"
 	st.Get("nickelnote").InstalledVersion = "v1.2.0"
+	// kobocloud's tag never moves — that is what update_check = "rolling" is for.
+	st.Get("kobocloud").InstalledVersion = "latest"
+	// ghostmod exists ONLY here: no registry entry, no packages.d def. It is
+	// therefore absent from `kpm search --json` while installedOrStaged() still
+	// reports it, which is exactly how a `kpm remove`d-but-not-uninstalled package
+	// keeps blocking (§4.3) — and the case the UI must not render as "Manage " with
+	// nothing after it.
+	st.Get("ghostmod").InstalledVersion = "v1.0.0"
 	// kpm installed but NOT adopted: an installed version with an EMPTY Source is
 	// the un-adopted self row (self_configured=false). adopt-self fills Source from
 	// the registry def — the --exercise-enroll assertion (state gains kpm.source).
@@ -348,7 +444,10 @@ func main() {
 	fmt.Println("seed: sandbox ready")
 	fmt.Println("  KPM_ROOT    =", os.Getenv("KPM_ROOT"))
 	fmt.Println("  KPM_SYSROOT =", sysroot)
-	fmt.Println("  packages: koreader(not-installed) nickelclock(v0.4.0) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0) kpm(0.7.0, un-adopted)")
+	fmt.Println("  packages: koreader(registered, NOT installed) kobocloud(latest, rolling) nickelclock(v0.4.0, rolling) nickelmenu(not-installed) nickelnote(v1.2.0) samplemod(v1.0.0) kpm(0.7.0, un-adopted) ghostmod(v1.0.0, state-only)")
+	fmt.Println("  conflicts: koreader->nickelclock (blocked install) · nickelnote<->nickelclock (installed pair) · nickelmenu->ghostmod (invisible blocker)")
+	fmt.Println("  orphaned def: koreader (packages.d def, no state entry — the 'Drop registration' target)")
+	fmt.Println("  rolling: kobocloud (clean 'rebuilt' badge) · nickelclock (rolling + conflict — badge priority)")
 	fmt.Println("  uninstall target: samplemod ->", hostFile)
 	fmt.Println("  config targets: nickelclock(settings.ini, ini) nickelnote(3 templates, text)")
 	fmt.Println("  sync target: samplemod (local def missing the registry's [[configs]])")
