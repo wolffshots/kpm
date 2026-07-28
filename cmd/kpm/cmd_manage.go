@@ -53,7 +53,13 @@ func (a *App) cmdList(args []string) int {
 		return exitError
 	}
 	if jsonMode {
-		// list --json: installed packages from state (JSON-OUTPUT.md §2.4).
+		// list --json reports every REGISTERED def from packages.d
+		// (a.loadPackages()), NOT installed packages: "installed" is null for a
+		// def that was registered but never installed. That distinction is
+		// load-bearing — the hook's orphaned-def probe (DetailDialog::onRegistered,
+		// INTEGRITY.md §4.3) depends on list surfacing a registered-but-not-installed
+		// id so it can offer "Drop registration"; narrowing this to installed-only
+		// would silently kill that feature (JSON-OUTPUT.md §2.4).
 		out := make([]jsonListPkg, 0, len(pkgs))
 		for _, p := range pkgs {
 			ps := a.state.Get(p.ID)

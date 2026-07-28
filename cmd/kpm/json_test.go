@@ -378,7 +378,9 @@ func TestVersionJSONGolden(t *testing.T) {
 	}
 }
 
-// §2.4: list --json — installed packages from state.
+// §2.4: list --json — every registered def, "installed" null when never
+// installed. This golden covers the installed case; TestUIContractList covers
+// the registered-but-not-installed row the hook's orphan probe depends on.
 func TestListJSONGolden(t *testing.T) {
 	a := newTestApp(t)
 	if err := config.Save(a.paths.PackageFile("nickelclock"), &config.Package{

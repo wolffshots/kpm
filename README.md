@@ -462,7 +462,7 @@ kpm add <url> [--asset <glob>] [--forge github|forgejo] [--name <id>] [--install
 kpm remove <id>             unregister only (deletes the TOML; files stay — see uninstall)
 kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]
                             delete a package's installed files (see "Uninstalling")
-kpm list                    offline table: id, installed, staged, latest, pin
+kpm list [--json]           offline table: id, installed, staged, latest, pin
 kpm check [--notify]        query forges for all packages; update state + status file
 kpm update [<id>...] [--all] [--reboot] [--notify]
                             download, verify, merge and stage updates; reboot to install

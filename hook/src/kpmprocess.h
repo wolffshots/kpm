@@ -108,7 +108,7 @@ private:
   bool mutating;
   // expectsPayload is false only for a command with no --json mode (kpm remove):
   // there, exit 0 with no BEGIN_JSON marker is success rather than a protocol
-  // violation. True for all thirteen --json commands, which keep the strict rule.
+  // violation. True for all fourteen --json commands, which keep the strict rule.
   bool expectsPayload;
 
   QLabel *icon = nullptr;

@@ -943,9 +943,43 @@ func TestUIContractBusyLockMessage(t *testing.T) {
 	}
 }
 
+// remove is mutating (main.go mutatingCmds) but has no --json mode at all
+// (kpmprocess.cc:92), so unlike install above it never has a payload to fall
+// back on. For remove, this stderr substring is the ONLY signal standing
+// between a lock collision and the hook showing a raw, unexplained error
+// dialog (kpmprocess.cc processFinished) — so it is pinned on its own rather
+// than trusting the install case to generalize.
+func TestUIContractBusyLockMessageNoPayload(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("KPM_ROOT", root)
+	p := device.New()
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the lock with a FRESH mtime so it is not treated as stale/abandoned.
+	if err := os.MkdirAll(filepath.Dir(p.LockFile()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.LockFile(), []byte("999 held\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var code int
+	stderr := captureStderr(t, func() {
+		// Drive the real binary entry point; remove takes no --json flag at all.
+		code = run([]string{"remove", "pkg"})
+	})
+	if code != exitError {
+		t.Errorf("busy remove exit = %d, want %d (hard error the hook surfaces)", code, exitError)
+	}
+	if !strings.Contains(strings.ToLower(stderr), "another kpm instance") {
+		t.Errorf("stderr must contain the busy-dialog trigger \"another kpm instance\":\n%s", stderr)
+	}
+}
+
 // ---- 13. install <id> --yes --json refused by a conflict -----------------
 //
-// INTEGRITY.md §6.5. The hook ALWAYS passes --yes (kpmprocess.cc:33), so a
+// INTEGRITY.md §6.5. The hook ALWAYS passes --yes (kpmprocess.cc:75), so a
 // conflict refusal must be a hard exit-1 error that still emits the standard
 // mutation payload, and its message must carry the substring the hook matches —
 // the same pattern already used for "another kpm instance".
