@@ -3,6 +3,7 @@
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
+#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -15,12 +16,59 @@
 #include "widgets/elidedlabel.h"
 #include "widgets/label.h"
 
-DetailDialog *DetailDialog::show(QJsonObject package) { return new DetailDialog(package); }
+// INTEGRITY.md §4 — at most this many "Manage <blocker>" buttons are offered. The
+// blocker list comes from the registry, i.e. third-party data, and the action
+// footer is a single row: two is already more than any real conflict declaration
+// needs, and the advisory line always names every blocker regardless.
+static const int kMaxBlockerButtons = 2;
 
-DetailDialog::DetailDialog(QJsonObject package)
+// jsonStrings flattens a JSON string array, dropping non-strings and empties.
+// Used for the conflicts / conflicts_active arrays, which INTEGRITY.md §6.1
+// guarantees are always arrays (normalized to [], never null) — this is defence
+// in depth against a payload from some other kpm build.
+static QStringList jsonStrings(const QJsonArray &array) {
+  QStringList out;
+  for (const QJsonValue &v : array) {
+    if (v.isString() && !v.toString().isEmpty()) {
+      out.append(v.toString());
+    }
+  }
+  return out;
+}
+
+DetailDialog *DetailDialog::show(QJsonObject package, const QHash<QString, QJsonObject> &packages) {
+  return new DetailDialog(package, packages);
+}
+
+// displayName resolves a package id to the name the rest of the UI shows
+// (NickelClock, not nickelclock). It falls back to the raw id when the package is
+// absent from the search list, which is a real case and not a theoretical one: a
+// package that was `kpm remove`d but never uninstalled still has files on the device
+// and still blocks (INTEGRITY.md §4.3) while no longer appearing in search. A raw id
+// on the button is far better than a blank one.
+QString DetailDialog::displayName(const QString &packageId) const {
+  QString name = packageIndex.value(packageId).value("name").toString();
+  return name.isEmpty() ? packageId : name;
+}
+
+// blockerStagedOnly distinguishes the two ways a blocker can be "active".
+// conflicts_active counts a package that is installed OR staged (§4.3 — staged
+// files land at the next reboot), so calling every blocker "installed" is simply
+// wrong for half the cases, and the remedy differs: a staged package cannot be
+// uninstalled until the reboot that installs it has happened.
+//
+// A blocker absent from the search list reads as installed, which is the only way
+// it can block while being invisible: `kpm remove` deleted its def and left its
+// files on the device (§4.3).
+bool DetailDialog::blockerStagedOnly(const QString &packageId) const {
+  QJsonObject blocker = packageIndex.value(packageId);
+  return blocker.value("installed").toString().isEmpty() && blocker.value("staged").toBool();
+}
+
+DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject> &packages)
     : Dialog(package.value("name").toString().isEmpty() ? package.value("id").toString()
                                                         : package.value("name").toString()),
-      pkg(package), id(package.value("id").toString()) {
+      pkg(package), id(package.value("id").toString()), packageIndex(packages) {
   // Guard against a null parent (see BrowseDialog): a deref here would crash
   // Nickel the moment a package detail is opened.
   if (QWidget *parent = parentWidget()) {
@@ -52,6 +100,17 @@ DetailDialog::DetailDialog(QJsonObject package)
   // Settings opens the config editor; shown only when installed and the package
   // declares an editable config (has_config, from the search payload — CONFIG.md §4).
   bool hasConfig = !installed.isEmpty() && pkg.value("has_config").toBool();
+  // Conflicts (INTEGRITY.md §4, contract §6.1). `conflicts` is what the effective
+  // def DECLARES (disclosure only); `conflicts_active` is the subset that is
+  // installed or staged on this device right now, in either direction. Both are
+  // server-normalized to [] rather than null, and both are absent (⇒ empty) on a
+  // pre-0.10.0 kpm, which degrades this whole surface to today's behaviour.
+  QStringList declaredConflicts = jsonStrings(pkg.value("conflicts").toArray());
+  QStringList activeConflicts = jsonStrings(pkg.value("conflicts_active").toArray());
+  // §4.3's refusal rule, mirrored exactly: install is refused when the target is
+  // NOT itself installed or staged and something it conflicts with is. So this is
+  // precisely the state in which offering Install would guarantee a hard failure.
+  bool blockedFromInstall = !activeConflicts.isEmpty() && installed.isEmpty() && !staged;
 
   QVBoxLayout *layout = new QVBoxLayout(this);
   // 30px padding, plus the home-screen chrome insets on top/bottom (base Dialog).
@@ -76,13 +135,28 @@ DetailDialog::DetailDialog(QJsonObject package)
     layout->addWidget(desc);
   }
 
+  QString latest = pkg.value("latest").toString();
   addInfo("Source", pkg.value("source").toString());
   addInfo("Registry", pkg.value("registry").toString());
   addInfo("Installed", installed);
-  addInfo("Latest", pkg.value("latest").toString());
+  addInfo("Latest", latest);
   addInfo("Pinned", pkg.value("pinned").toString());
+  // §4.6 disclosure line: mirrors the `conflicts <id>` line printInstallDef adds to
+  // `kpm install`'s def review, so a user reading this page sees the declaration
+  // even when nothing on the device is currently blocking.
+  addInfo("Conflicts", declaredConflicts.join(", "));
   if (!installed.isEmpty() && !uninstallable && !isKpm) {
     addInfo("Uninstall", "not available for this package");
+  }
+
+  // §6.3: a rolling def's tag never moves, so `check` reports an update while
+  // Latest still reads identical to Installed. Without this line the Update button
+  // below looks like a bug. Same fact the CLI renders as
+  // "UPDATE AVAILABLE (release rebuilt)" (§3.7).
+  if (updateAvailable && pkg.value("rolling").toBool() && (latest.isEmpty() || latest == installed)) {
+    Label *rebuilt = new Label(Label::Small, "This package republishes under the same tag — the release was rebuilt.");
+    rebuilt->setWordWrap(true);
+    layout->addWidget(rebuilt);
   }
 
   // §A (post-install manifest verification): name the absent manifest members on
@@ -98,6 +172,101 @@ DetailDialog::DetailDialog(QJsonObject package)
       missingLine += QStringLiteral("…"); // more members absent than shown
     }
     layout->addWidget(new ElidedLabel(Label::Small, missingLine));
+  }
+
+  // INTEGRITY.md §4 — the conflict surface. Two cases, deliberately worded apart
+  // because kpm treats them completely differently:
+  //
+  //  - NOT installed → `kpm install` is a HARD refusal (§4.3), and `--yes` does not
+  //    override it. That is not an oversight: the hook always passes `--yes`
+  //    (kpmprocess.cc install()), so a confirm-and-proceed design would be silently
+  //    bypassed by the only surface most users have, which is exactly why the Go
+  //    side made the refusal non-overridable. The Install button is therefore
+  //    suppressed below — offering it would guarantee an error dialog — and
+  //    replaced with a route to the blocker, so this page is not a dead end.
+  //    Uninstalling the blocker clears the block with no state fixup at all: the
+  //    check is a pure function of live state (§4.4).
+  //  - ALREADY installed → the pair is REPORTED, never blocked (§4.5 / §1.2 item 3):
+  //    the collision has already happened, so refusing to update either one would
+  //    strand both and undo nothing. Every action stays available.
+  //
+  // The ids are registry-sourced third-party strings; Label forces Qt::PlainText.
+  if (!activeConflicts.isEmpty()) {
+    bool one = activeConflicts.size() == 1;
+    // Instructions name packages the way the rest of the UI does (NickelClock), with
+    // a raw-id fallback for a blocker that is not in the search list at all. The
+    // `Conflicts:` disclosure line above deliberately keeps raw ids: it mirrors
+    // printInstallDef's def review, which prints ids. Declarations show ids;
+    // instructions show names.
+    //
+    // Split by how each blocker is actually present, because conflicts_active
+    // covers both installed AND staged (§4.3) and the two need different sentences:
+    // a staged blocker is not installed yet, so "uninstall it first" is an
+    // instruction the user cannot carry out until the next reboot.
+    QStringList shown, installedShown, stagedShown;
+    for (const QString &blocker : activeConflicts) {
+      QString name = displayName(blocker);
+      shown.append(name);
+      if (blockerStagedOnly(blocker)) {
+        stagedShown.append(name);
+      } else {
+        installedShown.append(name);
+      }
+    }
+    QString blockerNames = shown.join(", ");
+    bool allStaged = installedShown.isEmpty();
+    // Keyed on blockedFromInstall, not on `installed`, so the wording and the button
+    // suppression below can never disagree: a package that is STAGED but not yet
+    // installed already has files landing at the next reboot, so §4.3's refusal does
+    // not apply to it and it is a reported pair, not a blocked install.
+    QString headline = "Conflicts with an installed package";
+    if (blockedFromInstall) {
+      headline = "Can't be installed yet";
+    } else if (allStaged) {
+      headline = "Conflicts with a staged package";
+    }
+    Label *conflictWarn = new Label(Label::Small, headline);
+    conflictWarn->setStyleSheet(conflictWarn->styleSheet() + "\nLabel { font-weight: bold; }");
+    layout->addWidget(conflictWarn);
+    // For an all-installed blocker set this is the same sentence shape kpm's own
+    // refusal uses (§4.6), so the on-screen copy and the error text in kpm.log read
+    // as the same instruction. The staged variants have no CLI counterpart: kpm
+    // prints one refusal sentence for both states.
+    QString detail;
+    if (blockedFromInstall) {
+      if (stagedShown.isEmpty()) {
+        detail = one ? "Conflicts with installed package " + blockerNames + ". Uninstall it first, then install this."
+                     : "Conflicts with installed packages " + blockerNames +
+                           ". Uninstall them first, then install this.";
+      } else if (allStaged) {
+        detail = one ? "Conflicts with " + blockerNames +
+                           ", which is staged to install at the next reboot. Reboot, then uninstall it to install this."
+                     : "Conflicts with " + blockerNames +
+                           ", which are staged to install at the next reboot. Reboot, then uninstall them to install "
+                           "this.";
+      } else {
+        detail = "Conflicts with " + installedShown.join(", ") + " (installed) and " + stagedShown.join(", ") +
+                 " (staged for the next reboot). Uninstall them first — the staged ones after rebooting — then "
+                 "install this.";
+      }
+    } else {
+      if (stagedShown.isEmpty()) {
+        detail = one ? blockerNames + " is also installed. These cannot both be installed — uninstall one."
+                     : blockerNames + " are also installed. These cannot all be installed — uninstall all but one.";
+      } else if (allStaged) {
+        detail = one ? blockerNames + " is staged to install at the next reboot. These cannot both be installed — "
+                                      "uninstall one after rebooting."
+                     : blockerNames + " are staged to install at the next reboot. These cannot all be installed — "
+                                      "uninstall all but one after rebooting.";
+      } else {
+        detail = installedShown.join(", ") + " (installed) and " + stagedShown.join(", ") +
+                 " (staged for the next reboot) are also present. These cannot all be installed — uninstall all but "
+                 "one.";
+      }
+    }
+    Label *conflictDetail = new Label(Label::Small, detail);
+    conflictDetail->setWordWrap(true); // never elide the one instruction that unblocks the user
+    layout->addWidget(conflictDetail);
   }
 
   // §D (firmware-compat): fw_untested is server-computed and true only when both
@@ -138,40 +307,58 @@ DetailDialog::DetailDialog(QJsonObject package)
   // Action buttons sit in a right-aligned footer pinned to the bottom of the
   // view (added after the stretch below). primaryButton is Nickel's dark-filled
   // style: light text on a dark button.
-  QHBoxLayout *actions = new QHBoxLayout();
-  actions->setSpacing(16);
-  actions->addStretch(1);
-  auto addButton = [&](const QString &text, const char *slot) {
-    N3ButtonLabel *button = construct_N3ButtonLabel(this);
-    button->setProperty("primaryButton", true);
-    button->setText(text);
-    actions->addWidget(button);
-    QObject::connect(button, SIGNAL(tapped(bool)), this, slot);
-    buttons.append(button);
-  };
+  actionsLayout = new QHBoxLayout();
+  actionsLayout->setSpacing(16);
+  actionsLayout->addStretch(1);
 
   if (staged) {
     layout->addWidget(new Label(Label::Medium, "Changes staged — reboot to apply."));
+    // The reboot IS the action here, so offer it: this branch used to render a
+    // label and nothing else, which is a dead end on any page the user was routed
+    // to rather than one they chose (a conflict advisory can point at a STAGED
+    // blocker — §4.3 counts staged as active). Same prompt as the browse list's
+    // staged banner.
+    addActionButton("Reboot now", SLOT(promptReboot()));
   } else if (!minKpmOk) {
     layout->addWidget(
         new Label(Label::Medium, "Requires kpm >= " + pkg.value("min_kpm").toString() + " — update kpm first."));
     if (!installed.isEmpty() && uninstallable && !isKpm) {
-      addButton("Uninstall", SLOT(uninstall()));
+      addActionButton("Uninstall", SLOT(uninstall()));
+    }
+  } else if (blockedFromInstall) {
+    // Install is deliberately absent (see the conflict advisory above — kpm would
+    // hard-refuse it). Offer the way out instead: open the blocking package, where
+    // the ordinary Uninstall button and its ordinary confirmation live.
+    for (int i = 0; i < activeConflicts.size() && i < kMaxBlockerButtons; i++) {
+      addBlockerButton(activeConflicts.at(i));
+    }
+    // ...and find out whether there is a second way out. This page is reachable in
+    // a state where the blocker is not the user's problem at all: the hook's
+    // Install is two commands (`install` writes the def, `update` fetches), so a
+    // failed fetch leaves the package REGISTERED BUT NOT INSTALLED (§4.3). Such an
+    // orphan is now skipped by every `kpm update --all` for good, and until it is
+    // unregistered the only remedy on offer is uninstalling a package the user
+    // wants. `kpm list --json` is the one command that reports registration —
+    // search's rows are the union of the registry and packages.d, so it cannot —
+    // and it is a read-only offline query, so it costs nothing to ask here, on a
+    // page that is otherwise a dead end. A failure just means no extra button.
+    if (KpmProcess *probe = KpmProcess::list()) {
+      QObject::connect(probe, &KpmProcess::response, this, &DetailDialog::onRegistered);
     }
   } else if (installed.isEmpty()) {
-    addButton("Install", SLOT(install()));
+    addActionButton("Install", SLOT(install()));
   } else {
     if (updateAvailable) {
-      addButton("Update", SLOT(update()));
+      addActionButton("Update", SLOT(update()));
     }
     // Enable self-update (kpm-self-enrol-plan §5): for an un-adopted kpm this is
     // the only button on the page — Uninstall is suppressed for self and, with no
     // configured source, check never reports an update so updateAvailable is false.
     if (selfUnenrolled) {
-      addButton("Enable self-update", SLOT(enableSelfUpdate()));
+      addActionButton("Enable self-update", SLOT(enableSelfUpdate()));
     }
     if (uninstallable && !isKpm) {
-      addButton("Uninstall", SLOT(uninstall()));
+      addActionButton("Uninstall", SLOT(uninstall()));
     }
   }
 
@@ -179,14 +366,45 @@ DetailDialog::DetailDialog(QJsonObject package)
   // already-installed mod's config needs no min_kpm gate and no update state, so
   // it is offered whenever the package is installed and declares a config (§4.1).
   if (hasConfig) {
-    addButton("Settings", SLOT(openConfig()));
+    addActionButton("Settings", SLOT(openConfig()));
   }
 
   layout->addStretch(1);
-  layout->addLayout(actions);
+  layout->addLayout(actionsLayout);
+}
+
+// addActionButton appends one right-aligned footer button. A method rather than a
+// constructor lambda because the orphaned-def probe (INTEGRITY.md §4.3) answers
+// asynchronously and adds its button after the page is built.
+void DetailDialog::addActionButton(const QString &text, const char *slot) {
+  N3ButtonLabel *button = construct_N3ButtonLabel(this);
+  button->setProperty("primaryButton", true);
+  button->setText(text);
+  button->setEnabled(!busyNow); // a button added mid-action joins the busy state
+  actionsLayout->addWidget(button);
+  QObject::connect(button, SIGNAL(tapped(bool)), this, slot);
+  buttons.append(button);
+}
+
+// addBlockerButton adds a button routing to ANOTHER package's detail page
+// (INTEGRITY.md §4). The Nickel tapped(bool) signal is only reachable through the
+// string-based connect, which cannot bind a lambda, so the target id rides on the
+// button as a dynamic property and openBlocker() reads it back off sender() — one
+// slot, N buttons, no per-button state to keep in sync.
+void DetailDialog::addBlockerButton(const QString &blocker) {
+  N3ButtonLabel *button = construct_N3ButtonLabel(this);
+  button->setProperty("primaryButton", true);
+  button->setText("Manage " + displayName(blocker));
+  // The PROPERTY stays the raw id — that is what the route resolves against. Only
+  // the label is humanised.
+  button->setProperty("blockerId", blocker);
+  actionsLayout->addWidget(button);
+  QObject::connect(button, SIGNAL(tapped(bool)), this, SLOT(openBlocker()));
+  buttons.append(button);
 }
 
 void DetailDialog::setBusy(bool busy) {
+  busyNow = busy;
   for (QWidget *b : buttons) {
     b->setEnabled(!busy);
   }
@@ -280,6 +498,80 @@ void DetailDialog::onSelfEnrolled(int exitCode, QJsonObject payload) {
     changed();             // browse reloads without a check — the row drops "self-update off"
     dialog->deleteLater();
   });
+  QObject::connect(d, &QDialog::accepted, d, &QDialog::deleteLater);
+  QObject::connect(d, &QDialog::rejected, d, &QDialog::deleteLater);
+  d->open();
+}
+
+// openBlocker routes to the package that is blocking this one, so a conflict is a
+// signpost rather than a dead end (INTEGRITY.md §4.3/§4.4): the user lands on the
+// blocker's own detail page, where the ordinary Uninstall button — with its
+// ordinary confirmation — clears the block. No state fixup follows, because the
+// refusal is a pure function of live state (§4.4).
+//
+// BrowseDialog owns both the lookup and the CLOSE. It reports a miss rather than
+// no-oping (openConflictPackage) — a package can block while being absent from the
+// browse list — and on a hit it calls closeView() here, because once the blocker is
+// uninstalled everything on this page is stale, and a stale conflict advisory is
+// exactly the dead end the routing exists to prevent. On a miss the page stays: it
+// is the only thing on screen that explains the conflict, and losing it to an error
+// dialog leaves the user with strictly less than they started with.
+//
+// setBusy comes first, like every other action in this class. Without it two taps
+// stack two blocker views, and re-tapping a button that looks unresponsive is
+// normal e-ink behaviour: the screen has not refreshed yet.
+void DetailDialog::openBlocker() {
+  QObject *button = sender();
+  if (button == nullptr) {
+    return;
+  }
+  QString blocker = button->property("blockerId").toString();
+  if (blocker.isEmpty()) {
+    return;
+  }
+  setBusy(true);
+  openPackage(blocker);
+}
+
+void DetailDialog::closeView() { dialog->deleteLater(); }
+
+void DetailDialog::routeFailed() { setBusy(false); }
+
+// onRegistered completes the orphaned-def probe started in the constructor: when
+// `kpm list --json` reports this package as registered while the page itself shows
+// it as not installed, the def is an orphan (INTEGRITY.md §4.3) and the user gets a
+// way to drop it. When it is absent — the ordinary blocked-install case, where the
+// package was never registered at all — nothing is added and the page is unchanged.
+void DetailDialog::onRegistered(int exitCode, QJsonObject payload) {
+  if (exitCode != 0) {
+    return;
+  }
+  for (const QJsonValue &v : payload.value("packages").toArray()) {
+    if (v.toObject().value("id").toString() == id) {
+      addActionButton("Drop registration", SLOT(dropRegistration()));
+      return;
+    }
+  }
+}
+
+// dropRegistration unregisters an orphaned def: `kpm remove` deletes
+// packages.d/<id>.toml and touches nothing else (cmd_manage.go), so there is
+// nothing to undo and no files are at risk — but it is still the only destructive-
+// sounding action on the page, so it confirms like Uninstall does. Dropping the
+// registration is what stops `kpm update --all` reporting the package as skipped
+// forever: the run iterates packages.d, not the registry.
+void DetailDialog::dropRegistration() {
+  QString name = pkg.value("name").toString();
+  if (name.isEmpty()) {
+    name = id;
+  }
+  ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
+  ConfirmationDialog__setTitle(d, "kpm");
+  ConfirmationDialog__setText(d, name + " is registered with kpm but is not installed. Drop the registration? No "
+                                        "files are removed, and you can install it again later.");
+  ConfirmationDialog__setAcceptButtonText(d, "Drop");
+  ConfirmationDialog__setRejectButtonText(d, "Cancel");
+  QObject::connect(d, &QDialog::accepted, this, [this] { run(KpmProcess::remove(id)); });
   QObject::connect(d, &QDialog::accepted, d, &QDialog::deleteLater);
   QObject::connect(d, &QDialog::rejected, d, &QDialog::deleteLater);
   d->open();

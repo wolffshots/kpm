@@ -10,6 +10,8 @@
 #include <QFrame>
 #include <QJsonObject>
 
+class QLabel;
+
 class PackageRow : public QFrame {
   Q_OBJECT
 
@@ -20,6 +22,15 @@ public:
   // (JSON-OUTPUT.md §2.1 merged with check data), per the §5 table.
   static QString badgeText(const QJsonObject &json);
 
+  // packageId is the row's package id, used by BrowseDialog to match a live row
+  // against refreshed search data (flash-reduction win 4).
+  QString packageId() const { return id; }
+
+  // setBadgeText repaints just this row's state badge, so a post-action refresh
+  // that only changed a badge does not have to rebuild the whole page
+  // (flash-reduction win 4 — see BrowseDialog::repaintRowsInPlace).
+  void setBadgeText(const QString &text);
+
 Q_SIGNALS:
   void selected(QString id);
 
@@ -28,4 +39,5 @@ private Q_SLOTS:
 
 private:
   QString id;
+  QLabel *badge = nullptr;
 };

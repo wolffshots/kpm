@@ -25,6 +25,18 @@ QString PackageRow::badgeText(const QJsonObject &json) {
   if (json.value("staged").toBool()) {
     return QStringLiteral("● reboot pending"); // ●
   }
+  // INTEGRITY.md §4/§6.1: conflicts_active lists every package that conflicts with
+  // this one in EITHER direction and is installed or staged on the device right
+  // now. Not installed ⇒ `kpm install` hard-refuses (§4.3); already installed ⇒
+  // the §4.5 pair, reported but never blocked. Either way the collision is the
+  // fact worth the badge slot, so it outranks the version line. It ranks BELOW
+  // staged because a pending reboot is the more immediate action (and an installed
+  // half of a reported pair can legitimately be mid-update). The field is
+  // server-normalized to [] rather than null, so an older kpm that omits it
+  // entirely also lands on an empty array here.
+  if (!json.value("conflicts_active").toArray().isEmpty()) {
+    return QStringLiteral("conflict");
+  }
   // Self-update enrolment (kpm-self-enrol-plan §5): the kpm row's self-update is
   // not wired up. Ranks below files-missing/staged (those describe a broken or
   // pending install) but above the normal not-installed/update/current lines — an
@@ -38,8 +50,20 @@ QString PackageRow::badgeText(const QJsonObject &json) {
     return QStringLiteral("not installed");
   }
   QString latest = json.value("latest").toString();
-  if (json.value("update").toBool() && !latest.isEmpty()) {
-    return installed + QStringLiteral(" → ") + latest + QStringLiteral(" ↑"); // → ↑
+  if (json.value("update").toBool()) {
+    if (!latest.isEmpty() && latest != installed) {
+      return installed + QStringLiteral(" → ") + latest + QStringLiteral(" ↑"); // → ↑
+    }
+    // INTEGRITY.md §6.3: a def marked update_check = "rolling" republishes under a
+    // permanently constant tag, so `check` reports update=true with latest EQUAL to
+    // installed. Rendering "latest → latest ↑" would read as a bug; phrase it off
+    // the new `rolling` flag instead, matching the CLI's
+    // "UPDATE AVAILABLE (release rebuilt)" line (§3.7). A same-tag update on a
+    // non-rolling def is not expressible (tagsEqual gates it), so that combination
+    // falls through to the current-version badge rather than inventing a state.
+    if (json.value("rolling").toBool()) {
+      return installed + QStringLiteral(" rebuilt ↑"); // ↑
+    }
   }
   return installed + QStringLiteral(" ✓"); // ✓
 }
@@ -72,7 +96,9 @@ PackageRow::PackageRow(QJsonObject json, QWidget *parent)
   nameLabel->setStyleSheet(nameLabel->styleSheet() + "\nLabel { font-weight: bold; }");
   top->addWidget(nameLabel, 1);
 
-  Label *badge = new Label(Label::Small, badgeText(json));
+  // Kept as a member so a post-action refresh can repaint the badge alone rather
+  // than rebuilding the page (flash-reduction win 4).
+  badge = new Label(Label::Small, badgeText(json));
   badge->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   top->addWidget(badge, 0, Qt::AlignRight);
 
@@ -88,6 +114,17 @@ PackageRow::PackageRow(QJsonObject json, QWidget *parent)
     subtitle = json.value("source").toString();
   }
   layout->addWidget(new ElidedLabel(Label::Small, subtitle));
+}
+
+// setBadgeText repaints the state badge in place (flash-reduction win 4). No-op
+// when the text is unchanged, so a caller that over-collects rows cannot cause a
+// redundant repaint. The badge is the only part of the row a post-action refresh
+// can change without the row itself being rebuilt — BrowseDialog falls back to a
+// full page rebuild for anything else (name, description/source, the row set).
+void PackageRow::setBadgeText(const QString &text) {
+  if (badge != nullptr && badge->text() != text) {
+    badge->setText(text);
+  }
 }
 
 void PackageRow::manageTapped() { selected(id); }

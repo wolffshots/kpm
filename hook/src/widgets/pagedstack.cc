@@ -186,10 +186,21 @@ void PagedStack::reload() {
   }
 }
 
-// hasContent reports whether a content page (not the index-0 status page) is the
-// one currently shown — the signal render() uses to pick reload() (data-in-hand
-// re-render) over clear()+next() (initial load, nothing rendered yet).
+// hasContent reports whether the stack has advanced past the initial status page —
+// the signal render() uses to pick reload() (data-in-hand re-render) over
+// clear()+next() (initial load, nothing rendered yet). It reads the page COUNTER,
+// so it stays true across the brief window in which next() shows the status page
+// while the consumer builds the page it asked for; both branches heal that window,
+// so the counter is the right question for this decision.
 bool PagedStack::hasContent() const { return current >= 1; }
+
+// showingContent reports whether a content page is the widget actually on screen
+// right now. It is the stricter question, and the one a caller that RETURNS EARLY
+// must ask: next() switches to the status page without touching `current`
+// (see above), so a caller gated on hasContent() can skip its work while
+// "Loading. Please wait..." is what the user is looking at. That used to self-heal
+// on the following render; the in-place repaint path made it permanent.
+bool PagedStack::showingContent() const { return stack->currentIndex() >= 1; }
 
 int PagedStack::getAvailableHeight() { return stack->contentsRect().height(); }
 

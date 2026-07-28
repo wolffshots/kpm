@@ -27,6 +27,9 @@ public:
   void clear();
   void reload();
   bool hasContent() const;
+  // showingContent is hasContent's stricter sibling: it reads the widget actually
+  // shown rather than the page counter. See pagedstack.cc.
+  bool showingContent() const;
   int getAvailableHeight();
   int countPages();
   void setTotal(int value);

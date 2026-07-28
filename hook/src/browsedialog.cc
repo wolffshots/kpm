@@ -19,6 +19,12 @@
 #include "widgets/label.h"
 #include "widgets/packagerow.h"
 
+// Cap on the skip lines drawn on page 1 (INTEGRITY.md §6.4). A skip is per-package
+// and permanent, so a run can in principle skip every package it was asked about;
+// three lines name the common cases (one conflicting pair blocks at most two) and
+// the rest are counted, keeping the banner from pushing the list off the page.
+static const int kMaxSkipLines = 3;
+
 void BrowseDialog::show() {
   // Relaunch = close-and-reopen. A prior browser can be left buried but alive by
   // a view change we don't intercept (e.g. a USB connect/eject) — NickelHardcover
@@ -100,7 +106,7 @@ void BrowseDialog::onFirstLayout() {
   laidOut = true;
   QObject::disconnect(pages, &PagedStack::afterLayout, this, &BrowseDialog::onFirstLayout);
   if (dataReady) {
-    render();
+    render(false); // first paint: nothing on screen to repaint in place
   }
 }
 
@@ -154,7 +160,7 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
   // render so a Refresh repaints once, not twice. The degraded path (check refused,
   // p == nullptr) and the plain no-check path still render here.
   if (laidOut && !checkStarted) {
-    render();
+    render(true); // win 4: fresh search data — repaint only the rows that changed
   }
 }
 
@@ -170,7 +176,7 @@ void BrowseDialog::onCheckDone(int exitCode, QJsonObject payload) {
   mergeCheck(payload.value("packages").toArray());
   setActionsEnabled(true);
   if (laidOut) {
-    render();
+    render(true); // win 4: the check merge usually moves badges and nothing else
   }
 }
 
@@ -198,11 +204,39 @@ void BrowseDialog::onActionDone(int exitCode, QJsonObject payload) {
   if (exitCode == 2) {
     ConfirmationDialogFactory__showErrorDialog("kpm", "Some changes failed. See the kpm log for details.");
   }
+  // Skips ride the payload, never the exit code (INTEGRITY.md §4.3/§6.4): a
+  // conflict refusal under `update --all` is permanent, so counting it as a failure
+  // would poison "Update all" for good. That is exactly why it must not be silent
+  // either — the command succeeds and a package was left behind. Recorded before
+  // loadSearch, so the render it triggers already draws them.
+  skipNotes = skipNotices(payload);
   bool reboot = payload.value("reboot_required").toBool() || payload.value("staged").toBool();
   loadSearch(false);
   if (reboot) {
     rebootConfirm();
   }
+}
+
+// skipNotices renders a mutation payload's `skipped` array as one line per package
+// (INTEGRITY.md §6.4). Absent on every command that cannot skip, and on every
+// pre-0.10.0 kpm, so this degrades to an empty list rather than a special case.
+QStringList BrowseDialog::skipNotices(const QJsonObject &payload) const {
+  QStringList out;
+  QHash<QString, QJsonObject> index = packageIndex();
+  for (const QJsonValue &v : payload.value("skipped").toArray()) {
+    QJsonObject entry = v.toObject();
+    QString skippedId = entry.value("id").toString();
+    if (skippedId.isEmpty()) {
+      continue;
+    }
+    QString name = index.value(skippedId).value("name").toString();
+    if (name.isEmpty()) {
+      name = skippedId;
+    }
+    QString reason = entry.value("reason").toString().trimmed();
+    out.append(reason.isEmpty() ? "Skipped " + name : "Skipped " + name + ": " + reason);
+  }
+  return out;
 }
 
 void BrowseDialog::onProcessFailure(QString reason) {
@@ -224,6 +258,7 @@ void BrowseDialog::refresh() {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
+  skipNotes.clear(); // a new gesture: the last run's skips are no longer the news
   setActionsEnabled(false);
   QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onRefreshDone);
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
@@ -238,6 +273,7 @@ void BrowseDialog::sync() {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
+  skipNotes.clear();
   setActionsEnabled(false);
   // Reuse onActionDone: sync's payload reports staged=false/reboot_required=false,
   // so it just re-runs search to repaint rows (has_config may have changed) with
@@ -255,6 +291,7 @@ void BrowseDialog::updateAll() {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
+  skipNotes.clear();
   setActionsEnabled(false);
   QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onActionDone);
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
@@ -276,11 +313,17 @@ void BrowseDialog::openDetail(QString id) {
   for (const QJsonValue &v : allPackages) {
     QJsonObject o = v.toObject();
     if (o.value("id").toString() == id) {
-      DetailDialog *d = DetailDialog::show(o);
+      DetailDialog *d = DetailDialog::show(o, packageIndex());
       QObject::connect(d, &DetailDialog::changed, this, [this] { loadSearch(false); });
       // Post-enrol "Check now" (kpm-self-enrol-plan §5): reload WITH a check so the
       // freshly-adopted kpm row repaints with its real update badge, like onRefreshDone.
       QObject::connect(d, &DetailDialog::selfEnrolled, this, [this] { loadSearch(true); });
+      // Conflict route (INTEGRITY.md §4): a blocked package's detail page sends the
+      // user to the package blocking it, where Uninstall lives. The source view is
+      // passed along because whether it closes depends on whether the route lands —
+      // see openConflictPackage.
+      QObject::connect(d, &DetailDialog::openPackage, this,
+                       [this, d](QString blockerId) { openConflictPackage(d, blockerId); });
       // Detail's close (X) closes the whole package manager: dismiss this browse
       // dialog underneath it (the detail view deletes itself via the base Dialog).
       QObject::connect(d, &DetailDialog::closeRequested, this, [this] { dialog->deleteLater(); });
@@ -289,10 +332,69 @@ void BrowseDialog::openDetail(QString id) {
   }
 }
 
+// packageIndex maps package id -> the whole package object across the search list.
+// A detail view holds only its own package object, so this is how it describes a
+// package it does not hold: the conflict route's blocker button takes the name from
+// here, and the advisory takes the blocker's installed/staged state (INTEGRITY.md
+// §4). Ids with no entry simply do not appear; DetailDialog::displayName falls back
+// to the raw id and blockerStagedOnly reads an absent blocker as installed.
+QHash<QString, QJsonObject> BrowseDialog::packageIndex() const {
+  QHash<QString, QJsonObject> index;
+  for (const QJsonValue &v : allPackages) {
+    QJsonObject o = v.toObject();
+    QString packageId = o.value("id").toString();
+    if (!packageId.isEmpty()) {
+      index.insert(packageId, o);
+    }
+  }
+  return index;
+}
+
+// openConflictPackage opens another package's detail view on behalf of a conflict
+// advisory (INTEGRITY.md §4). It is openDetail plus an explicit miss branch, and
+// the miss is a real case rather than paranoia: `kpm remove <id>` deletes only the
+// packages.d def and leaves state, so a removed-but-not-uninstalled package still
+// has files on the device and still blocks (§4.3) while no longer appearing in the
+// merged registry+local search list. openDetail returns silently on a miss — which
+// here would be precisely the dead end this route exists to avoid — so name the
+// package and give the one command that clears it (§4.6's remedy).
+//
+// Closing the source view belongs HERE, not in DetailDialog, because only this
+// function knows whether the route landed. Closing it unconditionally meant the
+// miss branch showed an error dialog AND took away the page that explained the
+// conflict, leaving the user with less than they started with. On a hit the new
+// view is pushed first and the stale one closed after, preserving the order the
+// device-validated code used.
+//
+// The interpolated id is registry-sourced but not free text: `kpm search --json`
+// only ever emits ids that passed config.ValidID (^[a-z0-9][a-z0-9-]*$ — see
+// internal/config), and conflict ids are re-filtered through ValidID by
+// normalizeConflicts at every use (cmd/kpm/conflicts.go), so nothing here can carry
+// markup or newlines into Nickel's dialog text. Verified rather than assumed,
+// because this is the one place the hook puts third-party data into a dialog whose
+// text format it does not control.
+void BrowseDialog::openConflictPackage(DetailDialog *from, const QString &id) {
+  for (const QJsonValue &v : allPackages) {
+    if (v.toObject().value("id").toString() == id) {
+      openDetail(id);
+      if (from != nullptr) {
+        from->closeView();
+      }
+      return;
+    }
+  }
+  if (from != nullptr) {
+    from->routeFailed(); // stay put: this page is the only account of the conflict
+  }
+  ConfirmationDialogFactory__showErrorDialog(
+      "kpm", id + " is still on this device but is no longer in the package list. Remove it over SSH with:\nkpm "
+                  "uninstall " + id);
+}
+
 void BrowseDialog::commit() {
   filter = lineEdit->text().trimmed();
   if (laidOut && dataReady) {
-    render();
+    render(false); // a search commit re-pages from page 1 — see render()
   }
 }
 
@@ -342,8 +444,94 @@ void BrowseDialog::setActionsEnabled(bool enabled) {
   }
 }
 
-void BrowseDialog::render() {
+// repaintRowsInPlace is flash-reduction win 4 (kpm-flash-reduction-plan, deferred
+// from 0.9.2): after a refresh, repaint the rows whose badge actually changed
+// instead of rebuilding the page. A rebuild swaps the QStackedWidget's current
+// widget and repaints the whole list region; setting one label's text repaints one
+// label. Returns false when it declines, leaving the caller to rebuild.
+//
+// The state-correctness argument is the model/view split, NOT the completeness of
+// this diff: onSearch has already replaced allPackages wholesale before render()
+// runs, so DetailDialog (which reads allPackages) and every later page build see
+// fresh data whichever branch is taken. The diff decides only how much of the view
+// is redrawn, and it declines the moment anything other than a badge differs — a
+// different row count, a different id sequence, or a changed name/description/
+// source, which are the only other things PackageRow draws. A miss therefore costs
+// a redundant repaint, never a stale one.
+//
+// Rows on pages the user has paged away from are updated too: findChildren reaches
+// every cached page, and setText on a hidden widget costs no paint. Skipping them
+// would leave a stale badge behind a page turn — exactly the state-correctness risk
+// that got win 4 held back out of 0.9.2.
+bool BrowseDialog::repaintRowsInPlace(const QList<QJsonObject> &previous) {
+  if (previous.isEmpty() || previous.size() != filtered.size()) {
+    return false;
+  }
+  QHash<QString, QString> newBadges; // id -> the badge every live row must now show
+  for (int i = 0; i < filtered.size(); i++) {
+    const QJsonObject &was = previous.at(i);
+    const QJsonObject &now = filtered.at(i);
+    QString id = now.value("id").toString();
+    if (id.isEmpty() || was.value("id").toString() != id) {
+      return false; // the row set moved under us
+    }
+    if (was.value("name") != now.value("name") || was.value("description") != now.value("description") ||
+        was.value("source") != now.value("source")) {
+      return false; // the rest of the row changed; only the badge is repaintable
+    }
+    // Every id, not just the ones whose badge moved between these two payloads.
+    // A differential set is only correct under the induction "every live row
+    // already shows the previous payload's badge" — true today, but not checkable
+    // from here, and a single missed update leaves a stale badge on screen. Absolute
+    // is self-healing and free: PackageRow::setBadgeText no-ops on an unchanged
+    // string, so an unchanged row costs one QString compare and no paint.
+    newBadges.insert(id, PackageRow::badgeText(now));
+  }
+  for (PackageRow *row : pages->findChildren<PackageRow *>()) {
+    auto it = newBadges.constFind(row->packageId());
+    if (it != newBadges.constEnd()) {
+      row->setBadgeText(it.value());
+    }
+  }
+  return true;
+}
+
+// render repaints the list. allowInPlace marks the callers whose data came from a
+// fresh kpm payload (search / check), where win 4's row-level repaint applies. A
+// search-box commit passes false on purpose: it is a deliberate user gesture whose
+// documented response is to re-page the list from page 1, and the paging reset is
+// what --exercise-reload pins.
+void BrowseDialog::render(bool allowInPlace) {
+  QList<QJsonObject> previous = filtered; // exactly what is on screen right now
+  bool hadStagedBanner = renderedStagedBanner;
+  bool hadStaleHint = renderedStaleHint;
+  bool hadSkipNotice = renderedSkipNotice;
+
   filtered = filteredPackages();
+  // Recorded per render, because onSearch overwrites stagedSummary/registries
+  // before render() runs — these are the page-1 banner/hint states actually drawn.
+  renderedStagedBanner = stagedSummary.value("count").toInt() > 0;
+  renderedStaleHint = registriesStale();
+  renderedSkipNotice = !skipNotes.isEmpty();
+
+  // Which page the user ends up on is deliberate, not incidental: an in-place
+  // repaint leaves them where they were (nothing moved, so nothing should scroll
+  // under them), and a rebuild resets to page 1 (the row set may have changed, and
+  // page 1 is the only page carrying the banners). A search commit always takes the
+  // rebuild path for that reason — --exercise-reload pins the reset.
+  //
+  // Win 4: only when the page chrome is unchanged too — the staged banner, the skip
+  // notice and the stale hint live inside page 1's widget and can only be added or
+  // removed by rebuilding it, so a flip in any of them forces the full path.
+  // The gate is `showingContent`, not `hasContent`: PagedStack::next() can switch to
+  // the status page without moving its page counter, and returning early there would
+  // leave "Loading. Please wait..." on screen permanently. Before win 4 the next
+  // render healed that; the in-place branch has to check what is actually shown.
+  if (allowInPlace && pages->showingContent() && hadStagedBanner == renderedStagedBanner &&
+      hadStaleHint == renderedStaleHint && hadSkipNotice == renderedSkipNotice && repaintRowsInPlace(previous)) {
+    return;
+  }
+
   // Win 2 (kpm-flash-reduction-plan): if a content page is already shown this is a
   // data-in-hand re-render (post-action reload, post-check merge, in-search filter)
   // — swap straight to the new list, no "Loading..." flip. The genuine initial load
@@ -403,6 +591,23 @@ void BrowseDialog::requestPage(int index) {
       bl->addWidget(rebootButton);
       QObject::connect(rebootButton, SIGNAL(tapped(bool)), this, SLOT(rebootConfirm()));
       v->addWidget(banner);
+    }
+    // Skips from the last action (INTEGRITY.md §6.4). Deliberately a line in the
+    // list rather than a dialog: it is neither a failure (no error dialog) nor
+    // something to hide (the run "succeeded" while leaving a package behind), and
+    // it must survive the reload the action triggers, which a dialog fired before
+    // that reload would not.
+    for (int i = 0; i < skipNotes.size() && i < kMaxSkipLines; i++) {
+      Label *note = new Label(Label::Small, skipNotes.at(i));
+      note->setWordWrap(true); // the reason carries kpm's own remedy — never elide it
+      note->setContentsMargins(14, 10, 14, 0);
+      v->addWidget(note);
+    }
+    if (skipNotes.size() > kMaxSkipLines) {
+      Label *more =
+          new Label(Label::Small, QString("+%1 more skipped — see the kpm log").arg(skipNotes.size() - kMaxSkipLines));
+      more->setContentsMargins(14, 10, 14, 0);
+      v->addWidget(more);
     }
     if (registriesStale()) {
       Label *hint = new Label(Label::Small, "Tap Refresh for the latest package list");
