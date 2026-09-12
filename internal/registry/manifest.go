@@ -79,16 +79,6 @@ func (d *PackageDef) EffectiveUpdateCheck() string {
 	return d.UpdateCheck
 }
 
-// EffectiveInstallMethod returns the def's install method with the default
-// ("tgz") applied, mirroring config.Package.EffectiveInstallMethod. It is read by
-// `search --json` for a package that has no local snapshot yet (APP-TREE.md §11.1).
-func (d *PackageDef) EffectiveInstallMethod() string {
-	if d.Install == nil || d.Install.Method == "" {
-		return config.MethodTgz
-	}
-	return d.Install.Method
-}
-
 // DroppedDef records a package def ParseManifest refused, with the reason. A
 // dropped def is INVISIBLE: the package simply is not in the registry, which
 // from the outside is indistinguishable from one the curator never published —
@@ -151,6 +141,13 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		// validated at parse time as well as at use: a malformed block must never
 		// reach the extractor from a registry (APP-TREE.md §2.4).
 		if err := uninstall.ValidateInstallDecl(def.Install); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		// [uninstall] is validated at USE, not here -- except for the one rule whose
+		// violation makes the package unremovable rather than merely wrong: a recipe
+		// that names a shared content directory (fonts plan 3.1).
+		if err := uninstall.ValidateUninstallDecl(def.Uninstall); err != nil {
 			drop(id, err.Error())
 			continue
 		}

@@ -9,7 +9,6 @@ import (
 	"runtime"
 
 	"kpm/internal/config"
-	"kpm/internal/device"
 	"kpm/internal/uninstall"
 )
 
@@ -94,12 +93,24 @@ func (a *App) cmdUninstall(args []string) int {
 		return exitError
 	}
 
+	// Removing a font deletes its files now, but Nickel keeps the old one in use
+	// until it restarts, so the removal needs a reboot too (D6). rebootToApply is
+	// true for every tgz package by definition — those already report their own
+	// recipe's NeedsReboot — so ask it only for a live one.
+	//
+	// The MANIFEST is asked as well as the def, because a tgz package can ship a
+	// font without declaring any [install] block at all: its uninstall deletes the
+	// font now, and without this it promised no reboot, so the old font kept
+	// rendering with nothing prompting the user.
+	needsReboot := plan.NeedsReboot || (pkg.IsAppTree() && rebootToApply(pkg)) ||
+		uninstall.ManifestHasContent(ps.Manifest)
+
 	printPlan(os.Stdout, id, plan, *purge, len(pkg.Uninstall.PurgePaths) > 0)
 
 	if *dryRun {
 		if jsonMode {
 			// Dry-run changes nothing; report the reboot the method would need.
-			emitMutation(nil, nil, false, plan.NeedsReboot, "")
+			emitMutation(nil, nil, false, needsReboot, "")
 		}
 		return exitOK
 	}
@@ -147,7 +158,7 @@ func (a *App) cmdUninstall(args []string) int {
 			id, len(res.Failed), len(res.Skipped))
 		a.paths.WriteStatus(msg)
 		if jsonMode {
-			emitMutation(nil, []jsonFailure{{ID: id, Error: fmt.Sprintf("partial — %d failed, %d skipped", len(res.Failed), len(res.Skipped))}}, false, plan.NeedsReboot, "partial")
+			emitMutation(nil, []jsonFailure{{ID: id, Error: fmt.Sprintf("partial — %d failed, %d skipped", len(res.Failed), len(res.Skipped))}}, false, needsReboot, "partial")
 		}
 		fmt.Fprintln(os.Stderr, msg)
 		for _, s := range res.Skipped {
@@ -164,7 +175,7 @@ func (a *App) cmdUninstall(args []string) int {
 			msg := fmt.Sprintf("kpm: uninstall %s could not remove registration (%v) — retry", id, err)
 			a.paths.WriteStatus(msg)
 			if jsonMode {
-				emitMutation(nil, []jsonFailure{{ID: id, Error: "could not remove registration"}}, false, plan.NeedsReboot, "partial")
+				emitMutation(nil, []jsonFailure{{ID: id, Error: "could not remove registration"}}, false, needsReboot, "partial")
 			}
 			fmt.Fprintln(os.Stderr, msg)
 			return exitPartial
@@ -181,23 +192,24 @@ func (a *App) cmdUninstall(args []string) int {
 
 	status := fmt.Sprintf("kpm: uninstalled %s — %d removed, %d dir(s), %d purged",
 		id, len(res.Deleted), len(res.Removed), len(res.Purged))
-	if plan.NeedsReboot && !*reboot {
+	if needsReboot && !*reboot {
 		status += "\nReboot required to complete removal."
 	}
 	a.paths.WriteStatus(status)
 	fmt.Println(status)
 	n.toast(fmt.Sprintf("kpm: uninstalled %s", id))
 
-	// §2.3: uninstall stages nothing; reboot_required reflects the method
-	// (marker methods act on the next boot). Emitted before the reboot decision.
+	// §2.3: uninstall stages nothing; reboot_required reflects the method (marker
+	// methods act on the next boot) or the content rule. Emitted before the reboot
+	// decision.
 	if jsonMode {
-		emitMutation([]string{id}, nil, false, plan.NeedsReboot, "")
+		emitMutation([]string{id}, nil, false, needsReboot, "")
 	}
 
 	if *reboot {
 		a.paths.Log("REBOOT", "after uninstall "+id)
 		n.toast("kpm: rebooting…")
-		if err := device.Reboot(); err != nil {
+		if err := rebootDevice(); err != nil {
 			fmt.Fprintln(os.Stderr, "kpm uninstall: reboot failed:", err)
 			return exitError
 		}

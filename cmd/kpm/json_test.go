@@ -84,7 +84,7 @@ func TestSearchJSONGolden(t *testing.T) {
 	// nickelclock has a registry def and is installed (in state) but has NO local
 	// packages.d def, so kpm cannot uninstall it (cmdUninstall needs a local def):
 	// uninstallable is false, not driven by the registry's advertised recipe (M2).
-	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}],"device_fw":null}`
+	want := `{"packages":[{"id":"nickelclock","name":"NickelClock","description":"Show the time in the reading header","homepage":"https://github.com/shermp/NickelClock","source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.4.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz","kind":"mod"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":"2026-07-20T09:00:00Z"}],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
 	}
@@ -141,7 +141,7 @@ func TestSearchJSONUnregisteredAndStaged(t *testing.T) {
 
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz"}],"staged":{"count":1,"ids":["handmade"]},"registries":[],"device_fw":null}`
+	want := `{"packages":[{"id":"handmade","name":"Handmade","description":null,"homepage":null,"source":"github.com/me/handmade","registry":null,"installed":"v1.0.0","pinned":null,"staged":true,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz","kind":"mod"}],"staged":{"count":1,"ids":["handmade"]},"registries":[],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json\n got: %s\nwant: %s", got, want)
 	}
@@ -173,7 +173,7 @@ func TestSearchJSONSelfRowUnconfigured(t *testing.T) {
 	}
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
+	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":false,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz","kind":"mod"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json (unconfigured self row)\n got: %s\nwant: %s", got, want)
 	}
@@ -191,7 +191,7 @@ func TestSearchJSONSelfRowAdopted(t *testing.T) {
 	adoptInState(t, a, "github.com/wolffshots/kpm", "github") // durable adoption identity
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":true,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
+	want := `{"packages":[{"id":"kpm","name":"kpm","description":"Kobo package manager","homepage":null,"source":"github.com/wolffshots/kpm","registry":"main","installed":"0.7.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":true,"self_configured":true,"conflicts":[],"conflicts_active":[],"rolling":false,"install_method":"tgz","kind":"mod"}],"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json (adopted self row)\n got: %s\nwant: %s", got, want)
 	}
@@ -553,8 +553,8 @@ asset = "KoboRoot.tgz"
 	out := captureStdout(t, func() { a.cmdSearch([]string{"--json"}) })
 	got := lastJSON(t, out)
 	want := `{"packages":[` +
-		`{"id":"kobo-tweaks","name":"Kobo Tweaks","description":null,"homepage":null,"source":"github.com/o/kobo-tweaks","registry":"main","installed":"v1.0.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.10.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":["nickelclock"],"conflicts_active":["nickelclock"],"rolling":false,"install_method":"tgz"},` +
-		`{"id":"nickelclock","name":"NickelClock","description":null,"homepage":null,"source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":["kobo-tweaks"],"rolling":false,"install_method":"tgz"}],` +
+		`{"id":"kobo-tweaks","name":"Kobo Tweaks","description":null,"homepage":null,"source":"github.com/o/kobo-tweaks","registry":"main","installed":"v1.0.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":"0.10.0","min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":["nickelclock"],"conflicts_active":["nickelclock"],"rolling":false,"install_method":"tgz","kind":"mod"},` +
+		`{"id":"nickelclock","name":"NickelClock","description":null,"homepage":null,"source":"github.com/shermp/NickelClock","registry":"main","installed":"v0.4.0","pinned":null,"staged":false,"uninstallable":false,"min_kpm":null,"min_kpm_ok":true,"has_config":false,"tested_fw":null,"fw_untested":false,"missing_files":null,"is_self":false,"self_configured":false,"conflicts":[],"conflicts_active":["kobo-tweaks"],"rolling":false,"install_method":"tgz","kind":"mod"}],` +
 		`"staged":{"count":0,"ids":[]},"registries":[{"name":"main","refreshed":null}],"device_fw":null}`
 	if got != want {
 		t.Errorf("search --json (conflicts)\n got: %s\nwant: %s", got, want)

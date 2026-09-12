@@ -19,10 +19,11 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 
 	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 	available, staged := 0, 0
-	// availableAppTree counts how many of the available updates install by tree
-	// extraction. A user whose only pending update is KOReader must not be told
-	// the device will reboot (APP-TREE.md §6.3).
-	availableAppTree := 0
+	// availableNoReboot counts how many of the available updates are usable the
+	// moment they install. A user whose only pending update is KOReader must not be
+	// told the device will reboot (APP-TREE.md §6.3) — and a user whose only pending
+	// update is a font must be, because the old font renders until it does (D6).
+	availableNoReboot := 0
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
 		installed := dash(ps.InstalledVersion)
@@ -42,8 +43,8 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 			}
 		case avail:
 			available++
-			if p.IsAppTree() {
-				availableAppTree++
+			if !rebootToApply(p) {
+				availableNoReboot++
 			}
 			// A rolling package whose tag has not moved would otherwise render a
 			// confusing "latest -> latest"; name the real reason instead
@@ -74,7 +75,7 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 	case available > 0:
 		// Only claim a reboot when at least one pending update actually needs one.
 		reboots := "(reboots)"
-		if availableAppTree == available {
+		if availableNoReboot == available {
 			reboots = "(no reboot)"
 		}
 		fmt.Fprintf(&b, "%d update available. Use \"Update all\" to install %s.\n", available, reboots)

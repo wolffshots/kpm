@@ -151,19 +151,49 @@ type jsonSearchPkg struct {
 	// never null — there is always a method, and "" would be meaningless — so it
 	// deliberately does not use ptr(), unlike description/tested_fw.
 	InstallMethod string `json:"install_method"`
+	// Kind is which browse tab this package belongs in: "mod" or "font" (the
+	// dictionary release adds "dictionary"). It is DERIVED from the install
+	// destination, not declared — there is no `kind` registry field, so no def hash
+	// moves and the tab can never disagree with where the files actually go (D1).
+	// A string, never null, like install_method.
+	Kind string `json:"kind"`
 }
 
-// installMethodFor returns the install method to report for a row: the LOCAL
+// kindMod is the kind every package with no content-dir destination reports —
+// every package in the registry today.
+const kindMod = "mod"
+
+// effectiveInstall returns the [install] block to report for a row: the LOCAL
 // packages.d snapshot when there is one (that is the def `update` will act on),
-// else the registry def, else the "tgz" default (APP-TREE.md §11.1).
-func installMethodFor(local *config.Package, e *registry.Entry) string {
+// else the registry def, else nil for the tgz default (APP-TREE.md §11.1).
+//
+// install_method and kind BOTH derive from this one result. A second precedence
+// function for the second field is how the two would come to disagree about which
+// def a row describes — the 0.10.0 review found that class three times.
+func effectiveInstall(local *config.Package, e *registry.Entry) *config.Install {
 	if local != nil {
-		return local.EffectiveInstallMethod()
+		return local.Install
 	}
 	if e != nil {
-		return e.Def.EffectiveInstallMethod()
+		return e.Def.Install
 	}
-	return config.MethodTgz
+	return nil
+}
+
+// installMethodOf applies the tgz default to an effective install block.
+func installMethodOf(i *config.Install) string {
+	if i == nil || i.Method == "" {
+		return config.MethodTgz
+	}
+	return i.Method
+}
+
+// kindOf derives the browse tab from where the package installs (D1).
+func kindOf(i *config.Install) string {
+	if c, ok := uninstall.ContentDirFor(i); ok {
+		return c.Kind
+	}
+	return kindMod
 }
 
 type jsonRegistryFreshness struct {
@@ -310,6 +340,9 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			rolling = local.EffectiveUpdateCheck() == config.UpdateCheckRolling
 		}
 
+		// One precedence decision feeds install_method and kind.
+		inst := effectiveInstall(local, e)
+
 		pkgs = append(pkgs, jsonSearchPkg{
 			ID:             id,
 			Name:           name,
@@ -333,7 +366,8 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			Conflicts:       graph[id],
 			ConflictsActive: a.activeConflicts(id, graph, nil),
 			Rolling:         rolling,
-			InstallMethod:   installMethodFor(local, e),
+			InstallMethod:   installMethodOf(inst),
+			Kind:            kindOf(inst),
 		})
 	}
 

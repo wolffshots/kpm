@@ -218,6 +218,12 @@ func TestParseManifestDropsBadInstall(t *testing.T) {
 		{"unknown method", `method = "app-tarball"` + "\n" + `dest = "/mnt/onboard/.adds/x"`},
 		{"app-tree without dest", `method = "app-tree"`},
 		{"dest outside allowlist", `method = "app-tree"` + "\n" + `dest = "/mnt/onboard/books/x"`},
+		// The content-dir exemption is a CLOSED allowlist: a sibling of fonts on the
+		// partition root is still refused (fonts plan §3.1).
+		{"dest beside a content dir", `method = "app-tree"` + "\n" + `dest = "/mnt/onboard/foo"`},
+		// A dest UNDER a content dir escaped every content guard: no flat rule,
+		// no ownership check, no reboot, kind "mod" (wave 2, critical 2).
+		{"dest inside a content dir", `method = "app-tree"` + "\n" + `dest = "/mnt/onboard/fonts/MyFonts"`},
 		{"dest is a shared root", `method = "app-tree"` + "\n" + `dest = "/mnt/onboard/.adds"`},
 		{"dest is kpm's own tree", `method = "app-tree"` + "\n" + `dest = "/mnt/onboard/.adds/kpm/x"`},
 		{"root escapes", `method = "app-tree"` + "\n" + `root = "../etc"` + "\n" + `dest = "/mnt/onboard/.adds/x"`},
@@ -347,5 +353,122 @@ min_kpm = "0.11.0"
 	}
 	if got := k.ToPackage("koreader", "main", "").EffectiveInstallMethod(); got != config.MethodAppTree {
 		t.Errorf("EffectiveInstallMethod = %q, want app-tree", got)
+	}
+}
+
+// TestParseManifestKeepsFontDefs: the two drafted 0.12.0 registry entries (fonts
+// plan §3.11) must survive ValidateInstallDecl, which is the gate that dropped
+// every font def before the content-dir exemption. The zips are flat, so `root`
+// is omitted entirely.
+func TestParseManifestKeepsFontDefs(t *testing.T) {
+	data := []byte(`schema_version = 1
+
+[packages.kf-core-fonts]
+name = "KF Core fonts"
+source = "github.com/nicoverbruggen/ebook-fonts"
+forge = "github"
+asset = "kobo-core-fonts.zip"
+min_kpm = "0.12.0"
+
+  [packages.kf-core-fonts.install]
+  method = "app-tree"
+  dest = "/mnt/onboard/fonts"
+
+[packages.kf-extra-fonts]
+name = "KF Extra fonts"
+source = "github.com/nicoverbruggen/ebook-fonts"
+forge = "github"
+asset = "kobo-extra-fonts.zip"
+min_kpm = "0.12.0"
+
+  [packages.kf-extra-fonts.install]
+  method = "app-tree"
+  dest = "/mnt/onboard/fonts"
+`)
+	m, err := ParseManifest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Dropped) != 0 {
+		t.Fatalf("the §3.11 font entries must parse cleanly, dropped %+v", m.Dropped)
+	}
+	for _, id := range []string{"kf-core-fonts", "kf-extra-fonts"} {
+		d := m.Packages[id]
+		if d == nil || d.Install == nil || d.Install.Dest != "/mnt/onboard/fonts" || d.Install.Root != "" {
+			t.Fatalf("%s install block not decoded: %+v", id, d)
+		}
+	}
+}
+
+// A recipe that names a shared content directory is dropped at PARSE. Left to
+// Compute, the same recipe fails the WHOLE uninstall and the package cannot be
+// removed at all — and purge_paths = "<dest>/**" is the shape a curator gets by
+// copying any existing app-tree entry.
+func TestParseManifestDropsContentDirRecipes(t *testing.T) {
+	cases := map[string]string{
+		"recursive purge of the content dir": `
+  [packages.bad.uninstall]
+  method = "manifest"
+  purge_paths = ["/mnt/onboard/fonts/**"]`,
+		"extra_paths names the content dir": `
+  [packages.bad.uninstall]
+  method = "manifest"
+  extra_paths = ["/mnt/onboard/fonts"]`,
+		"marker_file inside the content dir": `
+  [packages.bad.uninstall]
+  method = "marker"
+  marker_file = "/mnt/onboard/fonts/uninstall"`,
+		"config inside the content dir": `
+  [[packages.bad.configs]]
+  name = "settings"
+  path = "/mnt/onboard/fonts/settings.ini"
+  format = "ini"`,
+	}
+	for name, block := range cases {
+		t.Run(name, func(t *testing.T) {
+			m, err := ParseManifest([]byte(`schema_version = 1
+[packages.good]
+name = "Good"
+source = "github.com/o/r"
+forge = "github"
+asset = "KoboRoot.tgz"
+
+[packages.bad]
+name = "Bad"
+source = "github.com/o/r"
+forge = "github"
+asset = "KoboRoot.tgz"
+` + block + "\n"))
+			if err != nil {
+				t.Fatalf("the manifest must still parse: %v", err)
+			}
+			if _, ok := m.Packages["bad"]; ok {
+				t.Error("a def naming a content directory must be dropped")
+			}
+			if _, ok := m.Packages["good"]; !ok {
+				t.Error("the rest of the manifest must survive")
+			}
+			if len(m.Dropped) != 1 || m.Dropped[0].Reason == "" {
+				t.Errorf("the drop must carry a reason, got %+v", m.Dropped)
+			}
+		})
+	}
+	// A single FILE in a content dir stays legal (3.1).
+	m, err := ParseManifest([]byte(`schema_version = 1
+[packages.ok]
+name = "OK"
+source = "github.com/o/r"
+forge = "github"
+asset = "KoboRoot.tgz"
+
+  [packages.ok.uninstall]
+  method = "manifest"
+  extra_paths = ["/mnt/onboard/fonts/A.ttf"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Dropped) != 0 {
+		t.Errorf("naming one file in a content dir is legal, dropped %+v", m.Dropped)
 	}
 }

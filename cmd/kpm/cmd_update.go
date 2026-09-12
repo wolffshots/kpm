@@ -28,6 +28,16 @@ import (
 // checkFreshness is the window within which a prior check is trusted (§7.1).
 const checkFreshness = 5 * time.Minute
 
+// cacheAvailableBytes and rebootDevice are the two effects this file has that no
+// test can perform for real — a dev host cannot pose a full FAT32 partition, and
+// a test that actually rebooted the machine running it would be unforgivable.
+// Both sit behind a var for the same reason internal/apptree's availableBytes
+// does: a guard no test can exercise is a guard that silently rots.
+var (
+	cacheAvailableBytes = apptree.AvailableBytes
+	rebootDevice        = device.Reboot
+)
+
 // resolved is a package that has a concrete target release to stage.
 type resolved struct {
 	pkg      *config.Package
@@ -220,21 +230,50 @@ func (a *App) cmdUpdate(args []string) int {
 		// An app-tree-only run is COMPLETE here: nothing is staged, nothing needs
 		// a reboot, and the packages are already installed.
 		if len(appChanged) > 0 {
+			// A content install (a font) is on disk the moment this returns, but
+			// Nickel goes on rendering the old one until it restarts. So the run
+			// staged nothing AND needs a reboot — the two booleans say exactly that,
+			// and jsonMutation gains no field (D6).
+			needsReboot := contentRebootNeeded(appTargets, appChanged)
 			status := a.buildStatus(pkgs)
+			// buildStatus reports "Everything up to date" as soon as the files land,
+			// which is true of the disk and false of what the reader sees. A user
+			// without NickelDBus reads only this file, and the staged banner cannot
+			// carry the fact because nothing is staged. One line closes that gap
+			// without a new state.json field (3.9 known gap).
+			if needsReboot {
+				status += "Reboot to use the newly installed files.\n"
+			}
 			a.paths.WriteStatus(status + appTreeStatusNote(a.launcherWarnings(appTreePkgs(appTargets))))
 			fmt.Print(status)
 			n.toast(fmt.Sprintf("kpm: %d package(s) installed", len(appChanged)))
 			if !jsonMode {
-				fmt.Printf("%d package(s) installed\n", len(appChanged))
+				if needsReboot {
+					fmt.Printf("%d package(s) installed - reboot to use them\n", len(appChanged))
+				} else {
+					fmt.Printf("%d package(s) installed\n", len(appChanged))
+				}
 			}
 			if jsonMode {
 				errMsg := ""
 				if failed > 0 {
 					errMsg = "some packages failed"
 				}
-				// staged/reboot_required describe THE RUN, and this run staged
-				// nothing — so the hook prompts for no reboot (§11.2).
-				emitMutationWithSkips(sortedUnion(appChanged, nil), failures, skips, false, false, errMsg)
+				// staged/reboot_required describe THE RUN (§11.2).
+				emitMutationWithSkips(sortedUnion(appChanged, nil), failures, skips, false, needsReboot, errMsg)
+			}
+			// The NickelMenu "Update all" entry always passes --reboot. A plain
+			// app-tree mod is already usable, so that run must NOT reboot; a font
+			// update is not in use until it does. The payload is emitted above, so
+			// --json ends on the marker even if the reboot call fails (§1).
+			if *reboot && needsReboot {
+				a.paths.Log("REBOOT", "applying content install")
+				n.toast("kpm: rebooting to apply…")
+				if err := rebootDevice(); err != nil {
+					fmt.Fprintln(os.Stderr, "kpm update: reboot failed:", err)
+					return exitError
+				}
+				return exitOK
 			}
 			// A stale file the prune could not remove leaves the package INSTALLED
 			// but not fully tidy: the new files are there, so it is partial, not a
@@ -266,7 +305,7 @@ func (a *App) cmdUpdate(args []string) int {
 			if jsonMode {
 				emitMutationWithSkips(nil, failures, skips, false, false, "")
 			}
-			if err := device.Reboot(); err != nil {
+			if err := rebootDevice(); err != nil {
 				fmt.Fprintln(os.Stderr, "kpm update: reboot failed:", err)
 				return exitError
 			}
@@ -291,20 +330,34 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitOK
 	}
 
+	// stageFailed reports a failure of the TGZ half of a mixed run. The app-tree
+	// installs of step 2 already landed and are recorded, so a bare error payload
+	// would tell the hook that nothing changed and no reboot is pending — and the
+	// retry, finding those packages up to date, reports false/false too, losing the
+	// signal for good. Emit the real mutation shape whenever something landed; the
+	// error travels in jsonMutation.Error, which already exists (§2.3).
+	stageFailed := func(msg string) {
+		if !jsonMode {
+			return
+		}
+		if len(appChanged) == 0 {
+			jsonError(msg)
+			return
+		}
+		emitMutationWithSkips(sortedUnion(appChanged, nil), failures, skips, false,
+			contentRebootNeeded(appTargets, appChanged), msg)
+	}
+
 	// 3. Merge into a not-yet-live part file (hashed before it goes live).
 	if err := a.guardExistingTgz(); err != nil {
-		if jsonMode {
-			jsonError(err.Error())
-		}
+		stageFailed(err.Error())
 		fmt.Fprintln(os.Stderr, "kpm update:", err)
 		a.paths.WriteStatus("kpm: refusing to stage — " + err.Error())
 		return exitError
 	}
 	part, sum, size, dups, err := a.mergeStaged(targets)
 	if err != nil {
-		if jsonMode {
-			jsonError("stage: " + err.Error())
-		}
+		stageFailed("stage: " + err.Error())
 		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
 		a.paths.Log("ERROR", "stage: "+err.Error())
 		return exitError
@@ -349,9 +402,7 @@ func (a *App) cmdUpdate(args []string) int {
 	a.state.StagedCommitted = false
 	if err := a.state.Save(); err != nil {
 		os.Remove(part)
-		if jsonMode {
-			jsonError("state: " + err.Error())
-		}
+		stageFailed("state: " + err.Error())
 		fmt.Fprintln(os.Stderr, "kpm update: state:", err)
 		a.paths.Log("ERROR", "state: "+err.Error())
 		return exitError
@@ -371,9 +422,7 @@ func (a *App) cmdUpdate(args []string) int {
 			ps.StagedFingerprint = s.fingerprint
 		}
 		_ = a.state.Save()
-		if jsonMode {
-			jsonError("stage: " + err.Error())
-		}
+		stageFailed("stage: " + err.Error())
 		fmt.Fprintln(os.Stderr, "kpm update: stage:", err)
 		a.paths.Log("ERROR", "stage: "+err.Error())
 		a.paths.WriteStatus("kpm: staging failed — reboot to install any pending update, or 'kpm unstage'")
@@ -417,7 +466,7 @@ func (a *App) cmdUpdate(args []string) int {
 	if *reboot {
 		a.paths.Log("REBOOT", fmt.Sprintf("staging %d package(s)", len(targets)))
 		n.toast("kpm: rebooting to install…")
-		if err := device.Reboot(); err != nil {
+		if err := rebootDevice(); err != nil {
 			fmt.Fprintln(os.Stderr, "kpm update: reboot failed:", err)
 			if failed > 0 {
 				return exitPartial
@@ -795,6 +844,21 @@ func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums boo
 func (a *App) fetchAsset(id, tag, ext, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, string, error) {
 	final := a.paths.CacheDir() + "/" + id + "-" + safeTag(tag) + ext
 	part := final + ".part"
+	// Free space BEFORE the .part file exists. The extractor's own check runs after
+	// the download, by which point a 22 MiB asset has already taken the last of the
+	// partition and Nickel cannot write its database or save a reading position.
+	// This covers every install method, including the 42 MiB KOReader zip.
+	//
+	// A forge that reports no size, and every host that cannot answer statfs, skip
+	// the check: an unknown filesystem is not a full one.
+	if asset.Size > 0 {
+		if avail, ok := cacheAvailableBytes(a.paths.CacheDir()); ok {
+			if need := asset.Size + apptree.FreeSpaceSlack; avail < need {
+				return "", "", fmt.Errorf("%s %s needs %d bytes free to download %q, %d available — free some space and retry",
+					id, tag, need, asset.Name, avail)
+			}
+		}
+	}
 	f, err := os.Create(part)
 	if err != nil {
 		return "", "", err

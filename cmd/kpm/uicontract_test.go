@@ -26,7 +26,9 @@ package main
 //                self row, self_configured(BOOL) — whether kpm's self-update is
 //                wired up (kpm-self-enrol-plan §1), conflicts(ARRAY, never null)
 //                + conflicts_active(ARRAY, never null) — declared vs currently
-//                installed-or-staged blockers, rolling(BOOL) (INTEGRITY.md §6.1).
+//                installed-or-staged blockers, rolling(BOOL) (INTEGRITY.md §6.1),
+//                kind(str, never null: "mod"|"font") — the browse tab, derived
+//                from the install dest (fonts plan §3.7).
 //                latest/update are DELIBERATELY ABSENT here (registry defs carry
 //                no versions) — the hook merges them in from check
 //                (browsedialog.cc mergeCheck).
@@ -233,8 +235,19 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantBool(t, pkg, "rolling")
 	// APP-TREE.md §11.1: a STRING, never null, from a closed set. The hook labels
 	// the action with it and suppresses reboot copy for "app-tree".
-	if m := wantStr(t, pkg, "install_method"); m != "tgz" && m != "app-tree" {
+	m := wantStr(t, pkg, "install_method")
+	if m != "tgz" && m != "app-tree" {
 		t.Fatalf("install_method = %q, want \"tgz\" or \"app-tree\"", m)
+	}
+	// Fonts plan §3.7 / D1: the browse tab, DERIVED from the install dest. A
+	// string, never null, from a closed set. A tgz package has no content dest,
+	// so it can only ever be a mod.
+	k := wantStr(t, pkg, "kind")
+	if k != "mod" && k != "font" {
+		t.Fatalf("kind = %q, want \"mod\" or \"font\"", k)
+	}
+	if m == "tgz" && k != "mod" {
+		t.Fatalf("a tgz package reported kind %q, want \"mod\"", k)
 	}
 	wantAbsent(t, pkg, "latest")
 	wantAbsent(t, pkg, "update")

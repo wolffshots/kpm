@@ -94,6 +94,14 @@ func (a *App) installAppTree(r resolvedApp, forceLauncher bool) (partial bool, e
 		return false, err
 	}
 
+	// Per-file ownership inside a shared content dir (D4). It runs HERE and not at
+	// resolve time: `update --all` resolves every package before it installs any,
+	// so two font packages shipping the same file would both pass a resolve-time
+	// check and the second would still overwrite the first.
+	if err := a.contentCollision(r.pkg, r.plan, old); err != nil {
+		return false, err
+	}
+
 	res, err := apptree.Apply(a.paths, r.plan, r.cache)
 	if err != nil {
 		// Extraction failed partway, so real files are on disk. Record what was
@@ -171,6 +179,89 @@ func (a *App) installAppTree(r resolvedApp, forceLauncher bool) (partial bool, e
 	}
 	os.Remove(r.cache)
 	return partial, nil
+}
+
+// contentCollision refuses the first write that would touch a file this package
+// does not own, and returns nil when every write is safe or the dest is not a
+// content dir (D4).
+//
+// InstallDest refuses a shared root because an exact uninstall is impossible once
+// packages interleave in one directory. A content dir is the exception, and THIS
+// is what buys the exception back: kpm never writes a file it does not own, so
+// the prune and the uninstall — which already delete only manifest members —
+// cannot reach a sibling package's font or the user's own.
+//
+// Nothing is written when this fires. The package fails on its own; the rest of
+// an `update --all` proceeds.
+func (a *App) contentCollision(p *config.Package, plan *apptree.Plan, old []string) error {
+	if _, ok := uninstall.ContentDirFor(p.Install); !ok {
+		return nil
+	}
+	owner := map[string]string{}
+	// Range the map directly. state.Get INSERTS an entry for an unknown id, which
+	// would register every package named here as locally known.
+	for other, ps := range a.state.Packages {
+		if other == p.ID || ps == nil {
+			continue
+		}
+		for _, m := range ps.Manifest {
+			owner[foldMember(m)] = other
+		}
+	}
+	mine := map[string]bool{}
+	for _, m := range old {
+		mine[foldMember(m)] = true
+	}
+	for _, e := range plan.Entries {
+		k := foldMember(strings.TrimPrefix(e.DevAbs, "/"))
+		if o, ok := owner[k]; ok {
+			// Owner-first is the safer order: it holds even when this package
+			// installed the file too, so kpm never silently takes a file from
+			// another package. That makes the message the only way out, so it has
+			// to name one.
+			return fmt.Errorf("%s is installed by %s. Uninstall %s to release the file, then retry", e.DevAbs, o, o)
+		}
+		// A file this package placed last time is its own to replace. That is also
+		// what makes a crashed install resumable: recordPartial recorded every path
+		// the failed extraction wrote, so the retry finds them in `old`.
+		if mine[k] {
+			continue
+		}
+		if _, err := os.Lstat(a.paths.HostPath(e.DevAbs)); err == nil {
+			return fmt.Errorf("%s already exists and kpm did not install it. "+
+				"Move it off the device, then retry", e.DevAbs)
+		}
+	}
+	return nil
+}
+
+// rebootToApply reports whether a change to p takes effect only after a reboot:
+// every staged tgz, and every app-tree install into a content dir (D6). A font is
+// written immediately but Nickel keeps rendering the old one until it restarts,
+// and a missing prompt is a SILENT failure — the user sees the old font and
+// concludes kpm did nothing.
+func rebootToApply(p *config.Package) bool {
+	if !p.IsAppTree() {
+		return true
+	}
+	_, ok := uninstall.ContentDirFor(p.Install)
+	return ok
+}
+
+// contentRebootNeeded reports whether any package this run actually installed
+// needs a reboot before it is used. A package that failed changed nothing, so it
+// is excluded.
+func contentRebootNeeded(targets []resolvedApp, changed []string) bool {
+	done := make(map[string]bool, len(changed))
+	for _, id := range changed {
+		done[id] = true
+	}
+	for _, r := range targets {
+		if done[r.pkg.ID] && rebootToApply(r.pkg) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyCachedAsset re-hashes a cached download and compares it with the digest
@@ -253,13 +344,28 @@ func missingFrom(old, want []string) []string {
 	return out
 }
 
-// foldMember normalizes a tar-style member for comparison, lowercasing the ones
-// that live on the case-insensitive onboard partition.
+// foldMember normalizes a tar-style member for comparison, folding case for the
+// ones that live on the case-insensitive onboard partition.
+//
+// The fold rule is the policy engine's, not a second copy of it. It folds ASCII
+// and nothing else, which is what Linux vfat does through its NLS table -- and on
+// a utf8 mount non-ASCII is not folded at all.
+//
+// Both fold directions carry a risk here, so the tie is broken by matching the
+// policy layer rather than by arguing the risks. Under-folding can miss an owner
+// in the owner map; over-folding can make a folded collision look like this
+// package's OWN previous file in the mine map, skipping the on-disk check and
+// permitting exactly the overwrite that check exists to prevent. Two layers
+// normalizing one path differently is what produced the aliasing bug this file
+// already guards against; one rule for the whole codebase closes that class.
 func foldMember(m string) string {
-	if strings.HasPrefix(strings.ToLower(m), "mnt/onboard") {
-		return strings.ToLower(m)
-	}
-	return m
+	// Tar-style ("mnt/onboard/x") is the recorded convention, but a hand-edited
+	// state.json or a future writer can spell a member "/mnt/onboard/x". Keyed
+	// as-is, those two never matched: the ownership check missed the real owner and
+	// told the user to delete a file another package installs, and missingFrom
+	// pruned a file the new version had just written.
+	m = strings.TrimPrefix(m, "/")
+	return strings.TrimPrefix(uninstall.FoldPath("/"+m), "/")
 }
 
 // firstFew renders at most n items, with an ellipsis when there are more.
