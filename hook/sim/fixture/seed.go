@@ -45,6 +45,15 @@
 //	                                    the sync exercise target; and carries a
 //	                                    seeded MissingFiles — the "files missing"
 //	                                    badge fixture)
+//	kf-core-fonts installed v2026.08.05 (the FONT fixture: [install] method =
+//	                                    "app-tree" with dest = /mnt/onboard/fonts, the
+//	                                    content directory search derives kind = "font"
+//	                                    from (D1). Its manifest names two .ttf files;
+//	                                    a third, UserFont-Regular.ttf, sits beside them
+//	                                    and is NOT in the manifest — the per-file
+//	                                    ownership rule of D4, which an uninstall must
+//	                                    leave untouched. Drives --exercise-tabs and the
+//	                                    font half of --exercise-uninstall)
 //	kpm          installed 0.7.0      (SOURCELESS packages.d/kpm.toml + empty state
 //	                                    source = un-adopted self row; registry offers
 //	                                    a kpm def with a real source — search reports
@@ -187,6 +196,29 @@ homepage = "https://github.com/baskerville/plato"
     nm_file = "/mnt/onboard/.adds/nm/plato"
     nm_entry = "menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh"
 
+# kf-core-fonts: the font fixture (the fonts plan §3.10). Fonts reuse the app-tree
+# method unchanged — the ebook-fonts Kobo zips are flat archives of .ttf files — so
+# the ONLY thing that makes this a font is where it installs, which is exactly what
+# D1 derives the kind from. A kpm that predates the content-dir policy drops this def
+# here with a warning on stderr (the plan's §1) and the packages.d def seeded below
+# still carries the row, which is also what a real device sees before it updates.
+#
+# min_kpm is deliberately unset for the same reason as plato: the sim's kpm is built
+# as version "dev", which compares BELOW any min_kpm, so search would report
+# min_kpm_ok=false and the detail page would render "Requires kpm >= …" instead of
+# the action button. A real registry entry sets min_kpm = "0.12.0" (§3.11).
+[packages.kf-core-fonts]
+name = "KF Core fonts"
+source = "github.com/nicoverbruggen/ebook-fonts"
+forge = "github"
+asset = "kobo-core-fonts.zip"
+description = "Reading fonts tuned for Kobo's kepub renderer. Installs into the fonts folder. Reboot after installing or updating."
+homepage = "https://github.com/nicoverbruggen/ebook-fonts"
+
+  [packages.kf-core-fonts.install]
+  method = "app-tree"
+  dest = "/mnt/onboard/fonts"
+
 [packages.samplemod]
 name = "Sample Mod"
 source = "codeberg.org/o/samplemod"
@@ -319,6 +351,26 @@ body { text-align: justify; }
 `
 
 const platoNmEntry = "menu_item:main:Plato:cmd_spawn:quiet:exec /mnt/onboard/.adds/plato/plato.sh\n"
+
+// fontsInstallTable is kf-core-fonts' [install] block, appended verbatim to the
+// packages.d def for the same reason plato's is (see platoInstallTable): seed.go is
+// compiled by the Go lane's own `go test`, and raw TOML is what kpm parses anyway.
+const fontsInstallTable = `
+[install]
+method = "app-tree"
+dest = "/mnt/onboard/fonts"
+`
+
+// The fonts kpm extracted into the shared content directory. Content, not shape, is
+// what matters here — nothing in the sim parses a TTF — so these are marker files
+// whose only job is to exist before an uninstall and be gone after it.
+const fontPayload = "KF Core font (fixture) — not a real TTF.\n"
+
+// userFontPayload is a font the USER copied onto the device by hand. It is NOT in
+// kf-core-fonts' manifest, so uninstall must leave it alone (D4): /mnt/onboard/fonts
+// is shared by every font package and by the user, and "kpm deletes only what it
+// installed" is the whole reason a shared directory is safe to install into.
+const userFontPayload = "A font the user copied in by hand. kpm never touches it.\n"
 
 // platoUserSettings is NOT in plato's manifest. KOReader and Plato both keep user
 // data inside their own install tree (APP-TREE.md §9.1), so the rule that makes
@@ -478,6 +530,28 @@ func main() {
 	// ...and one file kpm never installed, sitting in the same directory.
 	writeDev(sysroot, "/mnt/onboard/.adds/plato/Settings.toml", platoUserSettings)
 
+	// kf-core-fonts: the font fixture (§3.10). Installed, registry-managed, and
+	// carrying the [install] table that puts it in /mnt/onboard/fonts — the content
+	// directory `kind = "font"` is derived from (D1), which is what splits it out of
+	// the Mods tab and into Fonts.
+	must(config.Save(p.PackageFile("kf-core-fonts"), &config.Package{
+		Name:     "KF Core fonts",
+		Source:   "github.com/nicoverbruggen/ebook-fonts",
+		Forge:    config.ForgeGitHub,
+		Asset:    "kobo-core-fonts.zip",
+		Registry: "main",
+	}))
+	appendRaw(p.PackageFile("kf-core-fonts"), fontsInstallTable)
+	// The two fonts kpm extracted (both in the manifest below), and one the user
+	// copied in by hand, which is not. All three live in the same shared directory.
+	writeDev(sysroot, "/mnt/onboard/fonts/KFCore-Regular.ttf", fontPayload)
+	writeDev(sysroot, "/mnt/onboard/fonts/KFCore-Bold.ttf", fontPayload)
+	writeDev(sysroot, "/mnt/onboard/fonts/UserFont-Regular.ttf", userFontPayload)
+
+	// No dictionary fixture: nothing emits kind = "dictionary" in 0.12.0 (D8), and a
+	// `method = "file"` def would not parse. The Dictionaries tab is asserted EMPTY,
+	// with its work-in-progress note.
+
 	// nickelnote: an installed package declaring three text templates (create=true).
 	// content/style are written; pin.template is left absent to exercise the
 	// not-created + create-on-first-save path. This is the multi-file / text
@@ -545,6 +619,16 @@ func main() {
 		"mnt/onboard/.adds/plato/css/epub.css",
 		"mnt/onboard/.adds/nm/plato",
 	}
+	// kf-core-fonts: installed, with a manifest naming ONLY the two fonts kpm
+	// extracted (tar-style, no leading slash). UserFont-Regular.ttf is deliberately
+	// absent from it — that absence is the entire uninstall proof (D4), and the
+	// content directory itself is never a manifest member, so no package owns it.
+	kf := st.Get("kf-core-fonts")
+	kf.InstalledVersion = "v2026.08.05"
+	kf.Manifest = []string{
+		"mnt/onboard/fonts/KFCore-Regular.ttf",
+		"mnt/onboard/fonts/KFCore-Bold.ttf",
+	}
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
 	sm.Manifest = []string{manifestPath}
@@ -565,7 +649,7 @@ func main() {
 	fmt.Println("seed: sandbox ready")
 	fmt.Println("  KPM_ROOT    =", os.Getenv("KPM_ROOT"))
 	fmt.Println("  KPM_SYSROOT =", sysroot)
-	fmt.Println("  packages: koreader(registered, NOT installed) kobocloud(latest, rolling) nickelclock(v0.4.0, rolling) nickelmenu(not-installed) nickelnote(v1.2.0) plato(0.9.45, app-tree) samplemod(v1.0.0) kpm(0.7.0, un-adopted) ghostmod(v1.0.0, state-only)")
+	fmt.Println("  packages: koreader(registered, NOT installed) kobocloud(latest, rolling) nickelclock(v0.4.0, rolling) nickelmenu(not-installed) nickelnote(v1.2.0) plato(0.9.45, app-tree) samplemod(v1.0.0) kf-core-fonts(v2026.08.05, font) kpm(0.7.0, un-adopted) ghostmod(v1.0.0, state-only)")
 	fmt.Println("  conflicts: koreader->nickelclock (blocked install) · nickelnote<->nickelclock (installed pair) · nickelmenu->ghostmod (invisible blocker)")
 	fmt.Println("  orphaned def: koreader (packages.d def, no state entry — the 'Drop registration' target)")
 	fmt.Println("  rolling: kobocloud (clean 'rebuilt' badge) · nickelclock (rolling + conflict — badge priority)")
@@ -576,4 +660,6 @@ func main() {
 	fmt.Println("  firmware badge: nickelnote (tested_fw 4.38 < device 4.45)")
 	fmt.Println("  self-enrol target: kpm (un-adopted: sourceless kpm.toml + empty state source; registry offers kpm)")
 	fmt.Println("  app-tree target: plato ([install] method=app-tree, dest=/mnt/onboard/.adds/plato, nm drop-in; Settings.toml is user data, not in the manifest)")
+	fmt.Println("  font target: kf-core-fonts (dest=/mnt/onboard/fonts => kind=font; UserFont-Regular.ttf is the user's, not in the manifest)")
+	fmt.Println("  dictionaries: none — nothing emits kind=dictionary in 0.12.0 (D8), so that tab shows its work-in-progress note")
 }

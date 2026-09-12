@@ -5,7 +5,10 @@
 // host-built kpm binary. Flags:
 //   --size WxH               main-window size (default 758x1024, Kobo portrait)
 //   --screenshot <dir>       offscreen: grab browse/detail/config png's, then exit
-//   --exercise-uninstall <id>  offscreen: drive the Uninstall flow end-to-end
+//   --exercise-uninstall <id>  offscreen: drive the Uninstall flow end-to-end; for
+//                              kf-core-fonts it also asserts D4 in the shared fonts
+//                              directory (manifest members go, the user's font and
+//                              the directory stay)
 //   --exercise-config <id>     offscreen: drive Settings → edit → Save end-to-end
 //   --exercise-conflicts <dir> offscreen: drive the conflicts UI (INTEGRITY.md §4)
 //                              against REAL `kpm search --json` output and write its
@@ -34,6 +37,12 @@
 //                              the "(no reboot)" action suffix, the "Installing…"
 //                              busy label, an uninstall that promises no reboot, and
 //                              the prompt after a run that installed AND staged (§6.4)
+//   --exercise-tabs <dir>      offscreen: drive the Mods/Fonts/Dictionaries tabs
+//                              (fonts plan §3.8): the default tab, the kind filter,
+//                              the rebuild that leaves no stale row, the search box
+//                              filtering inside a tab, the Dictionaries note and the
+//                              content reboot sentence; writes browse-fonts.png and
+//                              browse-dicts.png
 //   --exercise-rowrepaint      offscreen: drive an uninstall, then assert the row
 //                              widgets SURVIVED and the acted-on row repainted in
 //                              place (flash-reduction win 4)
@@ -202,6 +211,76 @@ static void runScreenshot(const QString &dir) {
       });
 }
 
+// Defined with the conflicts exercise below. The uninstall flow reads the same
+// widgets: the detail page it drives, and the prompt kpm's own payload raises.
+static QLabel *labelContaining(QWidget *root, const QString &text);
+static DetailDialog *currentDetail();
+
+// sysrootPath maps a device-absolute path into the sandbox, the same way
+// fixture/seed.go's writeDev does.
+static QString sysrootPath(const QString &devPath) {
+  return QString::fromLocal8Bit(qgetenv("KPM_SYSROOT")) + devPath;
+}
+
+// uninstallAftermath asserts what the sandbox must look like once the uninstall has
+// run. Only the content package has anything to check here, and it is the offline
+// end-to-end proof of D4: /mnt/onboard/fonts is shared by every font package AND by
+// the user, so the rule that makes it safe to install into is "kpm deletes only what
+// it installed". The manifest members go; a font the user copied in stays; and the
+// directory itself stays, because no package ever owns it (the plan's §3.2 — the
+// content dir is never a manifest member, and §3.1 makes it an allow-root so a
+// recursive delete of it is refused outright).
+//
+// The other targets keep the pre-0.12.0 behavior: the flow is driven, the sandbox is
+// inspected by the caller (see the sim README).
+static int uninstallAftermath(const QString &id) {
+  if (id != QStringLiteral("kf-core-fonts")) {
+    return 0;
+  }
+  const QString dir = sysrootPath(QStringLiteral("/mnt/onboard/fonts"));
+  const QString userFont = dir + QStringLiteral("/UserFont-Regular.ttf");
+  QStringList mine{dir + QStringLiteral("/KFCore-Regular.ttf"), dir + QStringLiteral("/KFCore-Bold.ttf")};
+  for (const QString &f : mine) {
+    if (QFile::exists(f)) {
+      std::fprintf(stderr, "sim: FAIL — %s survived the uninstall: a manifest member was not deleted\n",
+                   qPrintable(f));
+      return 8;
+    }
+  }
+  // The directory FIRST: a removed directory takes the user's font with it, so
+  // checking the file first would report the smaller fact and never reach this one.
+  if (!QDir(dir).exists()) {
+    std::fprintf(stderr, "sim: FAIL — the shared fonts directory was removed with the package\n");
+    return 9;
+  }
+  if (!QFile::exists(userFont)) {
+    std::fprintf(stderr, "sim: FAIL — the user's own font was deleted by an uninstall that never installed it\n");
+    return 10;
+  }
+  std::fprintf(stderr, "sim: PASS — both manifest fonts deleted; the user's font and the fonts directory survive\n");
+
+  // The post-action prompt, end to end and off kpm's own payload: uninstalling a
+  // font writes nothing to stage, so the prompt must be the content sentence rather
+  // than "Changes staged" (fonts plan §3.9). This is the detail page's promptReboot,
+  // reached through onResponse — the browse list's wording is a different function.
+  if (!g_lastConfirmation) {
+    std::fprintf(stderr, "sim: FAIL — uninstalling a font never asked for the reboot Nickel needs\n");
+    return 11;
+  }
+  if (labelContaining(g_lastConfirmation, QStringLiteral("Changes staged"))) {
+    std::fprintf(stderr, "sim: FAIL — a font uninstall claims changes are staged; nothing was staged\n");
+    return 11;
+  }
+  QLabel *prompt = labelContaining(g_lastConfirmation, QStringLiteral("Font changes take effect after a reboot"));
+  if (!prompt) {
+    std::fprintf(stderr, "sim: FAIL — a font uninstall does not say why the reboot matters\n");
+    return 11;
+  }
+  std::fprintf(stderr, "sim: PASS — the font uninstall prompt is the content sentence: \"%s\"\n",
+               qPrintable(prompt->text()));
+  return 0;
+}
+
 static void runExerciseUninstall(const QString &id) {
   waitForRows(
       [id]() {
@@ -226,17 +305,32 @@ static void runExerciseUninstall(const QString &id) {
             qApp->exit(5);
             return;
           }
+          // The "(no reboot)" suffix is NOT checked here. It only ever decorates an
+          // Install/Update button, and an installed package with no update available
+          // has neither — so the check would pass whatever the code did. It lives in
+          // --exercise-tabs instead, where a check payload makes the button exist.
           sendClick(btn); // -> DetailDialog::uninstall() -> confirmation dialog
-          QTimer::singleShot(500, qApp, []() {
+          QTimer::singleShot(500, qApp, [id]() {
             if (!g_lastConfirmation) {
               std::fprintf(stderr, "sim: no confirmation dialog appeared\n");
               qApp->exit(6);
               return;
             }
+            // A font's files are deleted while the command runs, like any live
+            // package: "removed on reboot" would be false for it.
+            if (id == QStringLiteral("kf-core-fonts")) {
+              if (labelContaining(g_lastConfirmation, QStringLiteral("removed on reboot")) ||
+                  !labelContaining(g_lastConfirmation, QStringLiteral("Its files will be removed now."))) {
+                std::fprintf(stderr, "sim: FAIL — a font uninstall does not say its files go now\n");
+                qApp->exit(7);
+                return;
+              }
+              std::fprintf(stderr, "sim: PASS — the font uninstall confirmation says its files go now\n");
+            }
             std::fprintf(stderr, "sim: accepting uninstall confirmation\n");
             g_lastConfirmation->accept(); // -> KpmProcess::uninstall runs kpm
             // Give the kpm process time to run and mutate the sandbox state.
-            QTimer::singleShot(5000, qApp, []() { qApp->quit(); });
+            QTimer::singleShot(5000, qApp, [id]() { qApp->exit(uninstallAftermath(id)); });
           });
         });
       },
@@ -1468,6 +1562,403 @@ static void runExerciseAppTree(const QString &dir) {
       });
 }
 
+// ---- --exercise-tabs (the fonts plan §3.8 / §3.10) -----------------------
+//
+// 0.12.0 splits the browse list into three tabs — Mods, Fonts, Dictionaries — off a
+// single new `search --json` field, `kind`, which the Go half DERIVES from where a
+// package installs (D1). A switch runs no kpm command: it is the search-commit path
+// (render(false)), so the hook's entire share of the feature is a filter, a rebuild
+// from page 1, the page-1 chrome, four empty-state strings and one reboot sentence.
+//
+// The fixture seeds kf-core-fonts with dest = /mnt/onboard/fonts (fixture/seed.go).
+// Nothing emits kind = "dictionary" in 0.12.0 (D8), so the Dictionaries tab is
+// asserted EMPTY, carrying its work-in-progress note — the one string the dictionary
+// release changes.
+//
+// `kind` itself is never injected: it is the contract under test, and a payload the
+// simulator wrote itself could not prove the two halves agree. On a kpm whose search
+// emits no `kind` this exercise FAILS at step 1, and says so. What IS injected is
+// device state the offline sandbox cannot produce — a staged change and a stale
+// registry — because the page-1 chrome they drive is exactly what an empty tab used
+// to lose (D7).
+
+// Defined with the reload exercise further down: the tab switch asserts the same
+// page-label facts it does, off the same observable label.
+static QString pageLabelText(PagedStack *pages);
+
+// tabsSearchPayload is the real `kpm search --json`, plus the two facts an offline
+// sandbox cannot hold: something staged (staging needs a download) and a registry
+// that has not been refreshed for a day. Both drive page-1 chrome that is GLOBAL, so
+// every tab — including an empty one — has to show it.
+static QJsonObject tabsSearchPayload() {
+  QJsonObject payload = runKpmSearch();
+  if (payload.value("packages").toArray().isEmpty()) {
+    return QJsonObject();
+  }
+  QJsonObject staged;
+  staged.insert("count", 1);
+  payload.insert("staged", staged);
+  QJsonArray registries;
+  for (const QJsonValue &v : payload.value("registries").toArray()) {
+    QJsonObject r = v.toObject();
+    r.insert("refreshed", QStringLiteral("2020-01-01T00:00:00Z")); // far past the 24h window
+    registries.append(r);
+  }
+  payload.insert("registries", registries);
+  return payload;
+}
+
+// fontUpdatePayload is `kpm update --all --json` for a run that changed ONLY a font
+// and skipped one package. Nothing was staged — the files are already in
+// /mnt/onboard/fonts — but the run still reports reboot_required, because Nickel does
+// not read them until it restarts (D6). That combination is what the third prompt
+// bucket exists for: "Changes staged" would be false, and saying nothing would leave
+// the old font rendering with no explanation. The `skipped` entry rides along so the
+// skip notes can be looked for on an empty tab afterwards.
+static QJsonObject fontUpdatePayload() {
+  QJsonObject skip;
+  skip.insert("id", QStringLiteral("koreader"));
+  skip.insert("reason", QStringLiteral("conflicts with installed package \"nickelclock\""));
+  QJsonObject payload;
+  payload.insert("changed", QJsonArray{QStringLiteral("kf-core-fonts")});
+  payload.insert("failed", QJsonArray());
+  payload.insert("staged", false);
+  payload.insert("reboot_required", true);
+  payload.insert("skipped", QJsonArray{skip});
+  return payload;
+}
+
+// mixedFontPayload is the three-way run: a font (installed, unusable until the
+// restart), an app-tree mod (installed and ready) and a tgz (staged for the boot).
+// The prompt has to count the font WITH the tgz — staged + restart — or it tells the
+// user one thing needs a reboot when two do.
+static QJsonObject mixedFontPayload() {
+  QJsonObject payload;
+  payload.insert("changed", QJsonArray{QStringLiteral("kf-core-fonts"), QStringLiteral("nickelclock"),
+                                       QStringLiteral("plato")});
+  payload.insert("failed", QJsonArray());
+  payload.insert("staged", true);
+  payload.insert("reboot_required", true);
+  return payload;
+}
+
+// fontCheckPayload marks the font as updatable. Without it the font's detail page
+// has no Install/Update button at all, and "the button must not say (no reboot)"
+// would pass no matter what the code did — the button has to EXIST for that
+// assertion to mean anything. check needs the network (see the README), so this is
+// synthesized and fed through the real onCheckDone/mergeCheck.
+static QJsonObject fontCheckPayload() {
+  QJsonObject font;
+  font.insert("id", QStringLiteral("kf-core-fonts"));
+  font.insert("installed", QStringLiteral("v2026.08.05"));
+  font.insert("latest", QStringLiteral("v2026.09.01"));
+  font.insert("update", true);
+  QJsonObject payload;
+  payload.insert("packages", QJsonArray{font});
+  return payload;
+}
+
+// kStaleHint is the page-1 registry hint; kStagedBanner is the staged banner's line.
+// Both are GLOBAL (D7), so they must render on every tab, empty ones included.
+// fromUtf8, not fromLatin1: the banner carries an em dash, and decoding its UTF-8
+// bytes as Latin-1 silently yields a string that matches nothing.
+static const char *kStaleHint = "Tap Refresh for the latest package list";
+static const char *kStagedBanner = "Changes staged — reboot to apply";
+
+// tabActive reads back the property styleTabs() sets. The sim backs primaryButton
+// with a dark fill (nickelstub.cc), so this is also what the screenshots show.
+// Whether the unpolish/polish pair repaints on Kobo's Qt 5.2.1 is device test T8.
+static bool tabActive(QLabel *tab) { return tab != nullptr && tab->property("primaryButton").toBool(); }
+
+// chromeOn reports the page-1 chrome the browse view currently shows. Scoped to the
+// browse widget, so the reboot PROMPT's own "Reboot now" button (a separate
+// top-level dialog in the stub) can never be mistaken for the banner's.
+static QString chromeOn(BrowseDialog *browse) {
+  QString out;
+  out += labelIn(browse, QString::fromUtf8(kStagedBanner)) ? "banner " : "";
+  out += labelIn(browse, QStringLiteral("Reboot now")) ? "reboot-button " : "";
+  out += labelIn(browse, QString::fromUtf8(kStaleHint)) ? "stale-hint " : "";
+  return out.trimmed();
+}
+
+static const QString kAllChrome = QStringLiteral("banner reboot-button stale-hint");
+
+static void runExerciseTabs(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        QJsonObject payload = tabsSearchPayload();
+        if (!pages || payload.isEmpty()) {
+          std::fprintf(stderr, "sim: no BrowseDialog / empty `kpm search --json`\n");
+          qApp->exit(4);
+          return;
+        }
+        bool anyKind = false;
+        for (const QJsonValue &v : payload.value("packages").toArray()) {
+          if (!v.toObject().value("kind").toString().isEmpty()) {
+            anyKind = true;
+          }
+        }
+        std::fprintf(stderr, "sim: `kind` in the search payload: %s\n",
+                     anyKind ? "present" : "ABSENT — the Go half of §3.7 has not landed here, so this run must fail");
+        QMetaObject::invokeMethod(browse, "onSearch", Q_ARG(int, 0), Q_ARG(QJsonObject, payload));
+
+        QTimer::singleShot(600, qApp, [dir, browse, pages]() {
+          QLabel *mods = labelIn(browse, QStringLiteral("Mods"));
+          QLabel *fonts = labelIn(browse, QStringLiteral("Fonts"));
+          QLabel *dicts = labelIn(browse, QStringLiteral("Dictionaries"));
+          if (!mods || !fonts || !dicts) {
+            std::fprintf(stderr, "sim: FAIL — the browse view has no tab bar\n");
+            qApp->exit(5);
+            return;
+          }
+
+          // (1) The view opens on Mods, and no content package is listed there. The
+          // page-label check is the GUARD for that: with one page there is no visible
+          // label, which is what makes "kf-core-fonts is absent" mean "filtered out"
+          // rather than "sitting on page 2 because the fixture grew".
+          if (!pageLabelText(pages).isEmpty()) {
+            std::fprintf(stderr, "sim: FAIL — the Mods tab paginated ('%s'); a missing row would prove nothing\n",
+                         qPrintable(pageLabelText(pages)));
+            qApp->exit(5);
+            return;
+          }
+          if (!tabActive(mods) || tabActive(fonts) || tabActive(dicts)) {
+            std::fprintf(stderr, "sim: FAIL — Mods is not the active tab on open\n");
+            qApp->exit(5);
+            return;
+          }
+          if (rowFor(pages, QStringLiteral("kf-core-fonts"))) {
+            std::fprintf(stderr, "sim: FAIL — a font is listed under Mods\n");
+            qApp->exit(5);
+            return;
+          }
+          if (!rowFor(pages, QStringLiteral("plato"))) {
+            std::fprintf(stderr, "sim: FAIL — the Mods tab lost its mods\n");
+            qApp->exit(5);
+            return;
+          }
+          // The chrome baseline every later tab is compared against. If the injected
+          // state did not take, those comparisons would all be absent == absent and
+          // would prove nothing — so require it here, once.
+          QString modsChrome = chromeOn(browse);
+          if (modsChrome != kAllChrome) {
+            std::fprintf(stderr, "sim: FAIL — page-1 chrome on Mods is '%s', expected '%s'\n", qPrintable(modsChrome),
+                         qPrintable(kAllChrome));
+            qApp->exit(5);
+            return;
+          }
+          std::fprintf(stderr, "sim: PASS — opens on Mods, one page, mods listed, font absent, chrome: %s\n",
+                       qPrintable(modsChrome));
+
+          sendClick(fonts); // -> tapped(bool) -> showFontsTab() -> selectTab("font")
+          QTimer::singleShot(700, qApp, [dir, browse, pages]() {
+            QLabel *mods = labelIn(browse, QStringLiteral("Mods"));
+            QLabel *fonts = labelIn(browse, QStringLiteral("Fonts"));
+
+            // (2) Fonts shows exactly the one font, and takes the active style.
+            QList<PackageRow *> rows = pages->findChildren<PackageRow *>();
+            if (rows.size() != 1 || rows.first()->packageId() != QStringLiteral("kf-core-fonts")) {
+              std::fprintf(stderr, "sim: FAIL — the Fonts tab lists %d rows, expected just kf-core-fonts\n",
+                           rows.size());
+              qApp->exit(6);
+              return;
+            }
+            if (!tabActive(fonts) || tabActive(mods)) {
+              std::fprintf(stderr, "sim: FAIL — the active-tab style did not move to Fonts\n");
+              qApp->exit(6);
+              return;
+            }
+            // (3) The page-1 chrome is global: a switch must not take it away.
+            if (chromeOn(browse) != kAllChrome) {
+              std::fprintf(stderr, "sim: FAIL — the Fonts tab lost page-1 chrome: '%s'\n", qPrintable(chromeOn(browse)));
+              qApp->exit(6);
+              return;
+            }
+            if (!pageLabelText(pages).isEmpty()) {
+              std::fprintf(stderr, "sim: FAIL — a one-page tab shows a page label ('%s')\n",
+                           qPrintable(pageLabelText(pages)));
+              qApp->exit(6);
+              return;
+            }
+            std::fprintf(stderr, "sim: PASS — Fonts shows exactly kf-core-fonts, takes the active style, keeps the "
+                                 "chrome, and shows no page label\n");
+            saveGrab(dir + "/browse-fonts.png");
+
+            QLabel *dicts = labelIn(browse, QStringLiteral("Dictionaries"));
+            sendClick(dicts);
+            QTimer::singleShot(700, qApp, [dir, browse, pages]() {
+              // (4) Dictionaries is empty, says why, AND still carries every global
+              // affordance. Losing them here is not cosmetic: with the tab empty for
+              // the whole release, the banner's Reboot now is the only reboot control
+              // in the browse view, and it used to disappear with the rows.
+              if (!pages->findChildren<PackageRow *>().isEmpty()) {
+                std::fprintf(stderr, "sim: FAIL — the Dictionaries tab listed rows; nothing emits kind=dictionary\n");
+                qApp->exit(7);
+                return;
+              }
+              if (!labelIn(browse,
+                           QStringLiteral("Dictionaries are a work in progress. A later kpm release adds them."))) {
+                std::fprintf(stderr, "sim: FAIL — the empty Dictionaries tab carries no work-in-progress note\n");
+                qApp->exit(7);
+                return;
+              }
+              if (chromeOn(browse) != kAllChrome) {
+                std::fprintf(stderr, "sim: FAIL — an EMPTY tab dropped page-1 chrome: '%s'\n",
+                             qPrintable(chromeOn(browse)));
+                qApp->exit(7);
+                return;
+              }
+              if (!pageLabelText(pages).isEmpty()) {
+                std::fprintf(stderr, "sim: FAIL — the empty tab shows a page label ('%s') for a page of nothing\n",
+                             qPrintable(pageLabelText(pages)));
+                qApp->exit(7);
+                return;
+              }
+              std::fprintf(stderr, "sim: PASS — the empty Dictionaries tab: note shown, chrome kept (%s), no page "
+                                   "label\n",
+                           qPrintable(chromeOn(browse)));
+              saveGrab(dir + "/browse-dicts.png");
+
+              // (5) The search box is GLOBAL and filters INSIDE the active tab (D7).
+              sendClick(labelIn(browse, QStringLiteral("Mods")));
+              QTimer::singleShot(700, qApp, [browse, pages]() {
+                QLineEdit *box = browse->findChild<QLineEdit *>();
+                if (!box) {
+                  std::fprintf(stderr, "sim: FAIL — no search box\n");
+                  qApp->exit(8);
+                  return;
+                }
+                box->setText(QStringLiteral("kf"));
+                QMetaObject::invokeMethod(browse, "commit"); // the keyboard's Search/go
+                QTimer::singleShot(600, qApp, [browse, pages]() {
+                  if (!pages->findChildren<PackageRow *>().isEmpty() ||
+                      !labelIn(browse, QStringLiteral("No packages match your search."))) {
+                    std::fprintf(stderr, "sim: FAIL — 'kf' on the Mods tab did not report an empty search\n");
+                    qApp->exit(8);
+                    return;
+                  }
+                  if (chromeOn(browse) != kAllChrome) {
+                    std::fprintf(stderr, "sim: FAIL — a search miss dropped page-1 chrome: '%s'\n",
+                                 qPrintable(chromeOn(browse)));
+                    qApp->exit(8);
+                    return;
+                  }
+                  std::fprintf(stderr, "sim: PASS — a search matching only a font empties Mods and keeps the chrome\n");
+                  sendClick(labelIn(browse, QStringLiteral("Fonts")));
+                  QTimer::singleShot(700, qApp, [browse, pages]() {
+                    QList<PackageRow *> rows = pages->findChildren<PackageRow *>();
+                    if (rows.size() != 1 || rows.first()->packageId() != QStringLiteral("kf-core-fonts")) {
+                      std::fprintf(stderr, "sim: FAIL — the search text did not survive the switch, or did not match\n");
+                      qApp->exit(8);
+                      return;
+                    }
+                    std::fprintf(stderr, "sim: PASS — the search text stays in the box and filters inside the tab\n");
+
+                    // (6) The font's own detail page. A font is install_method
+                    // "app-tree", so the live test alone would decorate its action
+                    // with "(no reboot)" — the one promise a font cannot keep, since
+                    // the files land now and Nickel reads them at the restart.
+                    QMetaObject::invokeMethod(browse, "onCheckDone", Q_ARG(int, 0),
+                                              Q_ARG(QJsonObject, fontCheckPayload()));
+                    QTimer::singleShot(500, qApp, [browse]() {
+                      QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("kf-core-fonts")));
+                      QTimer::singleShot(800, qApp, [browse]() {
+                        DetailDialog *detail = currentDetail();
+                        if (!labelIn(detail, QStringLiteral("Update"))) {
+                          std::fprintf(stderr, "sim: FAIL — the font detail page offers no Update to label\n");
+                          qApp->exit(9);
+                          return;
+                        }
+                        if (labelContaining(detail, QStringLiteral("(no reboot)"))) {
+                          std::fprintf(stderr, "sim: FAIL — a font's Update button promises '(no reboot)'\n");
+                          qApp->exit(9);
+                          return;
+                        }
+                        std::fprintf(stderr, "sim: PASS — the font's Update button is plain, with no '(no reboot)' "
+                                             "promise\n");
+
+                    // (7) The reboot sentence for a run that installed a font and
+                    // staged nothing. A font is install_method "app-tree", so the live
+                    // test alone would call it "installed and ready".
+                    QMetaObject::invokeMethod(browse, "onActionDone", Q_ARG(int, 0),
+                                              Q_ARG(QJsonObject, fontUpdatePayload()));
+                    QTimer::singleShot(700, qApp, [browse]() {
+                      if (!g_lastConfirmation) {
+                        std::fprintf(stderr, "sim: FAIL — a font update never asked for the reboot it needs\n");
+                        qApp->exit(9);
+                        return;
+                      }
+                      QLabel *prompt =
+                          labelContaining(g_lastConfirmation, QStringLiteral("Font changes take effect after a reboot"));
+                      if (!prompt || labelContaining(g_lastConfirmation, QStringLiteral("installed and ready"))) {
+                        std::fprintf(stderr, "sim: FAIL — the font run's prompt does not say why the reboot matters\n");
+                        qApp->exit(9);
+                        return;
+                      }
+                      std::fprintf(stderr, "sim: PASS — a font-only run is prompted with the content sentence: \"%s\"\n",
+                                   qPrintable(prompt->text()));
+                      g_lastConfirmation->reject(); // Later: do not simulate the reboot
+
+                      // (8) That run also SKIPPED a package. Skip notes are page-1
+                      // chrome too, so they must survive the reload AND be readable
+                      // from the empty tab.
+                      QTimer::singleShot(2000, qApp, [browse]() {
+                        sendClick(labelIn(browse, QStringLiteral("Dictionaries")));
+                        QTimer::singleShot(700, qApp, [browse]() {
+                          if (!labelContaining(browse, QStringLiteral("Skipped KOReader"))) {
+                            std::fprintf(stderr, "sim: FAIL — the empty tab hides the last run's skip note\n");
+                            qApp->exit(10);
+                            return;
+                          }
+                          std::fprintf(stderr, "sim: PASS — the skip note is readable from the empty tab\n");
+
+                          // (9) A mixed run: font + app-tree + tgz. The font counts
+                          // with the tgz, not with what is already usable.
+                          QMetaObject::invokeMethod(browse, "onActionDone", Q_ARG(int, 0),
+                                                    Q_ARG(QJsonObject, mixedFontPayload()));
+                          QTimer::singleShot(700, qApp, []() {
+                            if (!g_lastConfirmation) {
+                              std::fprintf(stderr, "sim: FAIL — a mixed run staged something and never prompted\n");
+                              qApp->exit(11);
+                              return;
+                            }
+                            if (!labelContaining(g_lastConfirmation, QStringLiteral("1 package installed and ready"))) {
+                              std::fprintf(stderr, "sim: FAIL — the mixed run does not report what is ready\n");
+                              qApp->exit(11);
+                              return;
+                            }
+                            QLabel *mixed = labelContaining(g_lastConfirmation, QStringLiteral("more need a reboot"));
+                            if (!mixed || !labelContaining(g_lastConfirmation, QStringLiteral("2 more need a reboot"))) {
+                              std::fprintf(stderr, "sim: FAIL — the mixed prompt did not count the font with the tgz\n");
+                              qApp->exit(11);
+                              return;
+                            }
+                            std::fprintf(stderr, "sim: PASS — a mixed run counts staged + restart: \"%s\"\n",
+                                         qPrintable(mixed->text()));
+                            g_lastConfirmation->reject();
+                            qApp->exit(0);
+                          });
+                        });
+                      });
+                    });
+                      }); // close the font detail page check
+                    }); // close the check-merge wait
+                  });
+                });
+              });
+            });
+          });
+        });
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -1646,7 +2137,10 @@ static void runExerciseRowRepaint() {
 // private current/total members.
 static QString pageLabelText(PagedStack *pages) {
   for (QLabel *l : pages->findChildren<QLabel *>()) {
-    if (l->text().startsWith(QStringLiteral("Page "))) {
+    // isVisible matters: PagedStack HIDES the label rather than clearing it (a
+    // single-page list, or the status page), so reading text alone reports a label
+    // the user cannot see and would let "is the label gone?" pass on a stale one.
+    if (l->isVisible() && l->text().startsWith(QStringLiteral("Page "))) {
       return l->text();
     }
   }
@@ -1764,6 +2258,7 @@ int main(int argc, char **argv) {
   QString conflictsDir;
   QString orphanDir;
   QString appTreeDir;
+  QString tabsDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -1800,6 +2295,8 @@ int main(int argc, char **argv) {
       orphanDir = args.at(++i);
     } else if (a == "--exercise-apptree" && i + 1 < args.size()) {
       appTreeDir = args.at(++i);
+    } else if (a == "--exercise-tabs" && i + 1 < args.size()) {
+      tabsDir = args.at(++i);
     } else if (a == "--exercise-sync") {
       exerciseSync = true;
     } else if (a == "--exercise-staged") {
@@ -1840,6 +2337,8 @@ int main(int argc, char **argv) {
     runExerciseOrphan(orphanDir);
   } else if (!appTreeDir.isEmpty()) {
     runExerciseAppTree(appTreeDir);
+  } else if (!tabsDir.isEmpty()) {
+    runExerciseTabs(tabsDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

@@ -27,6 +27,12 @@ static const char *kAppStyle = R"(
   SimTouchLabel[simButton="true"] {
     border: 2px solid #000000; border-radius: 4px; padding: 8px 16px; font-size: 18px;
   }
+  /* primaryButton is Nickel's dark-filled style (light text on dark). Backed here
+     so the active browse tab is actually visible offscreen: BrowseDialog::styleTabs
+     flips this property and relies on a QStyle unpolish/polish pair to repaint, and
+     with no rule keyed on it that repaint would be unobservable in the sim. Whether
+     the pair takes on Kobo's Qt 5.2.1 is device test T8. */
+  SimTouchLabel[simButton="true"][primaryButton="true"] { background: #000000; color: #ffffff; }
   SimTouchLabel[simButton="true"]:disabled { color: #999999; border-color: #999999; }
   QPushButton { border: 2px solid #000000; border-radius: 4px; padding: 8px 20px; font-size: 18px; background: #ffffff; }
   QLineEdit { border: 2px solid #000000; padding: 10px; font-size: 20px; }

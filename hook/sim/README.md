@@ -69,6 +69,17 @@ Offscreen end-to-end uninstall (drives DetailDialog -> confirm -> `kpm uninstall
 ./run.sh --exercise-uninstall samplemod
 # then: state.json no longer lists samplemod, its packages.d def and its file
 #       under $KPM_SYSROOT are gone.
+
+./run.sh --exercise-uninstall kf-core-fonts
+# the offline end-to-end proof of per-file ownership in a shared content directory
+# (fonts plan D4), plus the font detail page's copy. Asserts: nothing on the page
+# promises "(no reboot)"; the confirmation says the files go NOW, not on reboot; both
+# manifest fonts are deleted while UserFont-Regular.ttf (the user's, not in the
+# manifest) and the fonts directory itself survive; and the post-action prompt —
+# raised from kpm's own uninstall payload — is the content sentence rather than
+# "Changes staged" (exit 0 = PASS; 5 = a "(no reboot)" promise, 7 = wrong removal
+# wording, 8 = a manifest font survived, 9 = the directory went, 10 = the user's font
+# was deleted, 11 = the wrong post-action prompt).
 ```
 
 Offscreen end-to-end config edit (drives DetailDialog -> Settings -> ConfigDialog
@@ -207,6 +218,52 @@ Offscreen app-tree copy (APP-TREE.md §11.3) — the second install shape:
 # was synthesized. Everything past onSearch is device code either way.
 ```
 
+Offscreen browse tabs (fonts plan §3.8) — Mods, Fonts and Dictionaries:
+
+```sh
+./run.sh --exercise-tabs out
+# 0.12.0 splits the browse list by the `kind` field of `kpm search --json`, which kpm
+# derives from where a package installs (D1). A tab switch runs no kpm command: it is
+# the search-commit path (render(false)). This reads strings and widgets off the real
+# view after a real `kpm search --json`. Asserts, in order:
+#   (1) the view opens on Mods, on ONE page (no visible page label — the guard that
+#       makes "kf-core-fonts is absent" mean filtered out, not paginated away), the
+#       mods are listed, the font is not, and page-1 chrome shows all three of the
+#       staged banner, its Reboot now button and the stale hint
+#   (2) Fonts lists exactly kf-core-fonts and takes the active-tab style
+#   (3) the switch keeps every page-1 chrome item, and a one-page tab shows no label
+#   (4) Dictionaries lists nothing, shows "Dictionaries are a work in progress. A
+#       later kpm release adds them.", and STILL carries the banner, the Reboot now
+#       button and the stale hint — an empty tab must not take the only reboot
+#       affordance in the browse view off screen with the rows
+#   (5) with "kf" in the search box, Mods shows "No packages match your search." with
+#       the chrome intact, and Fonts still shows kf-core-fonts: the text is global,
+#       the filter is per tab
+#   (6) a synthetic font-only `update --all` payload fed through onActionDone is
+#       prompted with "Font changes take effect after a reboot. Reboot now?", never
+#       "Changes staged" and never "installed and ready" (a font is install_method
+#       "app-tree", so the live test alone would say the wrong one)
+#   (7) that run also skipped a package, and the skip note is readable from the empty
+#       Dictionaries tab
+#   (8) a mixed run (font + app-tree mod + tgz) reports "1 package installed and
+#       ready" and "2 more need a reboot" — the font counts with the tgz
+# Writes browse-fonts.png and browse-dicts.png into <dir>.
+#
+# `kind` is never injected: it is the contract under test, so a kpm whose search emits
+# no `kind` fails at step 1, and the run prints up front whether the field is present.
+# Two things ARE injected, because an offline sandbox cannot produce them and they
+# drive the page-1 chrome the empty-tab assertions are about: a staged count, and a
+# registry last refreshed in 2020. There is no dictionary fixture — nothing emits
+# kind = "dictionary" in 0.12.0 (D8).
+#
+# NOT asserted here, deliberately: that a switch destroys the previous tab's rows.
+# The in-place repaint path is unreachable on a switch — render(false) never offers
+# it, and repaintRowsInPlace independently declines on a row-count or id mismatch,
+# which a tab switch always is — so the assertion could not fail and would only read
+# as coverage. The guarantee lives in those two checks in browsedialog.cc, and step
+# (2) already fails if a stale row is left listed.
+```
+
 Offscreen badge assertions (verifies the two Wave-3 reliability badges render):
 
 ```sh
@@ -252,8 +309,10 @@ uninstalls never touch the real filesystem.
 
 ## Seeded fixture (offline)
 
-`kpm search --json` returns eight packages in mixed states (plus `ghostmod`, which
-is seeded into `state.json` only and therefore never appears):
+`kpm search --json` returns nine packages in mixed states (plus `ghostmod`, which
+is seeded into `state.json` only and therefore never appears). Eight are mods and
+show on the Mods tab. `kf-core-fonts` is the one font and shows on the Fonts tab.
+The Dictionaries tab is always empty, because no fixture is a dictionary:
 
 | id | state | detail action |
 |----|-------|---------------|
@@ -264,6 +323,7 @@ is seeded into `state.json` only and therefore never appears):
 | nickelnote | installed v1.2.0 | Settings (three text templates; `pin.template` absent → the create path); registry def carries an old `tested_fw` (4.38) vs the seeded `.kobo/version` (4.45) → **firmware badge** ("Untested on your firmware") |
 | plato | installed 0.9.45, **app-tree** | the only package whose def carries an `[install]` table (`method = "app-tree"`, `dest = /mnt/onboard/.adds/plato`, plus a NickelMenu drop-in) → `install_method = "app-tree"`, driving the `(no reboot)` action suffix, the `Installing…` busy label and the immediate-removal uninstall copy — the `--exercise-apptree` target. Its manifest names the extracted files and the drop-in; `Settings.toml` sits in the same directory and is deliberately **absent** from it (APP-TREE.md §9.1's preservation invariant) |
 | samplemod | installed v1.0.0 | Uninstall (manifest delete — the uninstall target); registry-managed with a stale def missing the registry's `[[configs]]` — the **Sync** exercise target; seeded `MissingFiles` → **"files missing"** badge; also the tgz **control** for `--exercise-apptree` |
+| kf-core-fonts | installed v2026.08.05, **font** | the font fixture: its def carries `[install]` with `method = "app-tree"` and `dest = /mnt/onboard/fonts`, so `kind = "font"`. The Fonts tab lists it, it takes the plain "Update" label (never "(no reboot)"), and a run that changes only this package gets the content reboot sentence (`--exercise-tabs`). Its manifest names two `.ttf` files. `UserFont-Regular.ttf` sits next to them and is **not** in the manifest, so `--exercise-uninstall kf-core-fonts` must keep it (D4). The registry def has no `min_kpm`, for the same reason as plato. A kpm older than the content-dir policy drops the registry def with a warning, and the packages.d def still carries the row |
 | kpm | installed 0.7.0 | un-adopted self row: sourceless `packages.d/kpm.toml` + empty state source (the registry offers a kpm def with a real source) → `is_self=true`, `self_configured=false` → **"self-update off"** badge + **Enable self-update** button — the `--exercise-enroll` target |
 
 ## Which of the fifteen UI actions work end-to-end
@@ -308,7 +368,11 @@ them — so only `check`'s latest/update pair is ever synthesized, and only by
 
 - **Nickel styling / e-ink look**: the sim uses plain large black-on-white Qt,
   not Kobo's real widget theme or e-ink rendering. Layout/behavior is faithful;
-  pixels are not.
+  pixels are not. The one Nickel style property the sim does back is
+  `primaryButton` (dark fill, light text, in `nickelstub.cc`). The active browse
+  tab depends on it, so without it the tab restyle would not show offscreen. The
+  sim runs Qt 5.15, so whether the unpolish/polish restyle works on Kobo's Qt 5.2.1
+  is device test T8.
 - **Menu injection**: the "Package manager" More-menu entry
   (`nkpm.cc _nkpm_menu_hook`) is device-only; the sim opens `BrowseDialog`
   directly.
