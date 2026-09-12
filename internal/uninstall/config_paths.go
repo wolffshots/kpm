@@ -37,6 +37,9 @@ func ConfigPath(raw string) (string, error) {
 		return "", fmt.Errorf("config path %q is not within a writable location "+
 			"(.adds/.kobo on the user partition; /usr/local, /opt on rootfs)", raw)
 	}
+	if underContentDir(abs) {
+		return "", fmt.Errorf("config path %q is inside a content directory, which holds only content", raw)
+	}
 	return abs, nil
 }
 
@@ -79,6 +82,13 @@ var (
 	nmKpmFile = "/mnt/onboard/.adds/nm/kpm"
 )
 
+// FoldPath returns the comparison key for a cleaned absolute device path: ASCII
+// case-folded at or under the FAT32 onboard partition (C2), unchanged on the
+// case-sensitive rootfs. Any layer that keys a map by device path must fold
+// through THIS function, so every layer agrees with the policy engine about which
+// spellings are one file on the device.
+func FoldPath(abs string) string { return foldPath(abs) }
+
 // PathUnder reports whether a cleaned absolute device path is at or below prefix,
 // honoring the FAT32 case rule (C2). It is the containment predicate the app-tree
 // extractor re-asserts after composing each destination path (§5.1 rule 7).
@@ -103,11 +113,122 @@ func InstallDest(raw string) (string, error) {
 		return "", fmt.Errorf("install dest %q is not within a writable location "+
 			"(.adds/.kobo on the user partition; /usr/local, /opt on rootfs)", raw)
 	}
+	// A content dir is the one shared root that IS a valid dest. The refusal above
+	// exists because interleaved files make an exact uninstall impossible; inside a
+	// content dir the cmd layer restores that property per file instead — kpm
+	// refuses to write a file another package owns or the user put there (D4), and
+	// both the prune and the uninstall delete only manifest members. Checked before
+	// the shared-root refusal, which isAllowRoot would otherwise trigger.
+	if isContentDir(abs) {
+		return abs, nil
+	}
+	// A dest UNDER a content dir is refused. classify allows the whole subtree, but
+	// every content guard keys on the directory ITSELF: a dest of
+	// /mnt/onboard/fonts/MyFonts would install with no flat rule, no per-file
+	// ownership, no reboot prompt and kind "mod", and would overwrite and later
+	// delete whatever the user keeps there. 0.11.0 refused it outright, and so does
+	// this. Nickel ignores the subdirectory anyway (3.2).
+	if underContentDir(abs) {
+		return "", fmt.Errorf("install dest %q is inside the content directory %s, which is read flat; "+
+			"use %s itself", raw, contentDirOf(abs), contentDirOf(abs))
+	}
 	if isAllowRoot(abs, nil) || pathEqual(abs, nmDir) {
 		return "", fmt.Errorf("install dest %q is a shared root; use a package-specific subdirectory", raw)
 	}
 	return abs, nil
 }
+
+// ContentDirFor returns the content-dir row an app-tree install writes into, and
+// whether there is one. A nil block, a tgz def, or any other dest reports false.
+// It is the single predicate the cmd layer branches on for per-file ownership,
+// the reboot rule and the `kind` field — one relation, one function.
+func ContentDirFor(i *config.Install) (ContentDir, bool) {
+	if i == nil || i.Method != config.MethodAppTree {
+		return ContentDir{}, false
+	}
+	abs, err := cleanDeviceAbs(i.Dest)
+	if err != nil {
+		return ContentDir{}, false
+	}
+	for _, c := range contentDirs {
+		if pathEqual(abs, c.Dir) {
+			return c, true
+		}
+	}
+	return ContentDir{}, false
+}
+
+// contentDirOf returns the content dir abs lives in, or "" when it is in none.
+func contentDirOf(abs string) string {
+	for _, c := range contentDirs {
+		if under(abs, c.Dir) {
+			return c.Dir
+		}
+	}
+	return ""
+}
+
+// ManifestHasContent reports whether a recorded manifest places a file INSIDE a
+// content dir. A tgz package may ship a font without declaring any [install]
+// block, so the def alone cannot answer "does removing this change what Nickel
+// renders" -- the manifest can, and that is what decides the reboot prompt (D6).
+// The directory itself does not count: no package owns it.
+func ManifestHasContent(manifest []string) bool {
+	for _, m := range manifest {
+		abs, err := cleanDeviceAbs(m)
+		if err != nil {
+			continue
+		}
+		if underContentDir(abs) && !isContentDir(abs) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateUninstallDecl rejects an [uninstall] recipe that names a content dir
+// ITSELF as something to delete or to mark. It is a PARSE-time check, unlike the
+// rest of the recipe, which Compute validates at use: a recursive delete of a
+// content dir is refused by Compute, and that refusal fails the WHOLE uninstall,
+// so a def carrying one leaves the package unremovable. purge_paths = "<dest>/**"
+// is the shape every app-tree def uses, so a curator who copies the koreader
+// entry writes exactly this. Failing at parse costs the curator one clear message
+// instead of costing a user their only route to removing the package.
+//
+// A single FILE inside a content dir stays legal in all these lists (3.1): that is
+// the same exposure every file under .adds has.
+func ValidateUninstallDecl(u config.Uninstall) error {
+	for _, field := range []struct {
+		name string
+		raws []string
+	}{
+		{"extra_paths", u.ExtraPaths},
+		{"purge_paths", u.PurgePaths},
+	} {
+		for _, raw := range field.raws {
+			base, _ := splitRecursive(raw)
+			abs, err := cleanDeviceAbs(base)
+			if err != nil {
+				continue // shape errors stay Compute's to report
+			}
+			if isContentDir(abs) {
+				return fmt.Errorf("%s entry %q names the shared content directory %s; "+
+					"list the files this package installs, not the directory", field.name, raw, abs)
+			}
+		}
+	}
+	if raw := strings.TrimSpace(u.MarkerFile); raw != "" {
+		if abs, err := cleanDeviceAbs(raw); err == nil && underContentDir(abs) {
+			return fmt.Errorf("marker_file %q is inside a content directory, which holds only content", raw)
+		}
+	}
+	return nil
+}
+
+// IsContentDir reports whether a cleaned absolute device path IS a content dir.
+// The app-tree extractor asks it about its own dest to decide whether the archive
+// must be flat.
+func IsContentDir(abs string) bool { return isContentDir(abs) }
 
 // InstallPath validates ONE path the extractor is about to write and returns the
 // cleaned absolute device path. There is deliberately no allow_paths extension: a

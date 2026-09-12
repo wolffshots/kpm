@@ -48,6 +48,59 @@ var onboardAllowed = []string{
 	"/mnt/onboard/.kobo",
 }
 
+// ContentDir is a flat directory that Nickel reads user content from and that
+// every package of that kind shares. kpm writes only files it owns inside one
+// (per-file ownership, cmd/kpm), so the shared-root refusal does not apply to it
+// as an install dest. The rest of /mnt/onboard stays denied.
+type ContentDir struct {
+	Dir  string // device-absolute
+	Kind string // search --json "kind"
+}
+
+// contentDirs is a CLOSED allowlist — adding a content type is one row, and
+// nothing else about the onboard guard moves. Every row in 0.12.0 needs a reboot
+// before Nickel uses what was written, so no row field says so (cmd/kpm's
+// rebootToApply).
+//
+// Accepted side effects of exempting these from the onboard deny rule:
+//
+//   - extra_paths, purge_paths, keep_paths, marker_file and config paths can now
+//     name single files in a content dir. That is the same exposure every file
+//     under .adds has today. A recursive delete of the directory itself stays
+//     refused (isAllowRoot), and so does an rmdir of it.
+//   - A tgz package that ships mnt/onboard/fonts/... now uninstalls COMPLETELY.
+//     Before this, those members classified vDenied and went to plan.Skipped: the
+//     uninstall succeeded, unregistered the package and left the files on disk
+//     with nothing tracking them.
+//
+// The book library, the partition root and every other onboard path stay denied,
+// including through allow_paths. Prefix confusion (fontsx, fonts.bak) is denied
+// by `under`, which requires a whole component boundary.
+var contentDirs = []ContentDir{
+	{Dir: "/mnt/onboard/fonts", Kind: "font"},
+}
+
+// isContentDir reports whether abs IS a content directory (not something under
+// one), honoring the FAT32 case rule (C2).
+func isContentDir(abs string) bool {
+	for _, c := range contentDirs {
+		if pathEqual(abs, c.Dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// underContentDir reports whether abs is at or under a content directory (C2).
+func underContentDir(abs string) bool {
+	for _, c := range contentDirs {
+		if under(abs, c.Dir) {
+			return true
+		}
+	}
+	return false
+}
+
 // kpmDir is kpm's own tree, which must never be deleted by another package's
 // uninstall (§4): not just the binary/state/log but the whole subtree
 // (packages.d/, config.toml, cache/, lock, status) — deleting any of it would
@@ -83,11 +136,38 @@ func onOnboard(p string) bool {
 	return lp == onboardPrefix || strings.HasPrefix(lp, onboardPrefix+"/")
 }
 
+// asciiEqualFold is strings.EqualFold restricted to A-Z/a-z. FAT folds the ASCII
+// range and leaves every other byte alone, so Unicode simple folding claims two
+// names are one file that the device keeps apart: EqualFold reads U+017F (long s)
+// as "s" and U+212A (Kelvin sign) as "k", which made /mnt/onboard/fontſ pass
+// as the fonts content dir and become writable at the partition root.
+//
+// This only ever narrows what compares equal, so it can deny more than the old
+// rule and never less.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false // ASCII folding never changes length
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if 'A' <= ca && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if 'A' <= cb && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 // pathEqual compares two device paths, case-insensitively when either is on the
 // FAT32 onboard partition, case-sensitively otherwise (C2).
 func pathEqual(a, b string) bool {
 	if onOnboard(a) || onOnboard(b) {
-		return strings.EqualFold(a, b)
+		return asciiEqualFold(a, b)
 	}
 	return a == b
 }
@@ -96,11 +176,28 @@ func pathEqual(a, b string) bool {
 // (C2): identical for two spellings of one FAT32 file, unchanged on the
 // case-sensitive rootfs. It is what a map keyed by device path must use, since
 // pathEqual cannot be a map key.
+//
+// It folds the ASCII range and nothing else, for the same reason pathEqual does
+// and because THESE TWO MUST AGREE: strings.ToLower maps U+212A to "k", so the
+// key merged two names the device keeps apart while pathEqual now reports them
+// different.
 func foldPath(abs string) string {
 	if onOnboard(abs) {
-		return strings.ToLower(abs)
+		return asciiLower(abs)
 	}
 	return abs
+}
+
+// asciiLower lowercases A-Z and leaves every other byte alone, the fold FAT
+// applies (C2).
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // under (aliased pathUnder) reports whether abs is at or below prefix (exact
@@ -111,7 +208,7 @@ func under(abs, prefix string) bool {
 	}
 	sep := prefix + "/"
 	if onOnboard(abs) || onOnboard(prefix) {
-		return len(abs) >= len(sep) && strings.EqualFold(abs[:len(sep)], sep)
+		return len(abs) >= len(sep) && asciiEqualFold(abs[:len(sep)], sep)
 	}
 	return strings.HasPrefix(abs, sep)
 }
@@ -151,10 +248,12 @@ func classify(abs string, allowExtra []string) verdict {
 	if under(abs, etcDir) && !underAny(abs, etcExceptions) {
 		return vDenied
 	}
-	// The FAT32 onboard partition is protected except /mnt/onboard/.adds and
-	// /mnt/onboard/.kobo — this guards the book library and the firmware root
-	// (case-insensitively, honoring the onboard case rule C2).
-	if onOnboard(abs) && !underAny(abs, onboardAllowed) {
+	// The FAT32 onboard partition is protected except /mnt/onboard/.adds,
+	// /mnt/onboard/.kobo and the content dirs — this guards the book library and
+	// the firmware root (case-insensitively, honoring the onboard case rule C2).
+	// The exemption is written like the /etc carve-out above: an exception here,
+	// and a matching clause in the allowlist below.
+	if onOnboard(abs) && !underAny(abs, onboardAllowed) && !underContentDir(abs) {
 		return vDenied
 	}
 	// /usr/local/Kobo is denied EXCEPT the imageformats subtree.
@@ -165,11 +264,14 @@ func classify(abs string, allowExtra []string) verdict {
 		return vDenied
 	}
 
-	// Allowlist (built-in + per-package extension).
+	// Allowlist (built-in + content dirs + per-package extension).
 	for _, a := range allowPrefixes {
 		if under(abs, a) {
 			return vAllowed
 		}
+	}
+	if underContentDir(abs) {
+		return vAllowed
 	}
 	for _, a := range allowExtra {
 		if under(abs, a) {
@@ -186,9 +288,19 @@ func classify(abs string, allowExtra []string) verdict {
 // rejected (C6). Backslash is only treated as a separator on Windows hosts; on
 // the Linux target it is a literal filename byte (C5).
 func cleanDeviceAbs(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("empty path")
+	}
+	// Padding is REFUSED, never trimmed. Trimming made two different device paths
+	// clean to one: a zip entry or tar member named "Mine.ttf " (a no-break
+	// space is legal on vfat and passes the control-byte check) installed under the
+	// padded name, owned nothing under the trimmed one, and was recorded padded --
+	// so the uninstall trimmed it back and deleted the USER's "Mine.ttf" instead,
+	// orphaning the package's own file. Refusing means such a manifest member
+	// classifies malformed and is skipped, and a padded declared path fails loudly
+	// at parse.
+	if strings.TrimSpace(raw) != raw {
+		return "", fmt.Errorf("leading or trailing whitespace in path %q", raw)
 	}
 	s := raw
 	if runtime.GOOS == "windows" {

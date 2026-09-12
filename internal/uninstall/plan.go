@@ -180,6 +180,15 @@ func Compute(manifest []string, cfg config.Uninstall, purge bool) (Plan, error) 
 			if c.recursive && isAllowRoot(abs, allowExtra) {
 				return Plan{}, fmt.Errorf("refusing recursive delete of shared root %q; list specific subpaths instead", abs)
 			}
+			// A manifest that records the content dir itself (a tgz that shipped the
+			// directory entry) must not print as "delete /mnt/onboard/fonts" at the
+			// confirmation prompt. Execute would not remove it and the rmdir pass
+			// declines it, so the line only reads as "about to delete my font
+			// library". Report it as kept, which is what happens.
+			if isContentDir(abs) {
+				plan.Skipped = append(plan.Skipped, Skipped{abs, "shared content dir"})
+				continue
+			}
 			plan.Deletes = append(plan.Deletes, Delete{Path: abs, Recursive: c.recursive, Purge: c.purge})
 		}
 	}
@@ -273,6 +282,12 @@ func isKept(abs string, keeps []keepSpec) bool {
 // recursively deleted (a `/usr/local/**` would nuke sibling packages / firmware).
 func isAllowRoot(p string, allowExtra []string) bool {
 	if pathEqual(p, koboException) {
+		return true
+	}
+	// A content dir is shared by every package of its kind AND holds the user's
+	// own fonts, so it is a root in exactly this sense: never rmdir'd, never
+	// recursively deleted. Only its members are ever removed.
+	if isContentDir(p) {
 		return true
 	}
 	for _, a := range allowPrefixes {

@@ -259,6 +259,13 @@ func longestAllowPrefix(dev string, allowExtra []string) string {
 	for _, a := range allowPrefixes {
 		consider(a)
 	}
+	// Content dirs are allowlisted by classify but are not in allowPrefixes, so
+	// without this the symlinked-parent guard found no prefix and never ran for a
+	// font. Inert on vfat, which cannot hold a symlink at all -- but this guard is
+	// the one that must not depend on that being true.
+	for _, c := range contentDirs {
+		consider(c.Dir)
+	}
 	for _, a := range allowExtra {
 		consider(a)
 	}
