@@ -12,6 +12,40 @@
 class QHBoxLayout;
 class QLabel;
 
+// The two predicates every string about an install shape is worded from, in ONE
+// place because BrowseDialog and DetailDialog both ask (fonts plan §3.9). Retyping
+// them per file is the drift class the plan warns about for the Go side: a page can
+// then contradict the prompt that follows it, with both looking locally correct.
+//
+// isLiveMethod: the files land while the command runs, instead of being staged in a
+// KoboRoot.tgz the firmware unpacks at the next boot. An ABSENT install_method is a
+// kpm that predates the field (APP-TREE.md §11.1), where everything was a tgz — so
+// this asks for a known non-tgz method rather than for "not tgz".
+inline bool isLiveMethod(const QJsonObject &pkg) {
+  QString method = pkg.value("install_method").toString();
+  return !method.isEmpty() && method != QStringLiteral("tgz");
+}
+
+// isContentKind: the files are written immediately AND Nickel only reads them after
+// a restart (D6), which is what separates a font from an ordinary live package.
+// "dictionary" is deliberately absent: nothing emits that kind in 0.12.0 (D8), so
+// including it would be a dead branch answering with font wording. The dictionary
+// release adds it here, with its own sentence, after T4. The tab filter does not go
+// through this — it compares the kind string directly, so the Dictionaries tab
+// still filters like the other two.
+inline bool isContentKind(const QJsonObject &pkg) {
+  return pkg.value("kind").toString() == QStringLiteral("font");
+}
+
+// contentRebootText is the post-action prompt for a content package (fonts plan
+// §3.9). Its files are written while the command runs, but the firmware only picks
+// them up after a restart, so neither "Changes staged" (nothing is staged) nor
+// silence (the old font keeps rendering) is true. Shared with
+// BrowseDialog::rebootPromptText, which words the same fact for a whole run.
+inline QString contentRebootText() {
+  return QStringLiteral("Font changes take effect after a reboot. Reboot now?");
+}
+
 class DetailDialog : public Dialog {
   Q_OBJECT
 
@@ -76,9 +110,9 @@ private:
   void setBusy(bool busy, const QString &busyLabel = QString());
   void addActionButton(const QString &text, const char *slot);
   void addBlockerButton(const QString &blocker);
-  // actionLabel decorates an Install/Update button label with the app-tree
-  // "(no reboot)" suffix; installBusyLabel picks that action's busy text. Both
-  // read `appTree` and nothing else (APP-TREE.md §11.3 items 2-3).
+  // actionLabel decorates an Install/Update button label with the "(no reboot)"
+  // suffix; installBusyLabel picks that action's busy text. Both read `live` and
+  // `content` and nothing else (APP-TREE.md §11.3 items 2-3, fonts plan §3.9).
   QString actionLabel(const QString &verb) const;
   QString installBusyLabel() const;
   QString displayName(const QString &packageId) const;
@@ -89,11 +123,19 @@ private:
 
   QJsonObject pkg;
   QString id;
-  // appTree is the payload's install_method == "app-tree" (APP-TREE.md §11.1): this
-  // package is extracted straight into .adds/<name>/ and is live the moment the
-  // command returns, rather than staged in a KoboRoot.tgz for the next boot. Absent
-  // on a pre-0.11.0 kpm, which reads as false — i.e. today's wording everywhere.
-  bool appTree = false;
+  // The two facts every string on this page is worded from (fonts plan §3.9).
+  //
+  // live: the payload's install_method is something other than "tgz" (APP-TREE.md
+  // §11.1) — the files land while the command runs, rather than being staged in a
+  // KoboRoot.tgz the firmware unpacks at the next boot.
+  // content: the payload's `kind` is a font or a dictionary. Those are live too,
+  // but Nickel only reads the new files after a restart (D6), so they take the
+  // plain action verb and their own reboot sentence.
+  //
+  // A kpm that predates either field omits it: install_method reads as tgz and
+  // `kind` as mod, i.e. every string on this page is the pre-0.11.0 one.
+  bool live = false;
+  bool content = false;
   QHash<QString, QJsonObject> packageIndex;
   QLabel *statusLabel = nullptr;
   QHBoxLayout *actionsLayout = nullptr; // buttons can still be added after the probe

@@ -97,12 +97,14 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   bool selfUnenrolled = pkg.value("is_self").toBool() && !pkg.value("self_configured").toBool();
   // min_kpm gate (§2.1): don't offer an Install/Update kpm itself would refuse.
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
-  // APP-TREE.md §11.1: install_method is a closed-set string, never null, and is
-  // the ONE new field the feature adds. It changes copy only — which action verb
-  // the button carries, how long the wait is described, and whether an uninstall
-  // promises a reboot — never which buttons exist. A kpm that predates the field
-  // omits it, so this is false and every string below is the pre-0.11.0 one.
-  appTree = pkg.value("install_method").toString() == QStringLiteral("app-tree");
+  // install_method (APP-TREE.md §11.1) and kind (fonts plan §3.7) are closed-set
+  // strings, never null, and they change copy only — which action verb the button
+  // carries, how long the wait is described, whether an uninstall promises a reboot,
+  // and which sentence the post-action prompt uses — never which buttons exist. Both
+  // predicates live in detaildialog.h, because BrowseDialog words the run-level
+  // prompt from the same two questions and the two must not drift apart.
+  live = isLiveMethod(pkg);
+  content = isContentKind(pkg);
   // Settings opens the config editor; shown only when installed and the package
   // declares an editable config (has_config, from the search payload — CONFIG.md §4).
   bool hasConfig = !installed.isEmpty() && pkg.value("has_config").toBool();
@@ -392,26 +394,31 @@ void DetailDialog::addActionButton(const QString &text, const char *slot) {
   buttons.append(button);
 }
 
-// actionLabel appends "(no reboot)" to an Install/Update button for an app-tree
-// package (APP-TREE.md §11.3 item 2). This is the single visible payoff of the new
-// field, and it is on the button on purpose: every other kpm install ends in a
-// reboot prompt, so the expectation to set is the one the user has before the tap,
-// not an advisory line they read after it. Only Install and Update take it —
-// Uninstall says its piece in its confirmation, and the reboot/blocked/min_kpm
-// branches never offer either verb.
+// actionLabel appends "(no reboot)" to an Install/Update button for a live package
+// (APP-TREE.md §11.3 item 2). It is on the button on purpose: every other kpm
+// install ends in a reboot prompt, so the expectation to set is the one the user
+// has before the tap, not an advisory line they read after it. Only Install and
+// Update take it — Uninstall says its piece in its confirmation, and the
+// reboot/blocked/min_kpm branches never offer either verb.
+//
+// A content package is live and still takes the plain verb (fonts plan §3.9): its
+// files are written immediately, but the font they hold is not usable until the
+// restart, so promising "no reboot" would be the one thing the user later finds is
+// untrue.
 QString DetailDialog::actionLabel(const QString &verb) const {
-  return appTree ? verb + QStringLiteral(" (no reboot)") : verb;
+  return live && !content ? verb + QStringLiteral(" (no reboot)") : verb;
 }
 
 // installBusyLabel names what an Install/Update is actually doing while the button
-// is disabled (APP-TREE.md §11.3 item 3). An app-tree install writes the whole tree
-// itself — 84 MiB for KOReader — where a tgz install downloads a few MB and hands
-// them to the firmware, so the wait is appreciably longer and the generic "Working…"
-// undersells it. Deliberately NOT used by uninstall/enrol/drop: "Installing…" during
-// a removal would be worse than saying nothing specific. Returns EMPTY for a tgz
-// package — setBusy resolves that to "Working…", so the default lives in one place.
+// is disabled (APP-TREE.md §11.3 item 3). A live install writes every file itself —
+// 84 MiB for KOReader, 22 MiB for the extra font pack — where a tgz install
+// downloads a few MB and hands them to the firmware, so the wait is appreciably
+// longer and the generic "Working…" undersells it. Deliberately NOT used by
+// uninstall/enrol/drop: "Installing…" during a removal would be worse than saying
+// nothing specific. Returns EMPTY for a tgz package — setBusy resolves that to
+// "Working…", so the default lives in one place.
 QString DetailDialog::installBusyLabel() const {
-  return appTree ? QStringLiteral("Installing…") : QString();
+  return live ? QStringLiteral("Installing…") : QString();
 }
 
 // addBlockerButton adds a button routing to ANOTHER package's detail page
@@ -620,17 +627,19 @@ void DetailDialog::openConfig() {
 }
 
 // uninstall confirms first, and the confirmation has to be honest about WHEN the
-// files go (APP-TREE.md §6.5 / §11.3 item 1). An app-tree package is deleted from
-// .adds/<name>/ by kpm itself while the command runs, so "removed on reboot" is
-// simply false for it — and telling a user to reboot for something already done is
-// how a reboot prompt stops meaning anything. The tgz wording is unchanged.
+// files go (APP-TREE.md §6.5 / §11.3 item 1). A live package's files are deleted by
+// kpm itself while the command runs, so "removed on reboot" is simply false for it —
+// and telling a user to reboot for something already done is how a reboot prompt
+// stops meaning anything. That covers a font too: the files go now, and the reboot
+// the prompt afterwards asks for is about what Nickel still has loaded, not about
+// the removal. The tgz wording is unchanged.
 void DetailDialog::uninstall() {
   QString name = pkg.value("name").toString();
   if (name.isEmpty()) {
     name = id;
   }
-  QString removal = appTree ? QStringLiteral("Its files will be removed now.")
-                            : QStringLiteral("Its files will be removed on reboot.");
+  QString removal = live ? QStringLiteral("Its files will be removed now.")
+                         : QStringLiteral("Its files will be removed on reboot.");
   ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
   ConfirmationDialog__setTitle(d, "kpm");
   ConfirmationDialog__setText(d, "Uninstall " + name + "? " + removal);
@@ -664,10 +673,15 @@ void DetailDialog::onFailure(QString reason) {
   setBusy(false);
 }
 
+// promptReboot asks for the restart after an action that needs one. A content
+// package stages nothing — its files are already written — so the staged sentence
+// would be wrong for it (fonts plan §3.9). Every other caller of this prompt is a
+// staged tgz, including the staged page's own "Reboot now" button, which a content
+// package can never reach.
 void DetailDialog::promptReboot() {
   ConfirmationDialog *d = ConfirmationDialogFactory__getConfirmationDialog(nullptr);
   ConfirmationDialog__setTitle(d, "kpm");
-  ConfirmationDialog__setText(d, "Changes staged. Reboot now?");
+  ConfirmationDialog__setText(d, content ? contentRebootText() : QStringLiteral("Changes staged. Reboot now?"));
   ConfirmationDialog__setAcceptButtonText(d, "Reboot now");
   ConfirmationDialog__setRejectButtonText(d, "Later");
   QObject::connect(d, &QDialog::accepted, [] { rebootDevice(); });

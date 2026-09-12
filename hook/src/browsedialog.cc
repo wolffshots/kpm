@@ -6,7 +6,9 @@
 #include <QFile>
 #include <QHBoxLayout>
 #include <QHash>
+#include <QPair>
 #include <QPointer>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include <NickelHook.h>
@@ -51,6 +53,31 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   // without those symbols it holds fallback insets past the persistent chrome.
   layout->setContentsMargins(0, chrome.top(), 0, chrome.bottom());
   layout->setSpacing(0);
+
+  // Tab bar (fonts plan §3.8): one N3ButtonLabel per `kind` the list can hold,
+  // above the search box. A switch runs no kpm command — it re-filters the payload
+  // already in hand — so Refresh/Sync/Update-all, the staged banner, the stale hint
+  // and the skip notes all stay global and show on page 1 of every tab (D7).
+  QHBoxLayout *tabBar = new QHBoxLayout();
+  tabBar->setContentsMargins(14, 6, 14, 6);
+  tabBar->setSpacing(16);
+  modsTab = construct_N3ButtonLabel(this);
+  modsTab->setText("Mods");
+  tabBar->addWidget(modsTab);
+  fontsTab = construct_N3ButtonLabel(this);
+  fontsTab->setText("Fonts");
+  tabBar->addWidget(fontsTab);
+  dictsTab = construct_N3ButtonLabel(this);
+  dictsTab->setText("Dictionaries");
+  tabBar->addWidget(dictsTab);
+  // Left-aligned: the trailing stretch keeps the three tabs together at the
+  // leading edge, where the footer's does the opposite for the actions.
+  tabBar->addStretch(1);
+  layout->addLayout(tabBar);
+  QObject::connect(modsTab, SIGNAL(tapped(bool)), this, SLOT(showModsTab()));
+  QObject::connect(fontsTab, SIGNAL(tapped(bool)), this, SLOT(showFontsTab()));
+  QObject::connect(dictsTab, SIGNAL(tapped(bool)), this, SLOT(showDictsTab()));
+  styleTabs(); // Mods is the tab the view opens on
 
   lineEdit = construct_TouchLineEdit(nullptr);
   layout->addWidget(lineEdit);
@@ -243,21 +270,36 @@ void BrowseDialog::onActionDone(int exitCode, QJsonObject payload) {
 // Only a genuinely mixed run is reworded. An app-tree-only run does not reach here
 // (both bools false, no prompt); a tgz-only run, or one where `changed` is empty
 // while something else is staged, keeps the original sentence — which is still true.
+//
+// 0.12.0 adds a third bucket (fonts plan §3.9): a content package installs live and
+// is still unusable until the restart, so it counts toward what needs a reboot
+// without ever having been staged. A content-only run therefore takes its own
+// sentence rather than "Changes staged", which would be false.
 QString BrowseDialog::rebootPromptText(const QJsonObject &payload) const {
   QHash<QString, QJsonObject> index = packageIndex();
-  int live = 0, staged = 0;
+  int live = 0, staged = 0, restart = 0;
   for (const QJsonValue &v : payload.value("changed").toArray()) {
     QString changedId = v.toString();
     if (changedId.isEmpty()) {
       continue;
     }
-    if (index.value(changedId).value("install_method").toString() == QStringLiteral("app-tree")) {
-      live++;
+    // The same two predicates DetailDialog words its page from (detaildialog.h),
+    // asked in the same order: content first, because a font is live too and would
+    // otherwise be counted as "installed and ready" when it is not usable yet.
+    QJsonObject row = index.value(changedId);
+    if (isContentKind(row)) {
+      restart++; // installed, used after a reboot
+    } else if (isLiveMethod(row)) {
+      live++; // installed and ready
     } else {
-      staged++;
+      staged++; // a tgz, landing at the next boot
     }
   }
-  if (live == 0 || staged == 0) {
+  if (live == 0 && staged == 0 && restart > 0) {
+    return contentRebootText();
+  }
+  int needs = staged + restart;
+  if (live == 0 || needs == 0) {
     return QStringLiteral("Changes staged. Reboot now?");
   }
   // Two short clauses and the question, mirroring the CLI's own mixed tail
@@ -266,8 +308,8 @@ QString BrowseDialog::rebootPromptText(const QJsonObject &payload) const {
   // confirmation box, while the browse list behind it already names every row.
   QString done = live == 1 ? QStringLiteral("1 package installed and ready")
                            : QString("%1 packages installed and ready").arg(live);
-  QString pending = staged == 1 ? QStringLiteral("1 more needs a reboot")
-                                : QString("%1 more need a reboot").arg(staged);
+  QString pending = needs == 1 ? QStringLiteral("1 more needs a reboot")
+                               : QString("%1 more need a reboot").arg(needs);
   return done + ". " + pending + ". Reboot now?";
 }
 
@@ -458,11 +500,64 @@ void BrowseDialog::commit() {
   }
 }
 
+// One named slot per tab: the Nickel tapped(bool) signal is only reachable through
+// the string-based connect, which cannot bind a lambda (the same constraint
+// DetailDialog's blocker buttons work around with a dynamic property — here there
+// are exactly three tabs, so three slots is the smaller answer).
+void BrowseDialog::showModsTab() { selectTab(QStringLiteral("mod")); }
+void BrowseDialog::showFontsTab() { selectTab(QStringLiteral("font")); }
+void BrowseDialog::showDictsTab() { selectTab(QStringLiteral("dictionary")); }
+
+// selectTab switches which `kind` the list shows. render(false) is the path a
+// search commit already takes (fonts plan D7): it never takes the in-place row
+// repaint, it re-records the page-1 banner states, and it rebuilds from page 1 —
+// which is every tab-switch hazard handled by one call that already exists.
+void BrowseDialog::selectTab(const QString &kind) {
+  if (kind == activeKind) {
+    return;
+  }
+  activeKind = kind;
+  styleTabs();
+  if (laidOut && dataReady) {
+    render(false);
+  }
+}
+
+// styleTabs marks the active tab with primaryButton, Nickel's dark-filled style —
+// the same property the footer actions carry. A dynamic property change does not
+// restyle a widget by itself, hence the unpolish/polish pair. If that does not take
+// on Kobo's Qt 5.2.1 (device test T8), the documented fallback is to disable the
+// active tab instead, which greys it through the ordinary disabled style.
+void BrowseDialog::styleTabs() {
+  const QPair<N3ButtonLabel *, QString> tabs[] = {
+      {modsTab, QStringLiteral("mod")}, {fontsTab, QStringLiteral("font")}, {dictsTab, QStringLiteral("dictionary")}};
+  for (const QPair<N3ButtonLabel *, QString> &t : tabs) {
+    if (t.first == nullptr) {
+      continue;
+    }
+    t.first->setProperty("primaryButton", t.second == activeKind);
+    t.first->style()->unpolish(t.first);
+    t.first->style()->polish(t.first);
+  }
+}
+
 QList<QJsonObject> BrowseDialog::filteredPackages() const {
   QList<QJsonObject> out;
   QString f = filter.toLower();
   for (const QJsonValue &v : allPackages) {
     QJsonObject o = v.toObject();
+    // Tab filter (§3.8). `kind` is a closed-set string that search --json derives
+    // from where the package installs (D1), so it can never disagree with where the
+    // files actually go. A kpm that predates the field omits it, and every package
+    // without a content destination is a mod anyway — which is also the field's own
+    // default — so an absent value reads as "mod" and the Mods tab is unchanged.
+    QString kind = o.value("kind").toString();
+    if (kind.isEmpty()) {
+      kind = QStringLiteral("mod");
+    }
+    if (kind != activeKind) {
+      continue;
+    }
     if (f.isEmpty() || o.value("id").toString().toLower().contains(f) ||
         o.value("name").toString().toLower().contains(f) ||
         o.value("description").toString().toLower().contains(f)) {
@@ -470,6 +565,33 @@ QList<QJsonObject> BrowseDialog::filteredPackages() const {
     }
   }
   return out;
+}
+
+// emptyStateText words the status line for a tab with nothing in it (§3.8). The
+// ORDER is the point:
+//
+//  1. Dictionaries first, because that note is true whatever the list and the
+//     search box hold: nothing emits kind = "dictionary" in 0.12.0 (D8), so the tab
+//     is always empty and "No packages match your search" would blame the user's
+//     search for a feature that has not shipped. The dictionary release changes
+//     this one string and nothing else — the tab already filters on `kind` exactly
+//     like the other two.
+//  2. Then "no packages at all", which is about the whole list rather than the tab
+//     and has its own remedy (Refresh).
+//  3. Then an empty Fonts tab with an empty search box: the registries simply carry
+//     no fonts yet, which again is not a failed search.
+//  4. Otherwise the ordinary no-match line.
+QString BrowseDialog::emptyStateText() const {
+  if (activeKind == QStringLiteral("dictionary")) {
+    return QStringLiteral("Dictionaries are a work in progress. A later kpm release adds them.");
+  }
+  if (allPackages.isEmpty()) {
+    return QStringLiteral("No packages. Tap Refresh for the package list.");
+  }
+  if (activeKind == QStringLiteral("font") && filter.isEmpty()) {
+    return QStringLiteral("No fonts in your registries yet.");
+  }
+  return QStringLiteral("No packages match your search.");
 }
 
 bool BrowseDialog::registriesStale() const {
@@ -492,6 +614,15 @@ bool BrowseDialog::registriesStale() const {
 void BrowseDialog::setActionsEnabled(bool enabled) {
   if (kpmMissing) {
     enabled = false;
+    // The tabs are a client-side filter, so they stay live while a command runs —
+    // but with no kpm binary there is no list to filter and never will be, and a tap
+    // that only moves the active highlight over an unchanging page reads as a broken
+    // control. This is the one state that disables them.
+    for (N3ButtonLabel *tab : {modsTab, fontsTab, dictsTab}) {
+      if (tab != nullptr) {
+        tab->setEnabled(false);
+      }
+    }
   }
   if (refreshButton) {
     refreshButton->setEnabled(enabled);
@@ -592,10 +723,17 @@ void BrowseDialog::render(bool allowInPlace) {
     return;
   }
 
-  // Win 2 (kpm-flash-reduction-plan): if a content page is already shown this is a
-  // data-in-hand re-render (post-action reload, post-check merge, in-search filter)
-  // — swap straight to the new list, no "Loading..." flip. The genuine initial load
-  // (status page still shown) keeps clear()/Loading.
+  // Win 2 (kpm-flash-reduction-plan): if the list has already been built once this
+  // is a data-in-hand re-render (post-action reload, post-check merge, in-search
+  // filter, tab switch) — swap straight to the new list, no "Loading..." flip. Only
+  // the genuine initial load (nothing rendered yet) takes clear()/Loading.
+  //
+  // hasContent() reads PagedStack's page counter, which a render building NO page
+  // resets to 0 — and the next render would then flip the whole view through
+  // "Loading. Please wait..." for a gesture that runs no command. That cannot happen
+  // because requestPage builds a real page-1 even for an empty list (see below), so
+  // the counter never drops once the list exists; --exercise-tabs fails if an empty
+  // tab ever stops building that page.
   if (pages->hasContent()) {
     pages->reload();
   } else {
@@ -608,9 +746,31 @@ void BrowseDialog::requestPage(int index) {
   if (kpmMissing || !dataReady) {
     return;
   }
+  // An empty tab is still page 1, and page 1 carries the global chrome (D7). Build
+  // the real page rather than falling back to the bare status page: that fallback
+  // took the staged banner and its Reboot now button, the last action's skip notes
+  // and the stale hint off screen with the rows. On the Dictionaries tab, which is
+  // empty for this whole release, that removed the only reboot affordance in the
+  // browse view for as long as the user stayed on it.
   if (filtered.isEmpty()) {
-    pages->setStatusText(allPackages.isEmpty() ? "No packages. Tap Refresh for the package list."
-                                               : "No packages match your search.");
+    if (index != 1) {
+      return; // an empty list has no page 2
+    }
+    pages->setTotal(1);
+    QWidget *box = new QWidget(pages);
+    QVBoxLayout *v = new QVBoxLayout(box);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->setSpacing(0);
+    addPageOneChrome(box, v);
+    // Centred between two stretches, where the status page used to put it.
+    v->addStretch(1);
+    Label *empty = new Label(Label::Small, emptyStateText());
+    empty->setAlignment(Qt::AlignCenter);
+    empty->setWordWrap(true); // the Dictionaries note is a sentence, never elide it
+    empty->setContentsMargins(14, 10, 14, 10);
+    v->addWidget(empty);
+    v->addStretch(1);
+    pages->addPage(box);
     return;
   }
 
@@ -641,39 +801,7 @@ void BrowseDialog::requestPage(int index) {
   v->setSpacing(0);
 
   if (index == 1) {
-    if (stagedSummary.value("count").toInt() > 0) {
-      QWidget *banner = new QWidget(box);
-      QHBoxLayout *bl = new QHBoxLayout(banner);
-      bl->setContentsMargins(14, 10, 14, 10);
-      bl->addWidget(new Label(Label::Small, "Changes staged — reboot to apply"), 1);
-      N3ButtonLabel *rebootButton = construct_N3ButtonLabel(banner);
-      rebootButton->setText("Reboot now");
-      bl->addWidget(rebootButton);
-      QObject::connect(rebootButton, SIGNAL(tapped(bool)), this, SLOT(rebootConfirm()));
-      v->addWidget(banner);
-    }
-    // Skips from the last action (INTEGRITY.md §6.4). Deliberately a line in the
-    // list rather than a dialog: it is neither a failure (no error dialog) nor
-    // something to hide (the run "succeeded" while leaving a package behind), and
-    // it must survive the reload the action triggers, which a dialog fired before
-    // that reload would not.
-    for (int i = 0; i < skipNotes.size() && i < kMaxSkipLines; i++) {
-      Label *note = new Label(Label::Small, skipNotes.at(i));
-      note->setWordWrap(true); // the reason carries kpm's own remedy — never elide it
-      note->setContentsMargins(14, 10, 14, 0);
-      v->addWidget(note);
-    }
-    if (skipNotes.size() > kMaxSkipLines) {
-      Label *more =
-          new Label(Label::Small, QString("+%1 more skipped — see the kpm log").arg(skipNotes.size() - kMaxSkipLines));
-      more->setContentsMargins(14, 10, 14, 0);
-      v->addWidget(more);
-    }
-    if (registriesStale()) {
-      Label *hint = new Label(Label::Small, "Tap Refresh for the latest package list");
-      hint->setContentsMargins(14, 10, 14, 10);
-      v->addWidget(hint);
-    }
+    addPageOneChrome(box, v);
   }
 
   for (int i = start; i < end; i++) {
@@ -683,4 +811,44 @@ void BrowseDialog::requestPage(int index) {
   }
   v->addStretch(1);
   pages->addPage(box);
+}
+
+// addPageOneChrome draws page 1's banners: the staged reboot affordance, the last
+// action's skip notes and the stale-registry hint. All three are GLOBAL — facts
+// about the device and about the last command, not about the active tab (D7) — so
+// they belong to whatever page 1 turns out to be, including an empty one.
+void BrowseDialog::addPageOneChrome(QWidget *box, QVBoxLayout *v) {
+  if (stagedSummary.value("count").toInt() > 0) {
+    QWidget *banner = new QWidget(box);
+    QHBoxLayout *bl = new QHBoxLayout(banner);
+    bl->setContentsMargins(14, 10, 14, 10);
+    bl->addWidget(new Label(Label::Small, "Changes staged — reboot to apply"), 1);
+    N3ButtonLabel *rebootButton = construct_N3ButtonLabel(banner);
+    rebootButton->setText("Reboot now");
+    bl->addWidget(rebootButton);
+    QObject::connect(rebootButton, SIGNAL(tapped(bool)), this, SLOT(rebootConfirm()));
+    v->addWidget(banner);
+  }
+  // Skips from the last action (INTEGRITY.md §6.4). Deliberately a line in the
+  // list rather than a dialog: it is neither a failure (no error dialog) nor
+  // something to hide (the run "succeeded" while leaving a package behind), and
+  // it must survive the reload the action triggers, which a dialog fired before
+  // that reload would not.
+  for (int i = 0; i < skipNotes.size() && i < kMaxSkipLines; i++) {
+    Label *note = new Label(Label::Small, skipNotes.at(i));
+    note->setWordWrap(true); // the reason carries kpm's own remedy — never elide it
+    note->setContentsMargins(14, 10, 14, 0);
+    v->addWidget(note);
+  }
+  if (skipNotes.size() > kMaxSkipLines) {
+    Label *more =
+        new Label(Label::Small, QString("+%1 more skipped — see the kpm log").arg(skipNotes.size() - kMaxSkipLines));
+    more->setContentsMargins(14, 10, 14, 0);
+    v->addWidget(more);
+  }
+  if (registriesStale()) {
+    Label *hint = new Label(Label::Small, "Tap Refresh for the latest package list");
+    hint->setContentsMargins(14, 10, 14, 10);
+    v->addWidget(hint);
+  }
 }

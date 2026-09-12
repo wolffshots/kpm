@@ -14,6 +14,7 @@
 #include "widgets/pagedstack.h"
 
 class DetailDialog;
+class QVBoxLayout;
 
 class BrowseDialog : public Dialog {
   Q_OBJECT
@@ -38,6 +39,14 @@ public Q_SLOTS:
   void updateAll();
   void rebootConfirm();
   void openDetail(QString id);
+
+  // The tab bar (the fonts plan §3.8). N3ButtonLabel is an opaque Nickel class, so
+  // its tapped(bool) signal is reachable only through the string-based SIGNAL/SLOT
+  // macros, which cannot bind a lambda — hence one named slot per tab rather than
+  // one slot carrying its kind.
+  void showModsTab();
+  void showFontsTab();
+  void showDictsTab();
 
 private:
   BrowseDialog();
@@ -68,9 +77,20 @@ private:
   // no-argument slot the staged banner's button connects to by name.
   QString rebootPromptText(const QJsonObject &payload) const;
   void showRebootPrompt(const QString &text);
+  // selectTab switches which `kind` the list shows; styleTabs marks the active one
+  // (§3.8). emptyStateText words the status line for a tab with no rows.
+  void selectTab(const QString &kind);
+  void styleTabs();
+  QString emptyStateText() const;
+  // addPageOneChrome draws the global page-1 banners (staged, skips, stale hint)
+  // into a page being built — including the page an empty tab shows (D7).
+  void addPageOneChrome(QWidget *box, QVBoxLayout *v);
 
   PagedStack *pages = nullptr;
   TouchLineEdit *lineEdit = nullptr;
+  N3ButtonLabel *modsTab = nullptr;
+  N3ButtonLabel *fontsTab = nullptr;
+  N3ButtonLabel *dictsTab = nullptr;
   N3ButtonLabel *refreshButton = nullptr;
   N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;
@@ -80,6 +100,10 @@ private:
   QJsonArray registries;
   QList<QJsonObject> filtered;
   QString filter;
+  // The `kind` (search --json) the list is filtered to — the active tab. "mod" is
+  // the field's own default for every package with no content destination, so it is
+  // also where a payload with no `kind` at all lands.
+  QString activeKind = QStringLiteral("mod");
   // Packages the last action deliberately did not act on (INTEGRITY.md §6.4's
   // `skipped`). Rendered on page 1 until the next action replaces or clears it:
   // a skip is neither a failure nor a success, and silence is the one thing it
