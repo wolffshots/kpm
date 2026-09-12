@@ -406,6 +406,14 @@ shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
 crash-isolated view layer. Staged changes prompt a **Reboot now / Later** dialog,
 matching kpm's stage-then-reboot install model.
 
+Above the search box the browse view carries three tabs: **Mods**, **Fonts**,
+and **Dictionaries**. A package lands in a tab by where it installs: KOReader,
+Plato, and kpm itself show under Mods, and a package that installs into
+`/mnt/onboard/fonts` shows under Fonts. Refresh, Sync, and Update all stay
+global across every tab, and the search box filters inside whichever tab is
+active. The Dictionaries tab carries a work-in-progress note, matching the
+note in [Fonts](#fonts).
+
 Installed packages whose registry entry declares config files (CONFIG.md) also
 get a **Settings** button: it lists the package's config files, shows their
 entries (ini keys or text lines), and edits values with the on-screen keyboard —
@@ -558,11 +566,12 @@ The practical differences:
 
 | | tgz packages | app-tree packages |
 |---|---|---|
-| When it takes effect | after a reboot | immediately |
+| When it takes effect | after a reboot | immediately, except a font package (see [Fonts](#fonts)) |
 | `kpm update` reports | `staged — reboot to install` | `installed` |
-| `--reboot` | reboots | does nothing |
+| `--reboot` | reboots | does nothing, except for a font package |
 | `kpm uninstall` | removes files on the next reboot | removes them now |
 | `install_method` in `--json` | `"tgz"` | `"app-tree"` |
+| `kind` in `--json` | `"mod"` | `"mod"`, or `"font"` for a package installed into `/mnt/onboard/fonts` |
 
 A def opts in with an `[install]` table:
 
@@ -579,16 +588,20 @@ dest   = "/mnt/onboard/.adds/koreader"    # where its contents land
 
 `dest` must be inside kpm's writable allowlist (`.adds`/`.kobo` on the user
 partition, `/usr/local`, `/opt` on the rootfs) and must be a package-specific
-directory, never a shared root like `.adds` itself. Every entry in the zip is
+directory, never a shared root like `.adds` itself. A content directory such
+as `/mnt/onboard/fonts` is the one exception: every font package shares it,
+under the per-file ownership rule in [Fonts](#fonts). Every entry in the zip is
 validated **before a single byte is written**: absolute paths, `..` traversal,
 backslashes, control characters, symlinks, device nodes and setuid entries are all
 refused, and each destination is re-checked against the same path policy
 `kpm uninstall` uses immediately before the write that uses it. Any violation
 fails the whole install — a half-extracted app is worse than none.
 
-Because these packages install as soon as `kpm update` finishes, a run that only
-updates app-tree packages never asks you to reboot, and the "Update all"
-NickelMenu entry completes without one.
+Because most of these packages install as soon as `kpm update` finishes, a run
+that only updates app-tree packages needs no reboot, and the "Update all"
+NickelMenu entry completes without one. A font package is the exception:
+Nickel does not use a new or replaced font until the next reboot, so a
+font-only run still asks for one. See [Fonts](#fonts).
 
 ### What survives an update
 
@@ -646,6 +659,53 @@ registry entry tracks the 4.x build; on a firmware 5 device kpm shows the
 "untested on your firmware" note at install time. The failure mode if you ignore
 it is an app that does not start — not a brick, and uninstall still works.
 
+### Fonts
+
+Font packages use the same app-tree method as KOReader and Plato. The install
+destination is always `/mnt/onboard/fonts`, and it is flat: kpm refuses a font
+zip that carries a subfolder, because Nickel reads only the files directly
+inside `fonts`, not anything nested under it.
+
+```toml
+[packages.kf-core-fonts.install]
+method = "app-tree"
+dest   = "/mnt/onboard/fonts"
+```
+
+**Reboot to use a new or replaced font.** Installing or updating a font
+package writes its files right away, but Nickel does not use a new or
+replaced font until the next reboot. kpm's own reboot prompt covers this: the
+same **Reboot now / Later** dialog appears for a font install, update, or
+uninstall.
+
+**Ownership.** `/mnt/onboard/fonts` is a directory every font package shares,
+so kpm applies a per-file rule in place of the usual one-package-per-directory
+rule: kpm never overwrites a font it did not install. If you already copied a
+font into that folder by hand, move it off the device before kpm installs a
+package that ships the same filename.
+
+**Uninstall removes only what kpm installed.** A font package's uninstall
+deletes the files recorded in its own manifest, and nothing else. Your own
+fonts, and the `fonts` folder itself, survive an install, update, or uninstall
+of any font package kpm manages.
+
+Two limits are worth knowing, and neither happens with an ordinary font package.
+A tgz package can ship a file into the fonts folder. Nickel unpacks that file at
+boot, so kpm never runs the ownership check, and a shipped font that uses your
+filename replaces yours. A package definition can also name one file in the
+fonts folder in its `extra_paths`, and kpm then deletes that file at uninstall.
+
+**Dictionaries are a work in progress.** The graphical UI's Dictionaries tab
+exists today and explains this. No install path is built yet, and this
+README names no target date.
+
+**Older kpm and font packages.** kpm 0.11.0 and earlier reject a font package
+definition when they load the registry, because `/mnt/onboard/fonts` was not
+yet a writable destination for those versions. Each rejected def is named in
+one line, with the reason "not within a writable location". This is
+cosmetic: the def is safely dropped, and the line stops appearing once the
+device's kpm updates to 0.12.0 or later.
+
 ## Uninstalling packages
 
 `kpm remove <id>` only unregisters a package (deletes its TOML); the installed
@@ -674,7 +734,9 @@ afterwards; some packages need a reboot to finish (see the marker method).
   `/etc/inittab`, `/etc/init.d`, `/etc/fstab`, … can never be deleted); all of
   `/usr/local/Kobo` **except** `/usr/local/Kobo/imageformats` (where NickelHook
   mods like `libnm.so` live); everything at/under `/mnt/onboard` **except**
-  `/mnt/onboard/.adds` and `/mnt/onboard/.kobo` (so the book library is protected);
+  `/mnt/onboard/.adds`, `/mnt/onboard/.kobo`, and `/mnt/onboard/fonts` (so the
+  book library is protected, and a purge of the whole `fonts` folder at once is
+  still refused, see [Fonts](#fonts));
   plus kpm's own `bin`, `state.json`, and `kpm.log`.
 - An **allowlist** is deletable: `/mnt/onboard/.adds`, `/mnt/onboard/.kobo`,
   `/usr/local`, `/usr/bin`, `/usr/lib`, `/opt`, `/etc/udev/rules.d`, `/etc/dbus-1`.
