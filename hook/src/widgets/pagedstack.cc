@@ -100,6 +100,12 @@ void PagedStack::setCurrent(int value) {
   } else if (current > 0) {
     label->setText(QString("Page %1").arg(current));
     label->show();
+  } else {
+    // current == 0 is the status page (stack index 0), so there is no page to
+    // number: setTotal(0) routes through setCurrent(current) first and can leave
+    // a "Page 1" behind, which then outlives the page it counted. Only clear() and
+    // reload()'s empty-result branch reach this, and both are showing status text.
+    label->hide();
   }
 }
 
