@@ -613,3 +613,84 @@ func TestPlanFoldsInferredDirectoryCase(t *testing.T) {
 		t.Errorf("Dirs = %v, want TWO directories on a case-sensitive rootfs dest", p2.Dirs)
 	}
 }
+
+// ---- the flat rule for content dirs (fonts plan §3.2) -------------------
+
+// Nickel reads /mnt/onboard/fonts flat: a font in a subdirectory is ignored. An
+// install that placed one would report success and change nothing the user can
+// see, which is the worst kind of failure. Refuse at plan time — and only for a
+// content dir, so the same zip still extracts into a package's own .adds tree.
+func TestComputeFlatRuleInContentDir(t *testing.T) {
+	const fonts = "/mnt/onboard/fonts"
+
+	nested := makeZip(t, zent{name: "A.ttf", body: "a"}, zent{name: "sub/B.ttf", body: "b"})
+	wantErr(t, nested, "", fonts, "is read flat")
+	// The identical zip into a package-specific dest is fine.
+	if _, err := Compute(nested, "", testDest); err != nil {
+		t.Errorf("the same zip into %s must still plan: %v", testDest, err)
+	}
+
+	// An explicit directory entry is refused too: it would create the very
+	// subdirectory the file case is refused for.
+	withDir := makeZip(t, zent{name: "A.ttf", body: "a"}, zent{name: "sub/", attrs: 0o040755 << 16})
+	wantErr(t, withDir, "", fonts, "is read flat")
+	if _, err := Compute(withDir, "", testDest); err != nil {
+		t.Errorf("an explicit directory entry is only a problem in a content dir: %v", err)
+	}
+
+	// A flat zip of fonts — the real ebook-fonts asset shape — plans cleanly, and
+	// the content dir itself never enters the manifest, so no package owns it.
+	flat := makeZip(t, zent{name: "A.ttf", body: "a"}, zent{name: "B.otf", body: "b"})
+	p, err := Compute(flat, "", fonts)
+	if err != nil {
+		t.Fatalf("a flat font zip must plan: %v", err)
+	}
+	if len(p.Entries) != 2 {
+		t.Errorf("Entries = %+v, want both fonts", p.Entries)
+	}
+	for _, m := range p.Manifest() {
+		if m == "mnt/onboard/fonts" {
+			t.Error("the content dir must never enter a package's manifest")
+		}
+	}
+	if len(p.Manifest()) != 2 {
+		t.Errorf("Manifest = %v, want exactly the two files", p.Manifest())
+	}
+}
+
+// The flat rule applies to the DEST, not the archive: a nested zip whose `root`
+// strips the nesting away is still fine.
+func TestComputeFlatRuleAppliesAfterRoot(t *testing.T) {
+	z := makeZip(t, zent{name: "kobo/A.ttf", body: "a"}, zent{name: "kobo/B.ttf", body: "b"})
+	p, err := Compute(z, "kobo", "/mnt/onboard/fonts")
+	if err != nil {
+		t.Fatalf("root strips the nesting, so this is flat: %v", err)
+	}
+	if len(p.Entries) != 2 {
+		t.Errorf("Entries = %+v, want both fonts", p.Entries)
+	}
+}
+
+// A zip entry whose name is padded must be refused, not silently installed under
+// the padded name. The policy engine refuses the padding; Compute additionally
+// refuses any path the engine normalizes to something other than what it was
+// asked about, so a future normalizer divergence is a hard error and not a
+// silent aliasing bug.
+func TestComputeRefusesPaddedEntryName(t *testing.T) {
+	for _, name := range []string{"Mine.ttf\u00a0", "Mine.ttf "} {
+		z := makeZip(t, zent{name: name, body: "x"})
+		// Into a content dir...
+		wantErr(t, z, "", "/mnt/onboard/fonts", "not a writable location")
+		// ...and into an ordinary app-tree dest: the aliasing is not content-specific.
+		wantErr(t, z, "", testDest, "not a writable location")
+	}
+	// A space inside the name is a legal filename and still plans. So is a LEADING
+	// space: it sits inside the composed path, where nothing ever trimmed it, so it
+	// names exactly one file and aliases nothing. Only trailing padding, which lands
+	// at the end of the whole path, was ever ambiguous.
+	for _, name := range []string{"My Font.ttf", " Mine.ttf"} {
+		if _, err := Compute(makeZip(t, zent{name: name, body: "x"}), "", "/mnt/onboard/fonts"); err != nil {
+			t.Errorf("%q is a legal filename: %v", name, err)
+		}
+	}
+}

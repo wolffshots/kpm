@@ -128,6 +128,10 @@ func Compute(zipPath, root, dest string) (*Plan, error) {
 	// function through it — a map that folds and one that does not disagree about
 	// what the device will hold.
 	fold := uninstall.PathUnder(absDest, "/mnt/onboard")
+	// Nickel reads a content directory FLAT: a font in fonts/sub/ is ignored, so a
+	// nested zip would install cleanly and silently do nothing. Refusing at plan
+	// time also keeps per-file ownership (D4) to one directory level.
+	flat := uninstall.IsContentDir(absDest)
 	key := func(devAbs string) string {
 		if fold {
 			return strings.ToLower(devAbs)
@@ -221,6 +225,12 @@ func Compute(zipPath, root, dest string) (*Plan, error) {
 			isDir = true
 		}
 
+		// 6a. The flat rule (content dirs only). An explicit directory entry is
+		// refused too: it would create the subdirectory the files are refused for.
+		if flat && (isDir || strings.Contains(rel, "/")) {
+			return nil, fmt.Errorf("zip entry %q is in a subdirectory, but %s is read flat", name, absDest)
+		}
+
 		// 7. Compose and re-verify containment. Belt and braces after Clean: if
 		// this fires it is a bug in THIS function, not user input.
 		devAbs := path.Join(absDest, rel)
@@ -240,8 +250,20 @@ func Compute(zipPath, root, dest string) (*Plan, error) {
 		// widen where kpm deletes, never where it writes. This is what makes
 		// /mnt/onboard/koreader.png impossible to write even with root = "", and
 		// what keeps every entry out of kpm's own tree.
-		if _, err := uninstall.InstallPath(devAbs); err != nil {
+		clean, err := uninstall.InstallPath(devAbs)
+		if err != nil {
 			return nil, fmt.Errorf("zip entry %q would install to %q, which is not a writable location", name, devAbs)
+		}
+		// Use the value the policy engine returned, and refuse when it differs from
+		// what this function composed. Discarding it let the two disagree about
+		// WHICH file a path names: the engine cleaned "Mine.ttf " to "Mine.ttf"
+		// and approved that, while the plan went on to write, own and record the
+		// padded name -- so the uninstall deleted the user's unpadded file instead.
+		// The engine refuses padding outright now, so no input reaches this branch
+		// today and no test can cover it -- it is here so that a future change to
+		// the normalizer fails loudly instead of reintroducing silent aliasing.
+		if clean != devAbs {
+			return nil, fmt.Errorf("zip entry %q normalizes to %q, which is not the path it names (%q)", name, clean, devAbs)
 		}
 
 		// 9. Duplicate destinations. A last-write-wins ambiguity in a tree the
@@ -299,8 +321,12 @@ func Compute(zipPath, root, dest string) (*Plan, error) {
 		if !uninstall.PathUnder(d, absDest) {
 			return nil, fmt.Errorf("internal error: directory %q escapes dest %q", d, absDest)
 		}
-		if _, err := uninstall.InstallPath(d); err != nil {
+		clean, err := uninstall.InstallPath(d)
+		if err != nil {
 			return nil, fmt.Errorf("zip would create directory %q, which is not a writable location", d)
+		}
+		if clean != d {
+			return nil, fmt.Errorf("directory %q normalizes to %q, which is not the path it names", d, clean)
 		}
 		p.Dirs = append(p.Dirs, d)
 	}
