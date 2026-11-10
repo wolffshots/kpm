@@ -102,8 +102,8 @@ func (a *App) cmdUninstall(args []string) int {
 	// font without declaring any [install] block at all: its uninstall deletes the
 	// font now, and without this it promised no reboot, so the old font kept
 	// rendering with nothing prompting the user.
-	needsReboot := plan.NeedsReboot || (pkg.IsAppTree() && rebootToApply(pkg)) ||
-		uninstall.ManifestHasContent(ps.Manifest)
+	needsReboot := plan.NeedsReboot || (pkg.InstallsLive() && rebootToApply(pkg)) ||
+		uninstall.ManifestNeedsReboot(ps.Manifest)
 
 	printPlan(os.Stdout, id, plan, *purge, len(pkg.Uninstall.PurgePaths) > 0)
 

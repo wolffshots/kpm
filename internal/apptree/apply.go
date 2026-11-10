@@ -47,6 +47,9 @@ func Apply(p device.Paths, plan *Plan, zipPath string) (Result, error) {
 	if plan == nil {
 		return res, fmt.Errorf("nil plan")
 	}
+	if plan.Verbatim {
+		return applyFile(p, plan, zipPath)
+	}
 	destHost := p.HostPath(plan.Dest)
 
 	// 1. Free space, against the nearest EXISTING ancestor (dest may not exist).
@@ -127,6 +130,35 @@ func Apply(p device.Paths, plan *Plan, zipPath string) (Result, error) {
 		device.FsyncDir(dir)
 	}
 
+	res.Manifest = plan.Manifest()
+	return res, nil
+}
+
+// applyFile places a `file` plan by renaming the downloaded asset onto its one
+// entry. The cache and every content dir are on the same FAT32 partition, so the
+// rename needs no free space, costs no copy time, and replaces the previous
+// version in one step. A reader that still holds the old file open keeps the old
+// data until it closes it.
+func applyFile(p device.Paths, plan *Plan, src string) (Result, error) {
+	var res Result
+	if len(plan.Entries) != 1 {
+		return res, fmt.Errorf("internal error: a file plan has %d entries", len(plan.Entries))
+	}
+	e := plan.Entries[0]
+	if err := checkWritable(p, e.DevAbs, plan.Dest); err != nil {
+		return res, err
+	}
+	host := p.HostPath(e.DevAbs)
+	// The content dir itself is shared and never recorded, so a dir created here
+	// stays after the uninstall, like the fonts dir.
+	if err := os.MkdirAll(filepath.Dir(host), 0o755); err != nil {
+		return res, err
+	}
+	if err := os.Rename(src, host); err != nil {
+		return res, fmt.Errorf("write %s: %w", e.DevAbs, err)
+	}
+	device.FsyncDir(filepath.Dir(host))
+	res.Written = []string{e.DevAbs}
 	res.Manifest = plan.Manifest()
 	return res, nil
 }

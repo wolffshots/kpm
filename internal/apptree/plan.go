@@ -92,6 +92,23 @@ type Plan struct {
 	Dirs    []string // every directory to create, shallowest-first, device-absolute
 	Ignored []string // zip entries outside `root` — reported, never extracted
 	Bytes   int64    // sum of declared uncompressed sizes
+	// Verbatim marks a `file` plan: the downloaded asset IS the one entry, and
+	// Apply renames it into place instead of extracting anything.
+	Verbatim bool
+}
+
+// PlanFile is Compute for the `file` method. The asset is placed unchanged at
+// dest, so there is no archive to read. It writes nothing.
+func PlanFile(dest string) (*Plan, error) {
+	abs, err := uninstall.InstallFileDest(dest)
+	if err != nil {
+		return nil, err
+	}
+	return &Plan{
+		Dest:     path.Dir(abs),
+		Entries:  []Entry{{ZipIndex: -1, Rel: path.Base(abs), DevAbs: abs}},
+		Verbatim: true,
+	}, nil
 }
 
 // Compute reads the zip at zipPath and produces the validated Plan for extracting

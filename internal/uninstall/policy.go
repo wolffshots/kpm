@@ -7,6 +7,7 @@ package uninstall
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -55,12 +56,18 @@ var onboardAllowed = []string{
 type ContentDir struct {
 	Dir  string // device-absolute
 	Kind string // search --json "kind"
+	// Reboot: Nickel uses a changed file only after a restart (cmd/kpm's
+	// rebootToApply). A dictionary is assumed to need none: libnickel 4.46 lists
+	// custom-dict again at each lookup (DictionaryFileManager::getAll). No device
+	// test has confirmed this yet.
+	Reboot bool
+	// FileName is the name a `file` install must have in this dir. nil means the
+	// dir takes no `file` installs.
+	FileName *regexp.Regexp
 }
 
 // contentDirs is a CLOSED allowlist — adding a content type is one row, and
-// nothing else about the onboard guard moves. Every row in 0.12.0 needs a reboot
-// before Nickel uses what was written, so no row field says so (cmd/kpm's
-// rebootToApply).
+// nothing else about the onboard guard moves.
 //
 // Accepted side effects of exempting these from the onboard deny rule:
 //
@@ -77,7 +84,10 @@ type ContentDir struct {
 // including through allow_paths. Prefix confusion (fontsx, fonts.bak) is denied
 // by `under`, which requires a whole component boundary.
 var contentDirs = []ContentDir{
-	{Dir: "/mnt/onboard/fonts", Kind: "font"},
+	{Dir: "/mnt/onboard/fonts", Kind: "font", Reboot: true},
+	// Nickel lists only dicthtml*.zip files here, from firmware 4.24.
+	{Dir: "/mnt/onboard/.kobo/custom-dict", Kind: "dictionary",
+		FileName: regexp.MustCompile(`(?i)^dicthtml-[^/]+\.zip$`)},
 }
 
 // isContentDir reports whether abs IS a content directory (not something under

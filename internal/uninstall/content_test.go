@@ -321,14 +321,17 @@ func TestComputeSkipsContentDirMember(t *testing.T) {
 
 // MINOR 6: a tgz package can ship a font with no [install] block at all, so only
 // the manifest can say whether removing it changes what Nickel renders.
-func TestManifestHasContent(t *testing.T) {
-	if !ManifestHasContent([]string{"usr/local/pkg/lib.so", "mnt/onboard/fonts/A.ttf"}) {
-		t.Error("a font in the manifest is content")
+func TestManifestNeedsReboot(t *testing.T) {
+	if !ManifestNeedsReboot([]string{"usr/local/pkg/lib.so", "mnt/onboard/fonts/A.ttf"}) {
+		t.Error("a font in the manifest needs a reboot")
 	}
-	if ManifestHasContent([]string{"mnt/onboard/fonts"}) {
+	if ManifestNeedsReboot([]string{"mnt/onboard/fonts"}) {
 		t.Error("the directory itself is owned by nobody and is not content")
 	}
-	if ManifestHasContent([]string{"mnt/onboard/.adds/koreader/reader.lua"}) {
+	if ManifestNeedsReboot([]string{"mnt/onboard/.adds/koreader/reader.lua"}) {
 		t.Error("an ordinary app-tree member is not content")
+	}
+	if ManifestNeedsReboot([]string{"mnt/onboard/.kobo/custom-dict/dicthtml-x.zip"}) {
+		t.Error("a dictionary is content that needs no reboot")
 	}
 }

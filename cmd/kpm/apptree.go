@@ -236,16 +236,16 @@ func (a *App) contentCollision(p *config.Package, plan *apptree.Plan, old []stri
 }
 
 // rebootToApply reports whether a change to p takes effect only after a reboot:
-// every staged tgz, and every app-tree install into a content dir (D6). A font is
-// written immediately but Nickel keeps rendering the old one until it restarts,
-// and a missing prompt is a SILENT failure — the user sees the old font and
-// concludes kpm did nothing.
+// every staged tgz, and every live install into a content dir whose row says so
+// (D6). A font is written immediately but Nickel keeps rendering the old one
+// until it restarts, and a missing prompt is a SILENT failure — the user sees the
+// old font and concludes kpm did nothing. A dictionary needs no reboot.
 func rebootToApply(p *config.Package) bool {
-	if !p.IsAppTree() {
+	if !p.InstallsLive() {
 		return true
 	}
-	_, ok := uninstall.ContentDirFor(p.Install)
-	return ok
+	c, ok := uninstall.ContentDirFor(p.Install)
+	return ok && c.Reboot
 }
 
 // contentRebootNeeded reports whether any package this run actually installed

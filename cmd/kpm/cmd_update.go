@@ -700,12 +700,25 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	// as a .zip (calling it a .tgz would be a lie the IsZip sniffer disagrees
 	// with) and PLAN it here, so a malformed or hostile archive fails the package
 	// exactly where a bad tgz fails today — before anything is written or staged.
-	if p.IsAppTree() {
-		cachePath, sum, err := a.fetchAsset(p.ID, rel.Tag, ".zip", wantSHA, declared, len(p.Checksums) > 0, asset)
+	// FILE: the asset itself is the one file to place, so its plan reads nothing.
+	// It then takes the app-tree path: ownership check, prune and record.
+	if p.InstallsLive() {
+		isFile := p.EffectiveInstallMethod() == config.MethodFile
+		ext := ".zip"
+		if isFile {
+			ext = ".file"
+		}
+		cachePath, sum, err := a.fetchAsset(p.ID, rel.Tag, ext, wantSHA, declared, len(p.Checksums) > 0, asset)
 		if err != nil {
 			return resolved{}, nil, false, "", err
 		}
-		plan, perr := apptree.Compute(cachePath, p.Install.Root, p.Install.Dest)
+		var plan *apptree.Plan
+		var perr error
+		if isFile {
+			plan, perr = apptree.PlanFile(p.Install.Dest)
+		} else {
+			plan, perr = apptree.Compute(cachePath, p.Install.Root, p.Install.Dest)
+		}
 		if perr != nil {
 			os.Remove(cachePath)
 			return resolved{}, nil, false, "", fmt.Errorf("refusing %s: %w", p.ID, perr)
@@ -1049,7 +1062,7 @@ func sha256AndSize(path string) (string, int64, error) {
 
 // cleanCache removes stale cache artifacts at the start of an update run: all
 // .part files (interrupted downloads) and any .tgz/.zip older than 7 days (F3).
-// It only touches *.part / *.tgz / *.zip to stay registry-compatible
+// It only touches *.part / *.tgz / *.zip / *.file to stay registry-compatible
 // (REGISTRY.md §7.5) — the registry caches use a registry-<name>.toml prefix.
 // .zip joined the sweep in 0.11.0: an app-tree asset is cached as
 // <id>-<tag>.zip, and a 42 MiB KOReader zip left behind forever would be the
@@ -1069,7 +1082,7 @@ func (a *App) cleanCache() {
 		switch {
 		case strings.HasSuffix(name, ".part"):
 			os.Remove(full)
-		case strings.HasSuffix(name, ".tgz"), strings.HasSuffix(name, ".zip"):
+		case strings.HasSuffix(name, ".tgz"), strings.HasSuffix(name, ".zip"), strings.HasSuffix(name, ".file"):
 			if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
 				os.Remove(full)
 			}

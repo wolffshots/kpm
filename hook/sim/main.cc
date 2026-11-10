@@ -1571,9 +1571,8 @@ static void runExerciseAppTree(const QString &dir) {
 // from page 1, the page-1 chrome, four empty-state strings and one reboot sentence.
 //
 // The fixture seeds kf-core-fonts with dest = /mnt/onboard/fonts (fixture/seed.go).
-// Nothing emits kind = "dictionary" in 0.12.0 (D8), so the Dictionaries tab is
-// asserted EMPTY, carrying its work-in-progress note — the one string the dictionary
-// release changes.
+// It seeds no dictionary, so the Dictionaries tab is asserted EMPTY, carrying its
+// empty-state note.
 //
 // `kind` itself is never injected: it is the contract under test, and a payload the
 // simulator wrote itself could not prove the two halves agree. On a kpm whose search
@@ -1795,13 +1794,12 @@ static void runExerciseTabs(const QString &dir) {
               // the whole release, the banner's Reboot now is the only reboot control
               // in the browse view, and it used to disappear with the rows.
               if (!pages->findChildren<PackageRow *>().isEmpty()) {
-                std::fprintf(stderr, "sim: FAIL — the Dictionaries tab listed rows; nothing emits kind=dictionary\n");
+                std::fprintf(stderr, "sim: FAIL — the Dictionaries tab listed rows; the fixture seeds no dictionary\n");
                 qApp->exit(7);
                 return;
               }
-              if (!labelIn(browse,
-                           QStringLiteral("Dictionaries are a work in progress. A later kpm release adds them."))) {
-                std::fprintf(stderr, "sim: FAIL — the empty Dictionaries tab carries no work-in-progress note\n");
+              if (!labelIn(browse, QStringLiteral("No dictionaries in your registries yet."))) {
+                std::fprintf(stderr, "sim: FAIL — the empty Dictionaries tab carries no empty-state note\n");
                 qApp->exit(7);
                 return;
               }

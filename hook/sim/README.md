@@ -232,8 +232,8 @@ Offscreen browse tabs (fonts plan §3.8) — Mods, Fonts and Dictionaries:
 #       staged banner, its Reboot now button and the stale hint
 #   (2) Fonts lists exactly kf-core-fonts and takes the active-tab style
 #   (3) the switch keeps every page-1 chrome item, and a one-page tab shows no label
-#   (4) Dictionaries lists nothing, shows "Dictionaries are a work in progress. A
-#       later kpm release adds them.", and STILL carries the banner, the Reboot now
+#   (4) Dictionaries lists nothing, shows "No dictionaries in your registries
+#       yet.", and STILL carries the banner, the Reboot now
 #       button and the stale hint — an empty tab must not take the only reboot
 #       affordance in the browse view off screen with the rows
 #   (5) with "kf" in the search box, Mods shows "No packages match your search." with
@@ -253,8 +253,7 @@ Offscreen browse tabs (fonts plan §3.8) — Mods, Fonts and Dictionaries:
 # no `kind` fails at step 1, and the run prints up front whether the field is present.
 # Two things ARE injected, because an offline sandbox cannot produce them and they
 # drive the page-1 chrome the empty-tab assertions are about: a staged count, and a
-# registry last refreshed in 2020. There is no dictionary fixture — nothing emits
-# kind = "dictionary" in 0.12.0 (D8).
+# registry last refreshed in 2020. There is no dictionary fixture.
 #
 # NOT asserted here, deliberately: that a switch destroys the previous tab's rows.
 # The in-place repaint path is unreachable on a switch — render(false) never offers

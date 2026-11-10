@@ -133,6 +133,7 @@ func (u Uninstall) Validate() error {
 const (
 	MethodTgz     = "tgz"      // default: stage a KoboRoot.tgz for rcS
 	MethodAppTree = "app-tree" // kpm extracts a directory tree from the release zip
+	MethodFile    = "file"     // kpm places the release asset itself, unchanged, at dest
 )
 
 // MaxNmEntry caps a launcher drop-in body (4 KiB). NickelMenu configs are a
@@ -156,9 +157,9 @@ type Launcher struct {
 // which would make sync skip every package forever. registry.HashDef's
 // TestHashDefNilInstallUnchanged pins that a nil *Install emits nothing.
 type Install struct {
-	Method   string    `toml:"method"`             // "tgz" (default) | "app-tree"
+	Method   string    `toml:"method"`             // "tgz" (default) | "app-tree" | "file"
 	Root     string    `toml:"root,omitempty"`     // zip prefix to extract ("" = whole zip)
-	Dest     string    `toml:"dest"`               // device-absolute dir Root lands in
+	Dest     string    `toml:"dest"`               // device-absolute dir Root lands in; for "file", the full file path
 	Launcher *Launcher `toml:"launcher,omitempty"` // optional NickelMenu registration
 }
 
@@ -194,12 +195,17 @@ func (i Install) Validate() error {
 		method = MethodTgz
 	}
 	switch method {
-	case MethodTgz, MethodAppTree:
+	case MethodTgz, MethodAppTree, MethodFile:
 	default:
-		return fmt.Errorf("invalid install method %q (want %q or %q)", i.Method, MethodTgz, MethodAppTree)
+		return fmt.Errorf("invalid install method %q (want %q, %q or %q)", i.Method, MethodTgz, MethodAppTree, MethodFile)
 	}
-	if method == MethodAppTree && strings.TrimSpace(i.Dest) == "" {
-		return fmt.Errorf("install method %q requires dest", MethodAppTree)
+	if (method == MethodAppTree || method == MethodFile) && strings.TrimSpace(i.Dest) == "" {
+		return fmt.Errorf("install method %q requires dest", method)
+	}
+	// A file asset is placed whole: there is no tree to take a root from, and no
+	// program to launch.
+	if method == MethodFile && (i.Root != "" || i.Launcher != nil) {
+		return fmt.Errorf("install method %q takes no root and no launcher", MethodFile)
 	}
 	if err := ValidateInstallRoot(i.Root); err != nil {
 		return err
@@ -476,6 +482,12 @@ func (p Package) EffectiveInstallMethod() string {
 // cmd_update.go / statusreport.go / json.go branches on — a second spelling is
 // how the two shapes drift apart (APP-TREE.md §2.3).
 func (p Package) IsAppTree() bool { return p.EffectiveInstallMethod() == MethodAppTree }
+
+// InstallsLive reports whether kpm writes this package's files while the command
+// runs, instead of staging a KoboRoot.tgz for the next boot. It is the predicate
+// for "never staged"; IsAppTree stays the one for tree-only behaviour (launchers,
+// the ExcludeSyncFolders advice).
+func (p Package) InstallsLive() bool { return p.EffectiveInstallMethod() != MethodTgz }
 
 // EffectiveUpdateCheck returns UpdateCheck with the default ("tag") applied.
 // The default is applied HERE and nowhere else: materializing it into a stored

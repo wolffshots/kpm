@@ -548,9 +548,8 @@ func main() {
 	writeDev(sysroot, "/mnt/onboard/fonts/KFCore-Bold.ttf", fontPayload)
 	writeDev(sysroot, "/mnt/onboard/fonts/UserFont-Regular.ttf", userFontPayload)
 
-	// No dictionary fixture: nothing emits kind = "dictionary" in 0.12.0 (D8), and a
-	// `method = "file"` def would not parse. The Dictionaries tab is asserted EMPTY,
-	// with its work-in-progress note.
+	// No dictionary fixture. The Dictionaries tab is asserted EMPTY, with its
+	// empty-state note.
 
 	// nickelnote: an installed package declaring three text templates (create=true).
 	// content/style are written; pin.template is left absent to exercise the
@@ -661,5 +660,5 @@ func main() {
 	fmt.Println("  self-enrol target: kpm (un-adopted: sourceless kpm.toml + empty state source; registry offers kpm)")
 	fmt.Println("  app-tree target: plato ([install] method=app-tree, dest=/mnt/onboard/.adds/plato, nm drop-in; Settings.toml is user data, not in the manifest)")
 	fmt.Println("  font target: kf-core-fonts (dest=/mnt/onboard/fonts => kind=font; UserFont-Regular.ttf is the user's, not in the manifest)")
-	fmt.Println("  dictionaries: none — nothing emits kind=dictionary in 0.12.0 (D8), so that tab shows its work-in-progress note")
+	fmt.Println("  dictionaries: none, so that tab shows its empty-state note")
 }

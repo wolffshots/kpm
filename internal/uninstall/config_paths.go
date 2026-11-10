@@ -9,6 +9,7 @@ package uninstall
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	"kpm/internal/config"
@@ -138,17 +139,21 @@ func InstallDest(raw string) (string, error) {
 	return abs, nil
 }
 
-// ContentDirFor returns the content-dir row an app-tree install writes into, and
-// whether there is one. A nil block, a tgz def, or any other dest reports false.
-// It is the single predicate the cmd layer branches on for per-file ownership,
-// the reboot rule and the `kind` field — one relation, one function.
+// ContentDirFor returns the content-dir row an app-tree or file install writes
+// into, and whether there is one. A nil block, a tgz def, or any other dest
+// reports false. It is the single predicate the cmd layer branches on for
+// per-file ownership, the reboot rule and the `kind` field — one relation, one
+// function.
 func ContentDirFor(i *config.Install) (ContentDir, bool) {
-	if i == nil || i.Method != config.MethodAppTree {
+	if i == nil || (i.Method != config.MethodAppTree && i.Method != config.MethodFile) {
 		return ContentDir{}, false
 	}
 	abs, err := cleanDeviceAbs(i.Dest)
 	if err != nil {
 		return ContentDir{}, false
+	}
+	if i.Method == config.MethodFile {
+		abs = path.Dir(abs) // a file dest names the file; its dir is the content dir
 	}
 	for _, c := range contentDirs {
 		if pathEqual(abs, c.Dir) {
@@ -156,6 +161,31 @@ func ContentDirFor(i *config.Install) (ContentDir, bool) {
 		}
 	}
 	return ContentDir{}, false
+}
+
+// InstallFileDest validates a declared `file` dest and returns the cleaned
+// absolute device path. The file must sit DIRECTLY in a content dir whose row
+// takes file installs, under the name that row requires. That keeps a `file`
+// install inside the per-file ownership rules (D4), and a name Nickel ignores
+// would install cleanly and do nothing.
+func InstallFileDest(raw string) (string, error) {
+	abs, err := cleanDeviceAbs(raw)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range contentDirs {
+		if !pathEqual(path.Dir(abs), c.Dir) || c.FileName == nil {
+			continue
+		}
+		if !c.FileName.MatchString(path.Base(abs)) {
+			return "", fmt.Errorf("install dest %q: a file in %s must be named like %s", raw, c.Dir, c.FileName)
+		}
+		if classify(abs, nil) != vAllowed {
+			return "", fmt.Errorf("install dest %q is not within a writable location", raw)
+		}
+		return abs, nil
+	}
+	return "", fmt.Errorf("install dest %q: a file install must go directly into a content directory that takes files", raw)
 }
 
 // contentDirOf returns the content dir abs lives in, or "" when it is in none.
@@ -168,19 +198,22 @@ func contentDirOf(abs string) string {
 	return ""
 }
 
-// ManifestHasContent reports whether a recorded manifest places a file INSIDE a
-// content dir. A tgz package may ship a font without declaring any [install]
-// block, so the def alone cannot answer "does removing this change what Nickel
-// renders" -- the manifest can, and that is what decides the reboot prompt (D6).
-// The directory itself does not count: no package owns it.
-func ManifestHasContent(manifest []string) bool {
+// ManifestNeedsReboot reports whether a recorded manifest places a file INSIDE a
+// content dir whose files Nickel uses only after a restart. A tgz package may
+// ship a font without declaring any [install] block, so the def alone cannot
+// answer "does removing this change what Nickel renders" -- the manifest can, and
+// that is what decides the reboot prompt (D6). The directory itself does not
+// count: no package owns it.
+func ManifestNeedsReboot(manifest []string) bool {
 	for _, m := range manifest {
 		abs, err := cleanDeviceAbs(m)
 		if err != nil {
 			continue
 		}
-		if underContentDir(abs) && !isContentDir(abs) {
-			return true
+		for _, c := range contentDirs {
+			if c.Reboot && under(abs, c.Dir) && !pathEqual(abs, c.Dir) {
+				return true
+			}
 		}
 	}
 	return false
@@ -304,7 +337,11 @@ func ValidateInstallDecl(i *config.Install) error {
 	// The dest policy applies whenever a dest is declared, not only for app-tree:
 	// a nonsensical dest on a tgz def is a curator error either way, and refusing
 	// it now keeps the field from becoming live later without re-validation.
-	if strings.TrimSpace(i.Dest) != "" {
+	if i.Method == config.MethodFile {
+		if _, err := InstallFileDest(i.Dest); err != nil {
+			return err
+		}
+	} else if strings.TrimSpace(i.Dest) != "" {
 		if _, err := InstallDest(i.Dest); err != nil {
 			return err
 		}

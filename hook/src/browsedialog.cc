@@ -570,26 +570,20 @@ QList<QJsonObject> BrowseDialog::filteredPackages() const {
 // emptyStateText words the status line for a tab with nothing in it (§3.8). The
 // ORDER is the point:
 //
-//  1. Dictionaries first, because that note is true whatever the list and the
-//     search box hold: nothing emits kind = "dictionary" in 0.12.0 (D8), so the tab
-//     is always empty and "No packages match your search" would blame the user's
-//     search for a feature that has not shipped. The dictionary release changes
-//     this one string and nothing else — the tab already filters on `kind` exactly
-//     like the other two.
-//  2. Then "no packages at all", which is about the whole list rather than the tab
-//     and has its own remedy (Refresh).
-//  3. Then an empty Fonts tab with an empty search box: the registries simply carry
-//     no fonts yet, which again is not a failed search.
-//  4. Otherwise the ordinary no-match line.
+//  1. "No packages at all", which is about the whole list rather than the tab and
+//     has its own remedy (Refresh).
+//  2. Then an empty Fonts or Dictionaries tab with an empty search box: the
+//     registries simply carry none yet, which is not a failed search.
+//  3. Otherwise the ordinary no-match line.
 QString BrowseDialog::emptyStateText() const {
-  if (activeKind == QStringLiteral("dictionary")) {
-    return QStringLiteral("Dictionaries are a work in progress. A later kpm release adds them.");
-  }
   if (allPackages.isEmpty()) {
     return QStringLiteral("No packages. Tap Refresh for the package list.");
   }
   if (activeKind == QStringLiteral("font") && filter.isEmpty()) {
     return QStringLiteral("No fonts in your registries yet.");
+  }
+  if (activeKind == QStringLiteral("dictionary") && filter.isEmpty()) {
+    return QStringLiteral("No dictionaries in your registries yet.");
   }
   return QStringLiteral("No packages match your search.");
 }

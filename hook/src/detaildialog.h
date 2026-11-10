@@ -28,11 +28,10 @@ inline bool isLiveMethod(const QJsonObject &pkg) {
 
 // isContentKind: the files are written immediately AND Nickel only reads them after
 // a restart (D6), which is what separates a font from an ordinary live package.
-// "dictionary" is deliberately absent: nothing emits that kind in 0.12.0 (D8), so
-// including it would be a dead branch answering with font wording. The dictionary
-// release adds it here, with its own sentence, after T4. The tab filter does not go
-// through this — it compares the kind string directly, so the Dictionaries tab
-// still filters like the other two.
+// "dictionary" is deliberately absent: kpm reports a dictionary install with
+// reboot_required false, so it takes the plain live-package wording. The tab filter
+// does not go through this — it compares the kind string directly, so the
+// Dictionaries tab still filters like the other two.
 inline bool isContentKind(const QJsonObject &pkg) {
   return pkg.value("kind").toString() == QStringLiteral("font");
 }

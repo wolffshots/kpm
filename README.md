@@ -443,11 +443,11 @@ matching kpm's stage-then-reboot install model.
 
 Above the search box the browse view carries three tabs: **Mods**, **Fonts**,
 and **Dictionaries**. A package lands in a tab by where it installs: KOReader,
-Plato, and kpm itself show under Mods, and a package that installs into
-`/mnt/onboard/fonts` shows under Fonts. Refresh, Sync, and Update all stay
-global across every tab, and the search box filters inside whichever tab is
-active. The Dictionaries tab carries a work-in-progress note, matching the
-note in [Fonts](#fonts).
+Plato, and kpm itself show under Mods, a package that installs into
+`/mnt/onboard/fonts` shows under Fonts, and a package that installs into
+`/mnt/onboard/.kobo/custom-dict` shows under Dictionaries. Refresh, Sync, and
+Update all stay global across every tab, and the search box filters inside
+whichever tab is active.
 
 Installed packages whose registry entry declares config files (CONFIG.md) also
 get a **Settings** button: it lists the package's config files, shows their
@@ -730,16 +730,38 @@ boot, so kpm never runs the ownership check, and a shipped font that uses your
 filename replaces yours. A package definition can also name one file in the
 fonts folder in its `extra_paths`, and kpm then deletes that file at uninstall.
 
-**Dictionaries are a work in progress.** The graphical UI's Dictionaries tab
-exists today and explains this. No install path is built yet, and this
-README names no target date.
-
 **Older kpm and font packages.** kpm 0.11.0 and earlier reject a font package
 definition when they load the registry, because `/mnt/onboard/fonts` was not
 yet a writable destination for those versions. Each rejected def is named in
 one line, with the reason "not within a writable location". This is
 cosmetic: the def is safely dropped, and the line stops appearing once the
 device's kpm updates to 0.12.0 or later.
+
+### Dictionaries
+
+A dictionary package uses the `file` method. kpm places the release asset
+itself, unchanged, in `/mnt/onboard/.kobo/custom-dict`. Nickel (firmware 4.24
+and later) lists each `dicthtml-*.zip` in that folder as a custom dictionary.
+
+```toml
+[packages.dict-example.install]
+method = "file"
+dest   = "/mnt/onboard/.kobo/custom-dict/dicthtml-example.zip"
+```
+
+- `dest` names the file. The file must sit directly in `custom-dict`, with a
+  `dicthtml-*.zip` name. kpm refuses any other dest when it loads the def.
+- **No reboot.** Nickel lists `custom-dict` again at each lookup, so kpm uses
+  no reboot prompt for a dictionary, and "Update all" finishes without a
+  reboot. This comes from reading libnickel 4.46. No device test has confirmed
+  it yet. If a lookup still shows the old entries, select another dictionary
+  in the lookup popup and back, or reboot.
+- kpm moves the downloaded file into place with a rename, so an update needs
+  no free space beyond the download.
+- The ownership rules are the ones for fonts. kpm never overwrites a
+  dictionary it did not install, and an uninstall removes only its own file.
+- kpm 0.11.0 and earlier drop a `file` def as an unknown install method. Give
+  the def `min_kpm = "0.12.0"`.
 
 ## Uninstalling packages
 
