@@ -13,6 +13,7 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 	"kpm/internal/version"
 )
@@ -259,6 +260,12 @@ func newApp(mutating bool) (*App, error) {
 		p.Log("WARN", "state.json was unreadable; renamed to "+filepath.Base(st.CorruptBackup)+" and started fresh")
 	}
 	a := &App{paths: p, state: st, client: forge.NewClient()}
+	// A private GitHub registry or release needs a token (README "Private
+	// repositories"). An unreadable config.toml is reported by the commands that
+	// use it, not here.
+	if cfg, err := registry.LoadConfig(p.ConfigFile()); err == nil {
+		a.client.SetGitHubToken(strings.TrimSpace(cfg.GitHubToken))
+	}
 
 	if !mutating {
 		a.readOnly = true // pure read: no lock, no reconcile/seedSelf, no writes

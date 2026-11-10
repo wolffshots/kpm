@@ -357,8 +357,43 @@ Key behaviors:
 
 Registries are configured in `/mnt/onboard/.adds/kpm/config.toml`
 (`[[registries]]` entries), managed by the CLI and hand-editable; unknown keys
-(and a future `github_token`) are preserved across edits, though comments are
-not.
+(and `github_token`) are preserved across edits, though comments are not.
+
+### Private repositories
+
+kpm reads a private GitHub registry or package repository with a GitHub token.
+Put the token in `/mnt/onboard/.adds/kpm/config.toml` as a top-level key, above
+the `[[registries]]` tables:
+
+```toml
+github_token = "github_pat_..."
+```
+
+- Use a fine-grained token that can only read. kpm reads `registry.toml`, the
+  release list and the release assets, and **Contents: Read-only** covers all
+  three:
+  1. Open https://github.com/settings/personal-access-tokens/new.
+  2. Give it a name that identifies the device, and set an expiration.
+  3. Under **Repository access**, select **Only select repositories** and pick
+     the private repositories kpm reads.
+  4. Under **Repository permissions**, set **Contents** to **Read-only**.
+     GitHub adds **Metadata: Read-only** by itself. Leave the rest at
+     **No access**.
+  5. Generate the token and copy it. GitHub shows it only once.
+
+  A fine-grained token can always read public repositories, so public
+  packages keep working. It cannot push or change a release.
+- kpm sends the token only over HTTPS to `api.github.com`,
+  `raw.githubusercontent.com` and `github.com`. A download that GitHub
+  redirects to its storage host does not carry it.
+- With a token, kpm downloads release assets through the API asset URL. The
+  browser URL of a private repository needs a web session, not a token.
+- Every GitHub request carries the token. When it expires, every GitHub package
+  fails with `GitHub rejected github_token in .adds/kpm/config.toml`. Replace or
+  remove the key.
+- The token also raises GitHub's rate limit from 60 to 5,000 requests an hour.
+- Anyone with USB access to the Kobo can read `config.toml`, so keep the token's
+  scope narrow.
 
 ## NickelMenu usage
 

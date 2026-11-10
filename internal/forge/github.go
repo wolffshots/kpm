@@ -33,6 +33,7 @@ type githubRelease struct {
 		Name               string `json:"name"`
 		Size               int64  `json:"size"`
 		BrowserDownloadURL string `json:"browser_download_url"`
+		URL                string `json:"url"` // the API asset URL
 	} `json:"assets"`
 }
 
@@ -79,10 +80,16 @@ func (g *GitHub) fetch(ctx context.Context, u string) (Release, error) {
 	}
 	rel := Release{Tag: r.TagName, PublishedAt: r.PublishedAt}
 	for _, a := range r.Assets {
+		dl := a.BrowserDownloadURL
+		// A private repository's browser URL wants a web session, not a token. The
+		// API asset URL takes the token, so use it whenever one is set.
+		if g.c.githubToken != "" && a.URL != "" {
+			dl = a.URL
+		}
 		rel.Assets = append(rel.Assets, Asset{
 			Name:        a.Name,
 			Size:        a.Size,
-			DownloadURL: a.BrowserDownloadURL,
+			DownloadURL: dl,
 		})
 	}
 	return rel, nil

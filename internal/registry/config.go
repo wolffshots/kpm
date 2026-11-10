@@ -31,6 +31,10 @@ type Registry struct {
 // Config is the whole config.toml document.
 type Config struct {
 	Registries []Registry `toml:"registries"`
+	// GitHubToken authenticates kpm to GitHub, for a private registry or package
+	// repository (PLAN.md §5). The user writes it by hand. MarshalConfig keeps it,
+	// as it keeps every key it does not manage.
+	GitHubToken string `toml:"github_token"`
 }
 
 // Find returns the registry with the given name and whether it exists.

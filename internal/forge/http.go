@@ -34,7 +34,35 @@ type Client struct {
 	// default from every constructor — disables response caching entirely:
 	// unconditional GETs, nothing read, nothing written.
 	cacheDir string
+	// githubToken authenticates requests to GitHub's own hosts, so a private
+	// repository's registry and releases resolve. Empty sends no credentials.
+	githubToken string
 }
+
+// SetGitHubToken sets the token sent to GitHub. Call it once, before the first
+// request, like SetCacheDir.
+func (c *Client) SetGitHubToken(token string) { c.githubToken = token }
+
+// githubHosts are the only hosts that ever receive the token. A download that
+// redirects elsewhere (GitHub sends assets to a signed storage URL) loses it:
+// net/http drops Authorization on a redirect to another domain. A var so a test
+// can name its httptest host.
+var githubHosts = map[string]bool{"api.github.com": true, "raw.githubusercontent.com": true, "github.com": true}
+
+// authorize adds the token to a request for a GitHub host over https, and
+// reports whether it did. GitHub accepts the "token" scheme for every kind of
+// personal access token, on the API and on raw.githubusercontent.com.
+func (c *Client) authorize(req *http.Request) bool {
+	if c.githubToken == "" || req.URL.Scheme != "https" || !githubHosts[req.URL.Hostname()] {
+		return false
+	}
+	req.Header.Set("Authorization", "token "+c.githubToken)
+	return true
+}
+
+// errBadToken: GitHub refused the token. Every GitHub request carries it, so an
+// expired token fails public packages too, and the message must say why.
+var errBadToken = errors.New("GitHub rejected github_token in .adds/kpm/config.toml (expired or revoked?); replace or remove it")
 
 // SetCacheDir turns on conditional forge API requests, storing one entry per
 // request under dir. cmd/kpm passes device.CacheDir(); leaving it unset keeps
@@ -182,6 +210,7 @@ func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error
 		if cached != nil {
 			req.Header.Set("If-None-Match", cached.Etag)
 		}
+		authorized := c.authorize(req)
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			cancel()
@@ -208,6 +237,9 @@ func (c *Client) getJSON(ctx context.Context, url, accept string) ([]byte, error
 		}
 		if len(body) > maxAPIBytes {
 			return nil, fmt.Errorf("API response from %s exceeds %d bytes", url, maxAPIBytes)
+		}
+		if resp.StatusCode == http.StatusUnauthorized && authorized {
+			return nil, errBadToken
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, errNotFound
@@ -258,6 +290,7 @@ func (c *Client) FetchRaw(ctx context.Context, url, etag string) (RawResult, err
 		if etag != "" {
 			req.Header.Set("If-None-Match", etag)
 		}
+		authorized := c.authorize(req)
 		resp, err := c.hc.Do(req)
 		if err != nil {
 			cancel()
@@ -277,6 +310,9 @@ func (c *Client) FetchRaw(ctx context.Context, url, etag string) (RawResult, err
 		if rerr != nil {
 			lastErr = rerr
 			continue
+		}
+		if resp.StatusCode == http.StatusUnauthorized && authorized {
+			return RawResult{}, errBadToken
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			return RawResult{}, errNotFound
@@ -371,11 +407,18 @@ func (c *Client) downloadOnce(ctx context.Context, url string, dst *os.File) (n 
 		return 0, true, err
 	}
 	req.Header.Set("User-Agent", userAgent())
+	// The GitHub API asset URL (used when a token is set) answers JSON metadata
+	// unless asked for the bytes. A browser download URL ignores the header.
+	req.Header.Set("Accept", "application/octet-stream")
+	authorized := c.authorize(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return 0, false, err // transport error: retryable
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized && authorized {
+		return 0, true, errBadToken
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, true, fmt.Errorf("http %d downloading %s", resp.StatusCode, url)
 	}
