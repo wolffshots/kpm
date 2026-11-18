@@ -68,10 +68,15 @@ func (a *App) cmdCheck(args []string) int {
 	available := 0
 	checkPkgs := []jsonCheckPkg{} // §2.2: per-package latest, in pkgs order
 	// Unconfigured (e.g. self-update with empty source): skip silently (F7).
+	// A package with no build for the firmware line is skipped too. The others
+	// are checked with the source, forge and asset of the line
+	// (QT6-FIRMWARE6.md section 3c).
+	line := a.paths.Line()
 	todo := make([]*config.Package, 0, len(pkgs))
 	for _, p := range pkgs {
-		if a.configured(p) {
-			todo = append(todo, p)
+		if a.configured(p) && p.AvailableOn(line) {
+			lp := p.ForLine(line)
+			todo = append(todo, &lp)
 		}
 	}
 	// The release lookups — the only network work here — run concurrently and

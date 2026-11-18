@@ -28,6 +28,9 @@ const (
 type VerifyResult struct {
 	Manifest []string // normalized member paths (no leading ./), files and dirs
 	Warnings []string // entries outside the expected roots
+	// Links holds the resolved target of each symlink and hardlink, relative to
+	// the archive root. CheckKoboTgz confines them like the members.
+	Links []string
 }
 
 // Verify opens the gzip'd tar at path, walks every entry to confirm integrity,
@@ -86,6 +89,11 @@ func verifyReader(r io.Reader) (*VerifyResult, error) {
 			return nil, fmt.Errorf("archive exceeds decompressed-size cap of %d bytes", maxDecompressedBytes)
 		}
 		res.Manifest = append(res.Manifest, name)
+		if hdr.Typeflag == tar.TypeSymlink {
+			res.Links = append(res.Links, path.Clean(path.Join(path.Dir(name), hdr.Linkname)))
+		} else if hdr.Typeflag == tar.TypeLink {
+			res.Links = append(res.Links, path.Clean(hdr.Linkname))
+		}
 		if !hasSafePrefix(name) {
 			res.Warnings = append(res.Warnings, name)
 		}
@@ -169,6 +177,44 @@ func checkLinkTarget(normalizedName, linkname string) error {
 		}
 	}
 	return nil
+}
+
+// KoboDir is the folder that firmware 6.x extracts .kobo/Kobo.tgz into. The
+// members of a Kobo.tgz are relative to it (QT6-FIRMWARE6.md section 3b).
+const KoboDir = "usr/local/Kobo"
+
+// CheckKoboTgz checks a verified archive for firmware 6.x (QT6-FIRMWARE6.md
+// section 3b). Each member and each link target must be under imageformats/.
+// kpm itself (self) may also write kpm-seed/. These rules protect the Nickel
+// files in /usr/local/Kobo. CheckKoboTgz returns the manifest with the full
+// device paths, so uninstall, doctor and the existence check work as on 4.x.
+func CheckKoboTgz(id string, res *VerifyResult, self bool) ([]string, error) {
+	allowed := func(name string) bool {
+		if name == "imageformats" || strings.HasPrefix(name, "imageformats/") {
+			return true
+		}
+		return self && (name == "kpm-seed" || strings.HasPrefix(name, "kpm-seed/"))
+	}
+	for _, name := range res.Manifest {
+		// A KoboRoot.tgz has its first member at a rootfs folder ("usr" for "./usr/").
+		switch top, _, _ := strings.Cut(name, "/"); top {
+		case "usr", "etc", "opt", "mnt":
+			return nil, fmt.Errorf("%s: the asset is a KoboRoot.tgz for firmware 4.x. This device runs firmware 6.x", id)
+		}
+		if !allowed(name) {
+			return nil, fmt.Errorf("%s: the Kobo.tgz member %q is not under imageformats/", id, name)
+		}
+	}
+	for _, target := range res.Links {
+		if !allowed(target) {
+			return nil, fmt.Errorf("%s: a Kobo.tgz link points outside imageformats/ (%q)", id, target)
+		}
+	}
+	out := make([]string, len(res.Manifest))
+	for i, name := range res.Manifest {
+		out[i] = KoboDir + "/" + name
+	}
+	return out, nil
 }
 
 func hasSafePrefix(name string) bool {

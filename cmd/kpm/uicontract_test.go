@@ -28,7 +28,9 @@ package main
 //                + conflicts_active(ARRAY, never null) — declared vs currently
 //                installed-or-staged blockers, rolling(BOOL) (INTEGRITY.md §6.1),
 //                kind(str, never null: "mod"|"font") — the browse tab, derived
-//                from the install dest (fonts plan §3.7).
+//                from the install dest (fonts plan §3.7), available(BOOL) +
+//                unavailable_reason(str|null) — no build for the firmware line
+//                (QT6-FIRMWARE6.md section 3c).
 //                latest/update are DELIBERATELY ABSENT here (registry defs carry
 //                no versions) — the hook merges them in from check
 //                (browsedialog.cc mergeCheck).
@@ -233,6 +235,10 @@ func assertSearchPkg(t *testing.T, pkg map[string]any) {
 	wantArray(t, pkg, "conflicts")
 	wantArray(t, pkg, "conflicts_active")
 	wantBool(t, pkg, "rolling")
+	// QT6-FIRMWARE6.md section 3c rules 8 and 9: the DetailDialog shows the
+	// reason in place of Install when available is false.
+	wantBool(t, pkg, "available")
+	wantStrOrNull(t, pkg, "unavailable_reason")
 	// APP-TREE.md §11.1: a STRING, never null, from a closed set. The hook labels
 	// the action with it and suppresses reboot copy for "app-tree".
 	m := wantStr(t, pkg, "install_method")

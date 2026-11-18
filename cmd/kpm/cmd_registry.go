@@ -312,6 +312,14 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 		return exitError
 	}
 
+	// A def that an older kpm wrote has no [fw6] table. Sync it from the fresh
+	// cache when the registry def has a build for this line (QT6-FIRMWARE6.md
+	// section 3f). syncOne writes state, so save again.
+	a.syncForLine()
+	if err := a.state.Save(); err != nil {
+		fmt.Fprintln(os.Stderr, "kpm registry refresh: state:", err)
+	}
+
 	// Conflict detection across all cached registries: WARN once per shadowed id
 	// (§9.6). Uses config order so the winner matches search/install.
 	mans, _ := a.cachedManifests(cfg)

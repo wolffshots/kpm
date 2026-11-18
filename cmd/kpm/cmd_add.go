@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"kpm/internal/config"
+	"kpm/internal/device"
 	"kpm/internal/forge"
 	"kpm/internal/state"
 )
@@ -74,17 +75,26 @@ func (a *App) cmdAdd(args []string) int {
 		return exitError
 	}
 
-	assetName := *asset
-	if assetName == "" {
-		assetName = config.DefaultAsset
-	}
-
 	pkg := &config.Package{
 		Name:   spec.Repo,
 		Source: spec.Source(),
 		Forge:  forgeKind,
-		Asset:  assetName,
+		Asset:  config.DefaultAsset,
 		Pin:    spec.Pin,
+	}
+	// On firmware 6.x the asset goes into an [fw6] table, default Kobo.tgz
+	// (QT6-FIRMWARE6.md section 3c rule 6). The base asset keeps its default.
+	assetName := *asset
+	if a.paths.Line() == device.Line6 {
+		if assetName == "" {
+			assetName = config.DefaultAsset6
+		}
+		pkg.Fw6 = &config.Fw6{Asset: assetName}
+	} else {
+		if assetName == "" {
+			assetName = config.DefaultAsset
+		}
+		pkg.Asset = assetName
 	}
 	if err := config.Save(path, pkg); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm add:", err)

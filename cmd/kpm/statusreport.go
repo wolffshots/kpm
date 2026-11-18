@@ -36,7 +36,9 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 			// A rolling package staged at its own permanent tag would otherwise
 			// render "latest -> latest STAGED (reboot)" — the exact confusion
 			// §3.7 removes, one state later. Name the reason instead.
-			if ps.InstalledVersion != "" && tagsEqual(ps.InstalledVersion, ps.StagedVersion) {
+			if selfRepair(p.ID, ps) && tagsEqual(ps.InstalledVersion, ps.StagedVersion) {
+				fmt.Fprintf(tw, "%s\t%s\tSTAGED: reinstall, files missing (reboot)\n", p.ID, installed)
+			} else if ps.InstalledVersion != "" && tagsEqual(ps.InstalledVersion, ps.StagedVersion) {
 				fmt.Fprintf(tw, "%s\t%s\tSTAGED: release rebuilt (reboot)\n", p.ID, installed)
 			} else {
 				fmt.Fprintf(tw, "%s\t%s -> %s\tSTAGED (reboot)\n", p.ID, installed, ps.StagedVersion)
@@ -49,7 +51,10 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 			// A rolling package whose tag has not moved would otherwise render a
 			// confusing "latest -> latest"; name the real reason instead
 			// (INTEGRITY.md §3.7). Every other case is unchanged.
-			if tagsEqual(ps.InstalledVersion, target) {
+			if selfRepair(p.ID, ps) && tagsEqual(ps.InstalledVersion, target) {
+				// kpm files are missing, for example the hook after a firmware update.
+				fmt.Fprintf(tw, "%s\t%s\tREINSTALL (files missing)\n", p.ID, installed)
+			} else if tagsEqual(ps.InstalledVersion, target) {
 				fmt.Fprintf(tw, "%s\t%s\tUPDATE AVAILABLE (release rebuilt)\n", p.ID, installed)
 			} else {
 				fmt.Fprintf(tw, "%s\t%s -> %s\tUPDATE AVAILABLE\n", p.ID, installed, target)

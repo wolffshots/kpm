@@ -62,6 +62,7 @@ type PackageDef struct {
 	UpdateCheck string             `toml:"update_check,omitempty"` // INTEGRITY.md §3
 	Conflicts   []string           `toml:"conflicts,omitempty"`    // INTEGRITY.md §4
 	Install     *config.Install    `toml:"install,omitempty"`      // APP-TREE.md §2
+	Fw6         *config.Fw6        `toml:"fw6,omitempty"`          // QT6-FIRMWARE6.md section 3c
 	Uninstall   config.Uninstall   `toml:"uninstall"`
 	Configs     []config.ModConfig `toml:"configs,omitempty"` // CONFIG.md §2
 	// Checksums is last: TOML requires tables after scalars, and BurntSushi's
@@ -77,6 +78,16 @@ func (d *PackageDef) EffectiveUpdateCheck() string {
 		return config.UpdateCheckTag
 	}
 	return d.UpdateCheck
+}
+
+// TestedFwFor returns the tested_fw of the firmware line: fw6.tested_fw on
+// line 6 when it is set, else the base tested_fw (QT6-FIRMWARE6.md section 3c
+// rule 7). A 4.x value on a 6.x device still gives the advisory note.
+func (d *PackageDef) TestedFwFor(line int) string {
+	if line == config.Line6 && d.Fw6 != nil && d.Fw6.TestedFw != "" {
+		return d.Fw6.TestedFw
+	}
+	return d.TestedFw
 }
 
 // DroppedDef records a package def ParseManifest refused, with the reason. A
@@ -163,8 +174,12 @@ func ParseManifest(data []byte) (*Manifest, error) {
 			drop(id, err.Error())
 			continue
 		}
+		if err := def.Fw6.Validate(); err != nil {
+			drop(id, err.Error())
+			continue
+		}
 		if err := config.ValidateDefCombination(config.Package{
-			UpdateCheck: def.UpdateCheck, Checksums: def.Checksums,
+			UpdateCheck: def.UpdateCheck, Checksums: def.Checksums, Fw6: def.Fw6,
 		}); err != nil {
 			drop(id, err.Error())
 			continue

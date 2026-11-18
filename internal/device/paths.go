@@ -6,6 +6,7 @@ package device
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"kpm/internal/config"
@@ -106,8 +107,60 @@ func (p Paths) LockFile() string { return filepath.Join(p.AddsKpm(), "lock") }
 // NmConfig is the NickelMenu drop-in.
 func (p Paths) NmConfig() string { return filepath.Join(p.Root, ".adds", "nm", "kpm") }
 
-// StagedTgz is the boot-time install slot rcS consumes.
-func (p Paths) StagedTgz() string { return filepath.Join(p.Root, ".kobo", "KoboRoot.tgz") }
+// StagedTgz is the boot-time install slot of the firmware line (QT6-FIRMWARE6.md
+// section 3b): .kobo/KoboRoot.tgz on line 4, .kobo/Kobo.tgz on line 6.
+func (p Paths) StagedTgz() string { return p.StagedTgzFor(p.Line()) }
+
+// StagedTgzFor is the boot-time install slot of the given firmware line.
+// Firmware 4.x extracts KoboRoot.tgz into /. Firmware 6.x does not read it, and
+// extracts Kobo.tgz into /usr/local/Kobo.
+func (p Paths) StagedTgzFor(line int) string {
+	if line == Line6 {
+		return filepath.Join(p.Root, ".kobo", "Kobo.tgz")
+	}
+	return filepath.Join(p.Root, ".kobo", "KoboRoot.tgz")
+}
+
+// The firmware lines (QT6-FIRMWARE6.md section 3a). Line 4 is Qt 5, line 6 is Qt 6.
+const (
+	Line4 = config.Line4
+	Line6 = config.Line6
+)
+
+// Qt6Core is the Qt 6 core library of firmware 6.x. Line() reads its presence
+// when the version file does not give the line.
+const Qt6Core = "/usr/lib/libQt6Core.so.6"
+
+// LineOf returns the firmware line of a firmware version: Line4 for 4.x, Line6
+// for 6.x and later, and 0 for any other or unreadable major.
+func LineOf(fw string) int {
+	s, _, _ := strings.Cut(strings.TrimSpace(fw), ".")
+	major, err := strconv.Atoi(s)
+	switch {
+	case err != nil:
+		return 0
+	case major == 4:
+		return Line4
+	case major >= 6:
+		return Line6
+	}
+	return 0
+}
+
+// Line returns the firmware line of the device (QT6-FIRMWARE6.md section 3a).
+// The version file decides when its major is known. Else the rootfs decides: a
+// Qt 6 core library means line 6. The default is line 4, the 0.12.0 behavior.
+func (p Paths) Line() int {
+	if fw, ok := p.Firmware(); ok {
+		if line := LineOf(fw); line != 0 {
+			return line
+		}
+	}
+	if _, err := os.Stat(p.HostPath(Qt6Core)); err == nil {
+		return Line6
+	}
+	return Line4
+}
 
 // NickelConf is Nickel's own Qt settings file. kpm READS it (for the
 // ExcludeSyncFolders advisory, APP-TREE.md §10) and deliberately never writes it:

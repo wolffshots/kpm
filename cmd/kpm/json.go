@@ -157,6 +157,19 @@ type jsonSearchPkg struct {
 	// moves and the tab can never disagree with where the files actually go (D1).
 	// A string, never null, like install_method.
 	Kind string `json:"kind"`
+	// Available is false for a package with no build for the firmware line of
+	// the device. UnavailableReason says why, null when available. The UI shows
+	// the reason in place of Install (QT6-FIRMWARE6.md section 3c rules 8, 9).
+	Available         bool    `json:"available"`
+	UnavailableReason *string `json:"unavailable_reason"`
+}
+
+// availability returns the available and unavailable_reason fields of a row.
+func availability(p config.Package, line int) (bool, *string) {
+	if p.AvailableOn(line) {
+		return true, nil
+	}
+	return false, ptr(config.Unavailable6)
 }
 
 // kindMod is the kind every package with no content-dir destination reports —
@@ -255,6 +268,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 	sort.Strings(ids)
 
 	deviceFw, _ := a.paths.Firmware()
+	line := a.paths.Line()
 
 	// B: the conflict graph over the registry entries plus the local snapshot
 	// (§6.1), from the SHARED construction install and update enforce with — the
@@ -278,7 +292,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			source = e.Def.Source
 			regName = e.Registry
 			minKpm = e.Def.MinKpm
-			testedFw = e.Def.TestedFw
+			testedFw = e.Def.TestedFwFor(line)
 		}
 		if local != nil {
 			if name == "" {
@@ -343,6 +357,16 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 		// One precedence decision feeds install_method and kind.
 		inst := effectiveInstall(local, e)
 
+		// Availability reads the local def when there is one (update acts on
+		// it), else the registry def (install acts on it).
+		var eff config.Package
+		if local != nil {
+			eff = *local
+		} else if e != nil {
+			eff = *e.Def.ToPackage(id, e.Registry, "")
+		}
+		available, reason := availability(eff, line)
+
 		pkgs = append(pkgs, jsonSearchPkg{
 			ID:             id,
 			Name:           name,
@@ -368,6 +392,9 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 			Rolling:         rolling,
 			InstallMethod:   installMethodOf(inst),
 			Kind:            kindOf(inst),
+
+			Available:         available,
+			UnavailableReason: reason,
 		})
 	}
 
@@ -558,6 +585,9 @@ type jsonListPkg struct {
 	Pinned    *string `json:"pinned"`
 	Source    string  `json:"source"`
 	Registry  *string `json:"registry"`
+	// Available and UnavailableReason as in jsonSearchPkg.
+	Available         bool    `json:"available"`
+	UnavailableReason *string `json:"unavailable_reason"`
 }
 
 type jsonListPayload struct {
@@ -591,6 +621,9 @@ type jsonStatusPayload struct {
 	Checked  *string           `json:"checked"`
 	Packages []jsonStatusPkg   `json:"packages"`
 	Staged   jsonStagedSummary `json:"staged"`
+	// FirmwareLine is 4 (Qt 5) or 6 (Qt 6), the line kpm acts on
+	// (QT6-FIRMWARE6.md section 3a).
+	FirmwareLine int `json:"firmware_line"`
 }
 
 type jsonVersion struct {
@@ -639,10 +672,11 @@ func (a *App) statusJSON() int {
 		})
 	}
 	jsonLine(jsonStatusPayload{
-		Version:  version.Version,
-		Checked:  ptr(a.state.LastCheck),
-		Packages: out,
-		Staged:   a.stagedSummary(),
+		Version:      version.Version,
+		Checked:      ptr(a.state.LastCheck),
+		Packages:     out,
+		Staged:       a.stagedSummary(),
+		FirmwareLine: a.paths.Line(),
 	})
 	return exitOK
 }

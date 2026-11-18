@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -175,20 +176,27 @@ func (a *App) diagnose(p *config.Package, entries map[string]*registry.Entry, de
 	var def *registry.PackageDef
 	if e := entries[p.ID]; e != nil {
 		def = e.Def
-		res.testedFw = def.TestedFw
+		res.testedFw = def.TestedFwFor(a.paths.Line())
 	}
 
 	// Plugin inference: a manifest member under the NickelHook imageformats dir.
 	// No such member (a plain-binary package like kscribbler, or an empty manifest)
 	// → not a Nickel plugin, nothing to diagnose.
-	abs, ok := pluginSO(ps.Manifest)
-	if !ok {
+	// A dual package has one build for each Qt major (QT6-FIRMWARE6.md section
+	// 5), and Nickel maps only the build of its own Qt. So each signal looks at
+	// every plugin of the manifest.
+	plugins := pluginSOs(ps.Manifest)
+	// kpm knows its own hook names. A hand install of Kobo.tgz (for example
+	// after a firmware update) leaves the 4.x manifest in state, which names
+	// only the Qt 5 build (vm finding of 2026-11-18).
+	if p.ID == selfID {
+		plugins = appendMissing(plugins, selfHooks...)
+	}
+	if len(plugins) == 0 {
 		res.detail = "not a Nickel plugin — not diagnosable"
 		return res
 	}
-	res.plugin = abs
-	host := a.paths.HostPath(abs)
-	base := filepath.Base(abs)
+	res.plugin = plugins[0]
 
 	// nh_name: the registry field, else the display name with spaces stripped.
 	nhName := ""
@@ -203,11 +211,14 @@ func (a *App) diagnose(p *config.Package, entries map[string]*registry.Entry, de
 
 	// Signal 1: failsafe quarantine sibling (the loader renamed the .so aside and
 	// Nickel crashed before it was restored — nh.c failsafe).
-	if _, err := os.Lstat(host + ".failsafe"); err == nil {
-		res.verdict = "crashed"
-		res.detail = "crashed and quarantined by failsafe"
-		appendCause(&res, deviceFw)
-		return res
+	for _, abs := range plugins {
+		if _, err := os.Lstat(a.paths.HostPath(abs) + ".failsafe"); err == nil {
+			res.plugin = abs
+			res.verdict = "crashed"
+			res.detail = "crashed and quarantined by failsafe"
+			appendCause(&res, deviceFw)
+			return res
+		}
 	}
 
 	// Signal 2: a NickelHook dump-log newer than the install → load hard-failed.
@@ -227,14 +238,17 @@ func (a *App) diagnose(p *config.Package, entries map[string]*registry.Entry, de
 		res.detail = "mapping check unavailable (no running Nickel); on-disk signals are clean"
 		return res
 	}
-	if !strings.Contains(maps, base) {
-		res.verdict = "not-loaded"
-		res.detail = "not loaded — plugin not mapped into Nickel"
-		appendCause(&res, deviceFw)
-		return res
+	for _, abs := range plugins {
+		if strings.Contains(maps, filepath.Base(abs)) {
+			res.plugin = abs
+			res.verdict = "loaded"
+			res.detail = "plugin mapped into Nickel (proves it loaded, not that it works)"
+			return res
+		}
 	}
-	res.verdict = "loaded"
-	res.detail = "plugin mapped into Nickel (proves it loaded, not that it works)"
+	res.verdict = "not-loaded"
+	res.detail = "not loaded — plugin not mapped into Nickel"
+	appendCause(&res, deviceFw)
 	return res
 }
 
@@ -247,22 +261,39 @@ func appendCause(res *doctorResult, deviceFw string) {
 	}
 }
 
-// pluginSO returns the device-absolute path of the first manifest member that is a
-// NickelHook imageformats plugin (usr/local/Kobo/imageformats/*.so), and whether
-// one was found. Members are cleaned through the uninstall path plumbing (a member
-// that fails to clean is skipped); path.Match's '*' does not span '/', so only a
-// .so directly in that directory matches.
-func pluginSO(members []string) (deviceAbs string, ok bool) {
+// selfHooks are the two builds of the kpm hook (QT6-FIRMWARE6.md section 5).
+var selfHooks = []string{
+	"/usr/local/Kobo/imageformats/libnkpm.so",
+	"/usr/local/Kobo/imageformats/libnkpm-qt6.so",
+}
+
+// appendMissing appends each item of add that list does not have.
+func appendMissing(list []string, add ...string) []string {
+	for _, x := range add {
+		if !slices.Contains(list, x) {
+			list = append(list, x)
+		}
+	}
+	return list
+}
+
+// pluginSOs returns the device-absolute paths of the manifest members that are
+// NickelHook imageformats plugins (usr/local/Kobo/imageformats/*.so), in
+// manifest order. Members are cleaned through the uninstall path plumbing (a
+// member that fails to clean is skipped). path.Match's '*' does not span '/',
+// so only a .so directly in that directory matches.
+func pluginSOs(members []string) []string {
+	var out []string
 	for _, m := range members {
 		abs, err := uninstall.CleanDeviceAbs("/" + m)
 		if err != nil {
 			continue
 		}
 		if matched, _ := path.Match("/usr/local/Kobo/imageformats/*.so", abs); matched {
-			return abs, true
+			out = append(out, abs)
 		}
 	}
-	return "", false
+	return out
 }
 
 // recentDumpLog returns the basename of the newest NickelHook dump-log for nhName

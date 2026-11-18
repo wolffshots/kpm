@@ -86,6 +86,16 @@ func (a *App) cmdInstall(args []string) int {
 		}
 	}
 
+	// A tgz package needs an [fw6] build on firmware 6.x (QT6-FIRMWARE6.md
+	// section 3c rule 4). Refuse it before anything is written.
+	line := a.paths.Line()
+	if !entry.Def.ToPackage(id, entry.Registry, "").AvailableOn(line) {
+		msg := fmt.Sprintf("%s has no build for firmware 6.x.", id)
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm install:", msg)
+		return exitError
+	}
+
 	// Guard an existing local def (§9.6).
 	existing, existsErr := a.loadPackage(id)
 	if existsErr != nil {
@@ -163,7 +173,7 @@ func (a *App) cmdInstall(args []string) int {
 	// note (D) reads the device firmware and the registry def's tested_fw — both
 	// advisory, so a missing/unreadable value simply omits the line.
 	deviceFw, _ := a.paths.Firmware()
-	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange, deviceFw, entry.Def.TestedFw)
+	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange, deviceFw, entry.Def.TestedFwFor(line))
 	if !*yes {
 		// Human line before the emit: BEGIN_JSON must be the final stdout
 		// line on every branch (JSON-OUTPUT.md §1).

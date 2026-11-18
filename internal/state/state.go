@@ -92,6 +92,10 @@ type State struct {
 	// only when a committed tgz has since disappeared; an uncommitted staging
 	// that vanished is rolled back, never promoted (B6).
 	StagedCommitted bool `json:"staged_committed,omitempty"`
+	// Firmware is the firmware version of the last mutating run. A change starts
+	// the firmware-change check (QT6-FIRMWARE6.md section 3f). Empty means not
+	// recorded yet, which is not a change.
+	Firmware string `json:"firmware,omitempty"`
 
 	path string // where it was loaded from, for Save
 	// CorruptBackup is set (not serialized) when Load recovered from an
