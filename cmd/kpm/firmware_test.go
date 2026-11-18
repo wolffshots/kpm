@@ -243,6 +243,38 @@ func TestFirmwareChangeOnUpgrade(t *testing.T) {
 	}
 }
 
+// kpm installed by hand and enrolled with adopt-self has no manifest. After the
+// upgrade to 6.x its Qt 6 hook is missing, and kpm must repair itself
+// (NickelSync suite finding of 2026-11-18).
+func TestFirmwareChangeSelfWithoutManifest(t *testing.T) {
+	a := newTestApp(t)
+	t.Setenv("KPM_SYSROOT", t.TempDir())
+	self := a.state.Get(selfID)
+	self.InstalledVersion = "0.13.0"
+	a.state.Firmware = fw4
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	writeFirmware(t, a, fw6)
+	b, err := newApp(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.releaseLock()
+	ps := b.state.Get(selfID)
+	if !selfRepair(selfID, ps) {
+		t.Fatalf("kpm: missing %v, want the Qt 6 hook missing", ps.MissingFiles)
+	}
+	if ps.MissingFiles[0] != "usr/local/Kobo/imageformats/libnkpm-qt6.so" {
+		t.Errorf("kpm: missing %v, want the Qt 6 hook", ps.MissingFiles)
+	}
+	// reverifyMissing reads the manifest. The hook must stay missing until the
+	// reinstall.
+	if b.reverifyMissing() || !selfRepair(selfID, ps) {
+		t.Errorf("kpm: missing %v after reverify, want the Qt 6 hook still missing", ps.MissingFiles)
+	}
+}
+
 // A firmware that is not recorded yet is recorded on 4.x, and nothing is
 // cleared.
 func TestFirmwareFirstRecordIsNotAChange(t *testing.T) {

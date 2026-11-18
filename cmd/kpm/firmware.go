@@ -91,6 +91,11 @@ func (a *App) forgetWipedInstalls() []string {
 		if ps.InstalledVersion == "" {
 			continue
 		}
+		if id == selfID {
+			// kpm installed by hand has no manifest. Its hook for this line is
+			// always a kpm file (NickelSync suite finding of 2026-11-18).
+			ps.Manifest = appendMissing(ps.Manifest, selfHookFor(a.paths.Line()))
+		}
 		var rootfs []string
 		for _, m := range ps.Manifest {
 			if !strings.HasPrefix(strings.ToLower(m), "mnt/onboard/") {
@@ -119,6 +124,15 @@ func (a *App) forgetWipedInstalls() []string {
 		a.paths.Log("INFO", fmt.Sprintf("%s  firmware changed and removed its rootfs files; marked not installed", id))
 	}
 	return cleared
+}
+
+// selfHookFor returns the manifest member of the kpm hook for the firmware
+// line: the Qt 6 build on line 6, the Qt 5 build on line 4.
+func selfHookFor(line int) string {
+	if line == device.Line6 {
+		return strings.TrimPrefix(selfHooks[1], "/")
+	}
+	return strings.TrimPrefix(selfHooks[0], "/")
 }
 
 // selfRepair reports whether kpm must install itself again although its
