@@ -100,3 +100,31 @@ func TestVerifyTgzRejectsWrongMembers(t *testing.T) {
 		t.Error("verifyTgz should reject an incomplete member list")
 	}
 }
+
+// QT6-FIRMWARE6.md section 5: the dual Kobo.tgz passes its own self-check, and
+// the self-check refuses a Kobo.tgz without the Qt 6 hook.
+func TestKoboTgzMembers(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "Kobo.tgz")
+	members := koboTgzMembers("0.13.0", []byte("bin"), []byte("nm"), []byte("qt5"), []byte("qt6"))
+	if err := writeTgz(out, members); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyKoboTgz(out); err != nil {
+		t.Fatalf("verifyKoboTgz: %v", err)
+	}
+
+	bad := filepath.Join(dir, "bad.tgz")
+	var noQt6 []tgzFile
+	for _, m := range members {
+		if m.name != koboSoQt6 {
+			noQt6 = append(noQt6, m)
+		}
+	}
+	if err := writeTgz(bad, noQt6); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyKoboTgz(bad); err == nil {
+		t.Error("verifyKoboTgz should reject a Kobo.tgz without the Qt 6 hook")
+	}
+}
