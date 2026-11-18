@@ -15,6 +15,14 @@
 #include "kpmprocess.h"
 #include "nkpm.h"
 
+// The QProcess failure signal. Qt 5.2.1 has no errorOccurred, and Qt 6 removed
+// the overloaded error(ProcessError) signal (QT6-FIRMWARE6.md section 4).
+#if QT_VERSION_MAJOR >= 6
+static constexpr auto processErrorSignal = &QProcess::errorOccurred;
+#else
+static const auto processErrorSignal = static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::error);
+#endif
+
 bool KpmProcess::s_mutatingInFlight = false;
 
 // Watchdog windows (§4): mutating ops may download on slow Wi-Fi (5 min); reads
@@ -264,7 +272,7 @@ void KpmProcess::networkConnected() {
   // Qt 5.2.1 has no errorOccurred; error(ProcessError) fires on exec failure
   // (FailedToStart never emits finished — without this the watchdog is the only
   // way out and the mutating guard stays stuck for its full window).
-  QObject::connect(process, static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::error), this,
+  QObject::connect(process, processErrorSignal, this,
                    &KpmProcess::processErrored);
 
   watchdog = new QTimer(this);
@@ -308,7 +316,7 @@ void KpmProcess::detachProcess() {
     return;
   }
   QObject::connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), p, &QObject::deleteLater);
-  QObject::connect(p, static_cast<void (QProcess::*)(QProcess::ProcessError)>(&QProcess::error), p,
+  QObject::connect(p, processErrorSignal, p,
                    &QObject::deleteLater);
   p->kill();
 }
