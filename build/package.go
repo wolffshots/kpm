@@ -252,15 +252,18 @@ func writeTgz(path string, files []tgzFile) error {
 	return f.Close()
 }
 
-// koboTgzMembers returns the members of the dual Kobo.tgz.
+// koboTgzMembers returns the members of the dual Kobo.tgz. The seed VERSION is
+// "<version> <size of bin/kpm>" and is the last member. Busybox tar stops at the
+// first write error, so after a partial extract the seed finds no new VERSION.
+// The hook also refuses a bin/kpm of another size (hook/src/seed.cc).
 func koboTgzMembers(version string, bin, nm, soQt5, soQt6 []byte) []tgzFile {
 	return []tgzFile{
 		{koboSoQt5, 0o755, soQt5},
 		{koboSoQt6, 0o755, soQt6},
-		{koboSeedVer, 0o644, []byte(version + "\n")},
 		{koboSeedBin, 0o755, bin},
 		{koboSeedToml, 0o644, []byte(selfToml)},
 		{koboSeedNm, 0o644, nm},
+		{koboSeedVer, 0o644, []byte(fmt.Sprintf("%s %d\n", version, len(bin)))},
 	}
 }
 

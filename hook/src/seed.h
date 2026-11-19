@@ -7,6 +7,10 @@
 // /mnt/onboard when the seed VERSION differs from the receipt
 // /mnt/onboard/.adds/kpm/.seed-version. Plain C file calls only: the copy runs
 // in a constructor before NickelHook and before Qt is usable.
+//
+// Guards: VERSION is "<version> <size of bin/kpm>", and a bin/kpm of another
+// size is not copied. While the copy runs, VERSION is renamed to
+// VERSION.seeding, so a crash turns the seed off instead of at each boot.
 
 #define NKPM_SEED_DIR "/usr/local/Kobo/kpm-seed"
 #define NKPM_ONBOARD "/mnt/onboard"

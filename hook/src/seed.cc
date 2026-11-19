@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <syslog.h>
@@ -128,15 +129,65 @@ bool replaceFile(char const *srcPath, char const *data, char const *dst, mode_t 
   return ok;
 }
 
+// fileSize returns the size of path, or -1. It uses lseek, not stat: the 32-bit
+// stat fails with EOVERFLOW on a file system with 64-bit inode numbers.
+off_t fileSize(char const *path) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return -1;
+  }
+  off_t n = lseek(fd, 0, SEEK_END);
+  close(fd);
+  return n;
+}
+
+// seedCopy copies the seed files and writes the receipt.
+int seedCopy(char const *seed_dir, char const *onboard, char const *version, char const *line) {
+  char path[512], dst[512];
+  for (SeedFile const &f : seedFiles) {
+    snprintf(path, sizeof(path), "%s/%s", seed_dir, f.src);
+    snprintf(dst, sizeof(dst), "%s/%s", onboard, f.dst);
+    if (!mkdirParents(dst) || !replaceFile(path, nullptr, dst, f.mode)) {
+      syslog(LOG_ERR, "(NickelKPM) seed: copy %s to %s failed: %s", path, dst, strerror(errno));
+      return -1;
+    }
+  }
+
+  // The receipt goes last, so a failed copy is tried again at the next start.
+  snprintf(path, sizeof(path), "%s/%s", onboard, receiptPath);
+  if (!replaceFile(nullptr, line, path, 0644)) {
+    syslog(LOG_ERR, "(NickelKPM) seed: write %s failed: %s", path, strerror(errno));
+    return -1;
+  }
+  syslog(LOG_INFO, "(NickelKPM) seed: copied kpm %s to %s", version, onboard);
+  return 1;
+}
+
 } // namespace
 
 int nkpm_seed(char const *seed_dir, char const *onboard) {
-  char path[512], dst[512], version[64], receipt[64];
+  char path[512], guard[512], line[64], version[64], receipt[64];
 
   snprintf(path, sizeof(path), "%s/VERSION", seed_dir);
-  if (!readSmall(path, version, sizeof(version))) {
+  snprintf(guard, sizeof(guard), "%s/VERSION.seeding", seed_dir);
+  if (!readSmall(path, line, sizeof(line))) {
+    if (access(guard, F_OK) == 0) {
+      syslog(LOG_ERR, "(NickelKPM) seed: an earlier seed did not finish, so the seed is off. "
+                      "Install the kpm Kobo.tgz again to try again.");
+    }
     return 0; // no seed folder: a KoboRoot.tgz install
   }
+
+  // VERSION is "<version> <size of bin/kpm>" (build/package.go). A bin/kpm of
+  // another size is a partial extract: do not copy it over a good kpm.
+  char *sp = strchr(line, ' ');
+  char *end = nullptr;
+  long want = sp ? strtol(sp + 1, &end, 10) : -1;
+  if (!sp || end == sp + 1 || *end != '\0' || want <= 0) {
+    syslog(LOG_ERR, "(NickelKPM) seed: bad %s: '%s'", path, line);
+    return -1;
+  }
+  snprintf(version, sizeof(version), "%.*s", (int)(sp - line), line);
 
   // A missing .kobo folder means that the user partition is not mounted. Do not
   // write into the mount point on the root file system. Use open, not stat: the
@@ -149,29 +200,43 @@ int nkpm_seed(char const *seed_dir, char const *onboard) {
   close(dirfd);
 
   snprintf(path, sizeof(path), "%s/%s", onboard, receiptPath);
-  if (readSmall(path, receipt, sizeof(receipt)) && strcmp(receipt, version) == 0) {
+  if (readSmall(path, receipt, sizeof(receipt)) && strcmp(receipt, line) == 0) {
     return 0;
   }
 
-  for (SeedFile const &f : seedFiles) {
-    snprintf(path, sizeof(path), "%s/%s", seed_dir, f.src);
-    snprintf(dst, sizeof(dst), "%s/%s", onboard, f.dst);
-    if (!mkdirParents(dst) || !replaceFile(path, nullptr, dst, f.mode)) {
-      syslog(LOG_ERR, "(NickelKPM) seed: copy %s to %s failed: %s", path, dst, strerror(errno));
-      return -1;
-    }
-  }
-
-  // The receipt goes last, so a failed copy is tried again at the next start.
-  snprintf(path, sizeof(path), "%s/%s", onboard, receiptPath);
-  char line[sizeof(version) + 1];
-  snprintf(line, sizeof(line), "%s\n", version);
-  if (!replaceFile(nullptr, line, path, 0644)) {
-    syslog(LOG_ERR, "(NickelKPM) seed: write %s failed: %s", path, strerror(errno));
+  snprintf(path, sizeof(path), "%s/bin/kpm", seed_dir);
+  off_t got = fileSize(path);
+  if (got != (off_t)want) {
+    syslog(LOG_ERR, "(NickelKPM) seed: %s has %ld bytes, want %ld. Install the kpm Kobo.tgz again.", path, (long)got,
+           want);
     return -1;
   }
-  syslog(LOG_INFO, "(NickelKPM) seed: copied kpm %s to %s", version, onboard);
-  return 1;
+
+  // Crash guard. The seed runs before the NickelHook failsafe, so a crash here
+  // would repeat at each boot. VERSION.seeding exists only while the copy runs.
+  // After a crash, a hang or a power loss, VERSION is gone and the seed does
+  // nothing until the user installs Kobo.tgz again. The UI hook still loads.
+  snprintf(path, sizeof(path), "%s/VERSION", seed_dir);
+  if (rename(path, guard) != 0) {
+    syslog(LOG_ERR, "(NickelKPM) seed: rename %s failed: %s", path, strerror(errno));
+    return -1;
+  }
+  int seedfd = open(seed_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (seedfd >= 0) {
+    fsync(seedfd);
+    close(seedfd);
+  }
+
+  char out[sizeof(line) + 1];
+  snprintf(out, sizeof(out), "%s\n", line);
+  int ret = seedCopy(seed_dir, onboard, version, out);
+
+  // Success or a handled error: put VERSION back. After an error the next
+  // start tries again, as before the guard.
+  if (rename(guard, path) != 0) {
+    syslog(LOG_ERR, "(NickelKPM) seed: rename %s failed: %s", guard, strerror(errno));
+  }
+  return ret;
 }
 
 void nkpm_seed_remove(char const *seed_dir) {
@@ -180,7 +245,7 @@ void nkpm_seed_remove(char const *seed_dir) {
     snprintf(path, sizeof(path), "%s/%s", seed_dir, f.src);
     unlink(path);
   }
-  char const *const rest[] = {"VERSION", "bin", "packages.d", "nm", ""};
+  char const *const rest[] = {"VERSION", "VERSION.seeding", "bin", "packages.d", "nm", ""};
   for (char const *r : rest) {
     snprintf(path, sizeof(path), "%s/%s", seed_dir, r);
     if (unlink(path) != 0) {
