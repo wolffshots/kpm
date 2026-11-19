@@ -26,16 +26,33 @@ const (
 	memSo = "./usr/local/Kobo/imageformats/libnkpm.so"
 )
 
+// Kobo.tgz member paths, relative to /usr/local/Kobo: both firmware lines extract
+// it there (QT6-FIRMWARE6.md section 3e). Each Qt loads only the hook of its own
+// major version. The hook copies kpm-seed/ to the user partition (hook/src/seed.cc).
+const (
+	koboSoQt5    = "imageformats/libnkpm.so"
+	koboSoQt6    = "imageformats/libnkpm-qt6.so"
+	koboSeedVer  = "kpm-seed/VERSION"
+	koboSeedBin  = "kpm-seed/bin/kpm"
+	koboSeedToml = "kpm-seed/packages.d/kpm.toml"
+	koboSeedNm   = "kpm-seed/nm/kpm"
+)
+
 // selfToml is kpm's own package definition shipped in the tgz. It carries only
 // the release-invariant fields: kpm's source, forge, and pin all live in
 // state.json so they survive a self-update that overwrites this file (§10;
 // SELF-SOURCE.md). An adopted kpm reads its source/forge from state via the
 // effective* accessors; an un-adopted kpm has empty state, so it reads
 // "self-update not configured" and check/update skip it silently (F7). This file
-// is still shipped: its presence is what marks kpm registered.
+// is still shipped: its presence is what marks kpm registered. The fw6 table names
+// the dual Kobo.tgz, the asset a firmware 6.x self-update installs
+// (QT6-FIRMWARE6.md section 3d).
 const selfToml = `name = "kpm"
 asset = "KoboRoot.tgz"
 pin = ""
+
+[fw6]
+asset = "Kobo.tgz"
 `
 
 // tgzFile is one archive member.
@@ -108,7 +125,27 @@ func main() {
 		fatal(fmt.Errorf("self-check: %w", err))
 	}
 
-	fmt.Printf("wrote %s\nwrote %s\n", binOut, tgzOut)
+	// 4. The dual Kobo.tgz for firmware 4.x and 6.x (QT6-FIRMWARE6.md section 5).
+	// Its Qt 6 hook comes from hook/libnkpm-qt6.so, overridable via KPM_UI_SO_QT6.
+	soQt6Path := os.Getenv("KPM_UI_SO_QT6")
+	if soQt6Path == "" {
+		soQt6Path = filepath.Join(root, "hook", "libnkpm-qt6.so")
+	}
+	soQt6Data, err := os.ReadFile(soQt6Path)
+	if err != nil {
+		fatal(fmt.Errorf("read Qt 6 UI hook %s: %w\n"+
+			"  build it first with NH_QT_MAJOR=6 (see hook/Makefile)\n"+
+			"  or point KPM_UI_SO_QT6 at a prebuilt libnkpm-qt6.so", soQt6Path, err))
+	}
+	koboOut := filepath.Join(distDir, "Kobo.tgz")
+	if err := writeTgz(koboOut, koboTgzMembers(version, binData, nmData, soData, soQt6Data)); err != nil {
+		fatal(fmt.Errorf("write Kobo.tgz: %w", err))
+	}
+	if err := verifyKoboTgz(koboOut); err != nil {
+		fatal(fmt.Errorf("Kobo.tgz self-check: %w", err))
+	}
+
+	fmt.Printf("wrote %s\nwrote %s\nwrote %s\n", binOut, tgzOut, koboOut)
 	fmt.Println("self-check OK: members and modes match PLAN.md §10, nm labels colon-free")
 }
 
@@ -215,15 +252,46 @@ func writeTgz(path string, files []tgzFile) error {
 	return f.Close()
 }
 
-// verifyTgz reopens the archive and asserts its members and modes match the
+// koboTgzMembers returns the members of the dual Kobo.tgz. The seed VERSION is
+// "<version> <size of bin/kpm>" and is the last member. Busybox tar stops at the
+// first write error, so after a partial extract the seed finds no new VERSION.
+// The hook also refuses a bin/kpm of another size (hook/src/seed.cc).
+func koboTgzMembers(version string, bin, nm, soQt5, soQt6 []byte) []tgzFile {
+	return []tgzFile{
+		{koboSoQt5, 0o755, soQt5},
+		{koboSoQt6, 0o755, soQt6},
+		{koboSeedBin, 0o755, bin},
+		{koboSeedToml, 0o644, []byte(selfToml)},
+		{koboSeedNm, 0o644, nm},
+		{koboSeedVer, 0o644, []byte(fmt.Sprintf("%s %d\n", version, len(bin)))},
+	}
+}
+
+// verifyTgz reopens the KoboRoot.tgz and asserts its members and modes match the
 // spec exactly.
 func verifyTgz(path string) error {
-	want := map[string]int64{
+	return verifyMembers(path, map[string]int64{
 		memBin:  0o755,
 		memToml: 0o644,
 		memNm:   0o644,
 		memSo:   0o755,
-	}
+	})
+}
+
+// verifyKoboTgz is verifyTgz for the dual Kobo.tgz.
+func verifyKoboTgz(path string) error {
+	return verifyMembers(path, map[string]int64{
+		koboSoQt5:    0o755,
+		koboSoQt6:    0o755,
+		koboSeedVer:  0o644,
+		koboSeedBin:  0o755,
+		koboSeedToml: 0o644,
+		koboSeedNm:   0o644,
+	})
+}
+
+// verifyMembers asserts the exact member list, modes and root ownership.
+func verifyMembers(path string, want map[string]int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err

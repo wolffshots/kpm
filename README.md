@@ -159,6 +159,45 @@ kpm registry refresh && kpm install kpm --adopt --yes
 kpm's own recorded version self-heals from the running binary, so a
 USB-sideloaded kpm corrects its `installed_version` on the next mutating command.
 
+## Firmware 6.x
+
+Firmware 6.x (the Kobo OS 6 beta) uses Qt 6. It does not read `.kobo/KoboRoot.tgz`. It reads only `.kobo/Kobo.tgz`, and it extracts that file into `/usr/local/Kobo`.
+
+To install kpm on 6.x:
+
+1. Copy `Kobo.tgz` from the release into `.kobo/` on the device.
+2. Eject the device. The firmware installs the file at the next boot.
+
+The same `Kobo.tgz` also works on 4.x. It holds a Qt 5 and a Qt 6 build of the UI hook. Each Qt loads only the build of its own major version. At boot, the hook copies the kpm binary, `packages.d/kpm.toml` and the NickelMenu entry from `/usr/local/Kobo/kpm-seed` to the user partition. It copies them when the seed version differs from `.adds/kpm/.seed-version`.
+
+On 6.x, kpm changes these things:
+
+- kpm reads the firmware line from `.kobo/version`. If that file gives no version, the Qt 6 core library in `/usr/lib` decides.
+- kpm stages `.kobo/Kobo.tgz` in place of `.kobo/KoboRoot.tgz`.
+- A tgz package installs on 6.x only when its def has an `[fw6]` table (see `REGISTRY.md`). Else `install` and `update` refuse it with "no build for firmware 6.x". `update --all` skips it with a note. The UI shows the reason in place of Install.
+- A `Kobo.tgz` of a package can write only under `imageformats/`. kpm refuses a `KoboRoot.tgz` as a 6.x asset.
+- App-tree and file packages (KOReader, fonts, dictionaries) install on both lines without an `[fw6]` table.
+- `kpm add` writes the asset into an `[fw6]` table. The default asset there is `Kobo.tgz`.
+- A kpm self-update stages the `Kobo.tgz` of the release. At the next boot, the seed copies the new binary.
+
+### After a firmware update
+
+A firmware update writes a new rootfs. It deletes the rootfs files of each tgz package, the kpm UI hook and NickelMenu. The user partition stays, with `.adds/kpm` (the kpm binary, its state and its package list).
+
+On the first mutating run after a firmware change, kpm does these things:
+
+- It marks a package as not installed when all of its rootfs files are gone. `kpm update --all` then installs it again with the asset of the new line.
+- It marks kpm itself for a reinstall when its hook is gone. `kpm check` shows "REINSTALL (files missing)", and `kpm update --all` installs kpm again.
+- It syncs a registry def that has no `[fw6]` table from the registry cache, when the registry def has one. `kpm registry refresh` does the same.
+- If the line changed, it deletes a `KoboRoot.tgz` that it staged and that the new firmware does not read.
+
+Nothing on the device can start kpm after the update. To start again, install one `Kobo.tgz` by hand:
+
+1. Copy the `Kobo.tgz` of kpm into `.kobo/` and eject. The kpm UI comes back.
+2. Open the kpm UI and tap "Update all". kpm installs the 6.x build of each package again, NickelMenu included when its def has an `[fw6]` table.
+
+Over SSH, `kpm update --all` alone does all of this, kpm included.
+
 ## Registering packages
 
 `kpm add <url>` writes a `packages.d/<id>.toml`. It accepts a repo URL, with an
@@ -1026,6 +1065,7 @@ Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
   `tools/symcheck/README.md`). Run it against the newest firmware before
   tagging — a missing required symbol means the UI cleanly refuses to load
   there.
+- `go run ./build` also writes `dist/Kobo.tgz`, the package for both firmware lines. It needs both hook builds, `hook/libnkpm.so` and `hook/libnkpm-qt6.so`. `hook/Makefile` gives the build commands.
 - Release artifacts are copied to `releases/<version>/KoboRoot.tgz`.
 
 ## Non-goals (v1)

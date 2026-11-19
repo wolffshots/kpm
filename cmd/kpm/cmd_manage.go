@@ -61,8 +61,10 @@ func (a *App) cmdList(args []string) int {
 		// id so it can offer "Drop registration"; narrowing this to installed-only
 		// would silently kill that feature (JSON-OUTPUT.md §2.4).
 		out := make([]jsonListPkg, 0, len(pkgs))
+		line := a.paths.Line()
 		for _, p := range pkgs {
 			ps := a.state.Get(p.ID)
+			available, reason := availability(*p, line)
 			out = append(out, jsonListPkg{
 				ID:        p.ID,
 				Name:      p.Name,
@@ -70,6 +72,9 @@ func (a *App) cmdList(args []string) int {
 				Pinned:    ptr(a.effectivePin(p)),
 				Source:    a.effectiveSource(p),
 				Registry:  ptr(p.Registry),
+
+				Available:         available,
+				UnavailableReason: reason,
 			})
 		}
 		jsonLine(jsonListPayload{Packages: out})
@@ -274,7 +279,7 @@ func updateTarget(pkg *config.Package, ps *state.PackageState, pin string) (targ
 	if ps.StagedVersion != "" && tagsEqual(ps.StagedVersion, target) && !stagedRebuilt {
 		return target, false // already staged, awaiting reboot
 	}
-	return target, !tagsEqual(ps.InstalledVersion, target) || rebuilt
+	return target, !tagsEqual(ps.InstalledVersion, target) || rebuilt || selfRepair(pkg.ID, ps)
 }
 
 // tagsEqual compares two release tags treating a single leading 'v' as

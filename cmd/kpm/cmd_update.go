@@ -585,6 +585,15 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	if !a.configured(p) {
 		return resolved{}, nil, true, "", nil
 	}
+	// The firmware line selects the build (QT6-FIRMWARE6.md section 3c). A tgz
+	// package without an [fw6] table cannot install on 6.x. Like a conflict, this
+	// is permanent: a skip with a note under --all, a failure when named.
+	line := a.paths.Line()
+	if !p.AvailableOn(line) {
+		return resolved{}, nil, true, config.Unavailable6, nil
+	}
+	lp := p.ForLine(line)
+	p = &lp
 	// Honor the def's min_kpm: an old kpm skips a package that needs a newer one
 	// (with a note) rather than staging it blindly (§9.8). install/sync gate too,
 	// but a hand-edited def can still carry a min_kpm the running kpm can't meet.
@@ -659,7 +668,7 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	}
 	rebuilt := rebuildDetected(p, pin, ps.InstalledFingerprint, fp)
 
-	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt {
+	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt && !selfRepair(p.ID, ps) {
 		return resolved{}, nil, true, "", nil // up to date
 	}
 	// A pin freezes the staged payload too: without the pin term a pinned
@@ -746,12 +755,14 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 
 // firstReservedPath returns the first manifest member that lands in a path only
 // kpm's own package may write, or "" if none. Comparison is case-insensitive
-// because the onboard partition (where these live) is FAT32.
+// because the onboard partition (where most of these live) is FAT32. The seed
+// folder is reserved too: the hook copies it into .adds/kpm at boot.
 func firstReservedPath(manifest []string) string {
 	for _, m := range manifest {
 		lm := strings.ToLower(m)
 		if lm == "mnt/onboard/.adds/kpm" || strings.HasPrefix(lm, "mnt/onboard/.adds/kpm/") ||
-			lm == "mnt/onboard/.adds/nm/kpm" {
+			lm == "mnt/onboard/.adds/nm/kpm" ||
+			lm == "usr/local/kobo/kpm-seed" || strings.HasPrefix(lm, "usr/local/kobo/kpm-seed/") {
 			return m
 		}
 	}
@@ -837,6 +848,16 @@ func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums boo
 	if err != nil {
 		os.Remove(final)
 		return "", nil, fmt.Errorf("verify: %w", err)
+	}
+	// On firmware 6.x the asset is a Kobo.tgz, relative to /usr/local/Kobo. Its
+	// members must stay under imageformats/ (QT6-FIRMWARE6.md section 3b).
+	if a.paths.Line() == device.Line6 {
+		manifest, err := tgz.CheckKoboTgz(id, res, id == selfID)
+		if err != nil {
+			os.Remove(final)
+			return "", nil, err
+		}
+		return final, manifest, nil
 	}
 	for _, w := range res.Warnings {
 		a.paths.Log("WARN", fmt.Sprintf("%s  unusual path: %s", id, w))

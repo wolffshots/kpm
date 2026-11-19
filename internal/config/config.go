@@ -458,11 +458,107 @@ type Package struct {
 	// omitempty is load-bearing — see the type's doc comment.
 	Install *Install `toml:"install,omitempty"`
 
+	// Fw6 is the optional [fw6] table: the build for firmware 6.x
+	// (QT6-FIRMWARE6.md section 3c). A pointer with omitempty, for the same
+	// reason as Install: a def without the table must hash as before.
+	Fw6 *Fw6 `toml:"fw6,omitempty"`
+
 	Uninstall Uninstall   `toml:"uninstall"`
 	Configs   []ModConfig `toml:"configs,omitempty"` // editable config declarations (CONFIG.md §2)
 
 	// ID is the filename stem; not serialized into the TOML body.
 	ID string `toml:"-"`
+}
+
+// The firmware lines (QT6-FIRMWARE6.md section 3a). Line 4 is Qt 5, line 6 is
+// Qt 6. internal/device detects the line of a device.
+const (
+	Line4 = 4
+	Line6 = 6
+)
+
+// Unavailable6 is the reason a package cannot install on firmware 6.x: a tgz
+// package with no [fw6] table (QT6-FIRMWARE6.md section 3c rule 4).
+const Unavailable6 = "no build for firmware 6.x"
+
+// DefaultAsset6 is the asset `kpm add` writes into the [fw6] table on firmware
+// 6.x (QT6-FIRMWARE6.md section 3c rule 6).
+const DefaultAsset6 = "Kobo.tgz"
+
+// Fw6 is the [fw6] table of a def: the build of the package for firmware 6.x
+// (QT6-FIRMWARE6.md section 3c). Source and Forge default to the base values.
+// Asset is required. Checksums apply to this asset only. TestedFw is
+// registry-only, like the base tested_fw: it is not hashed and not projected.
+type Fw6 struct {
+	Source    string            `toml:"source,omitempty"`
+	Forge     string            `toml:"forge,omitempty"`
+	Asset     string            `toml:"asset"`
+	TestedFw  string            `toml:"tested_fw,omitempty"`
+	Checksums map[string]string `toml:"checksums,omitempty"`
+}
+
+// Clone copies an Fw6 and its checksums map, so a registry def and a local
+// package never share them (the Install.Clone rule).
+func (f *Fw6) Clone() *Fw6 {
+	if f == nil {
+		return nil
+	}
+	out := *f
+	if f.Checksums != nil {
+		out.Checksums = make(map[string]string, len(f.Checksums))
+		for k, v := range f.Checksums {
+			out.Checksums[k] = v
+		}
+	}
+	return &out
+}
+
+// Validate checks the [fw6] table. A nil table is valid.
+func (f *Fw6) Validate() error {
+	if f == nil {
+		return nil
+	}
+	if strings.TrimSpace(f.Asset) == "" {
+		return fmt.Errorf("fw6 requires asset")
+	}
+	if f.Source != "" && !SourceConfigured(f.Source) {
+		return fmt.Errorf("fw6 source must be host/owner/repo, got %q", f.Source)
+	}
+	switch f.Forge {
+	case "", ForgeGitHub, ForgeForgejo:
+	default:
+		return fmt.Errorf("fw6 forge %q is not %q or %q", f.Forge, ForgeGitHub, ForgeForgejo)
+	}
+	if err := ValidateChecksums(f.Checksums); err != nil {
+		return fmt.Errorf("fw6 %w", err)
+	}
+	return nil
+}
+
+// ForLine returns the package with the source, forge, asset and checksums of
+// the firmware line (QT6-FIRMWARE6.md section 3c rule 3). On line 6 with an
+// [fw6] table, the table values replace the base values. Else it returns p as
+// it is. The result is for the forge and download path only: never save it.
+func (p Package) ForLine(line int) Package {
+	if line != Line6 || p.Fw6 == nil {
+		return p
+	}
+	if p.Fw6.Source != "" {
+		p.Source = p.Fw6.Source
+	}
+	if p.Fw6.Forge != "" {
+		p.Forge = p.Fw6.Forge
+	}
+	p.Asset = p.Fw6.Asset
+	p.Checksums = p.Fw6.Checksums
+	return p
+}
+
+// AvailableOn reports whether the package can install on the firmware line. On
+// line 6 a tgz package needs an [fw6] table. The app-tree and file methods
+// write to the user partition, so they install on both lines.
+func (p Package) AvailableOn(line int) bool {
+	return line != Line6 || p.InstallsLive() || p.Fw6 != nil
 }
 
 // EffectiveInstallMethod returns the package's install method with the default
@@ -610,7 +706,7 @@ func ValidateChecksums(sums map[string]string) error {
 // edit, so a checksum pinned to that permanently-constant tag would be correct
 // exactly once and hard-fail every download after (INTEGRITY.md §5.6).
 func ValidateDefCombination(p Package) error {
-	if p.UpdateCheck == UpdateCheckRolling && len(p.Checksums) > 0 {
+	if p.UpdateCheck == UpdateCheckRolling && (len(p.Checksums) > 0 || (p.Fw6 != nil && len(p.Fw6.Checksums) > 0)) {
 		return fmt.Errorf(`update_check = "rolling" cannot be combined with checksums (a rolling tag's asset changes without a def edit)`)
 	}
 	return nil
@@ -712,6 +808,9 @@ func Save(path string, p *Package) error {
 	// Merge the [install] table the same way, so a hand-added package never grows
 	// an empty [install] and a future unknown key inside it survives (§12.2).
 	setInstall(m, p.Install, false)
+	if p.Fw6 != nil {
+		m["fw6"] = p.Fw6
+	}
 
 	// Merge the [uninstall] table: overlay only non-zero known fields onto any
 	// existing (possibly unknown-key-bearing) table; never inject empty keys.
@@ -741,7 +840,7 @@ func Save(path string, p *Package) error {
 // Deleting "install" wholesale via knownTopKeys would have destroyed those
 // unknown keys.
 var (
-	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums"}
+	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums", "fw6"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
 	knownInstallKeys   = []string{"method", "root", "dest", "launcher"}
 )
@@ -774,6 +873,9 @@ func SaveReplace(path string, p *Package) error {
 	setOptional(m, "update_check", p.UpdateCheck)
 	setOptionalSlice(m, "conflicts", p.Conflicts)
 	setOptionalMap(m, "checksums", p.Checksums)
+	if p.Fw6 != nil {
+		m["fw6"] = p.Fw6
+	}
 
 	// Clear known [install] keys, overlay: an [install] block a registry dropped
 	// disappears locally, unknown keys inside it survive (§12.2).

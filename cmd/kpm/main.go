@@ -286,9 +286,26 @@ func newApp(mutating bool) (*App, error) {
 	a.locked = true
 	a.startLockHeartbeat()
 
+	// The firmware-change check wraps reconcile (QT6-FIRMWARE6.md section 3f).
+	// See firmware.go for why each half is on its side.
+	oldFw, curFw, fwChanged := a.firmwareChange()
+	if fwChanged {
+		a.dropOldLineStaged(oldFw)
+	}
 	if err := a.reconcile(); err != nil {
 		a.releaseLock()
 		return nil, err
+	}
+	if curFw != "" && curFw != oldFw {
+		if fwChanged {
+			a.forgetWipedInstalls()
+			a.syncForLine()
+		}
+		a.state.Firmware = curFw
+		if err := a.state.Save(); err != nil {
+			a.releaseLock()
+			return nil, err
+		}
 	}
 	if err := a.seedSelf(); err != nil {
 		a.releaseLock()

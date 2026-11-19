@@ -97,6 +97,10 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   bool selfUnenrolled = pkg.value("is_self").toBool() && !pkg.value("self_configured").toBool();
   // min_kpm gate (§2.1): don't offer an Install/Update kpm itself would refuse.
   bool minKpmOk = pkg.value("min_kpm_ok").toBool(true);
+  // Firmware line gate (QT6-FIRMWARE6.md section 3c rule 9): a package with no
+  // build for the firmware of the device gets its reason in place of Install. An
+  // older kpm does not send the field, so the default is available.
+  bool available = pkg.value("available").toBool(true);
   // install_method (APP-TREE.md §11.1) and kind (fonts plan §3.7) are closed-set
   // strings, never null, and they change copy only — which action verb the button
   // carries, how long the wait is described, whether an uninstall promises a reboot,
@@ -330,6 +334,12 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   } else if (!minKpmOk) {
     layout->addWidget(
         new Label(Label::Medium, "Requires kpm >= " + pkg.value("min_kpm").toString() + " — update kpm first."));
+    if (!installed.isEmpty() && uninstallable && !isKpm) {
+      addActionButton("Uninstall", SLOT(uninstall()));
+    }
+  } else if (!available) {
+    layout->addWidget(
+        new Label(Label::Medium, "Not available: " + pkg.value("unavailable_reason").toString() + "."));
     if (!installed.isEmpty() && uninstallable && !isKpm) {
       addActionButton("Uninstall", SLOT(uninstall()));
     }

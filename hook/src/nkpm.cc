@@ -22,6 +22,7 @@
 #include "browsedialog.h"
 #include "files.h"
 #include "nkpm.h"
+#include "seed.h"
 
 // ---- shared Nickel symbols (definitions for nkpm.h) ---------------------
 
@@ -79,7 +80,7 @@ TouchLineEdit *construct_TouchLineEdit(QWidget *parent) {
 
 TouchLabel *construct_TouchLabel(QWidget *parent) {
   TouchLabel *label = reinterpret_cast<TouchLabel *>(calloc(1, 1024));
-  TouchLabel__constructor(label, parent, 0);
+  TouchLabel__constructor(label, parent, Qt::WindowFlags());
   return label;
 }
 
@@ -154,6 +155,23 @@ static int nkpm_init() {
 
 // ---- NickelHook registration --------------------------------------------
 
+// The NickelHook fork (qt6-support) calls this weak hidden symbol in its
+// uninstall path. Without a definition, the call resolves to a bad address and
+// every uninstall crashes before nkpm_uninstall runs. kpm has no resources.c,
+// so define it here. It does nothing.
+extern "C" __attribute__((visibility("hidden"))) void nh_resources_uninstalled(void) {}
+
+// nkpm_uninstall runs when the uninstall flag exists. NickelHook deletes only
+// the build that runs, so delete both builds and the seed folder of the dual
+// Kobo.tgz (QT6-FIRMWARE6.md section 3e). /mnt/onboard/.adds/kpm stays: the flag
+// removes the UI only.
+static bool nkpm_uninstall() {
+  unlink("/usr/local/Kobo/imageformats/libnkpm.so");
+  unlink("/usr/local/Kobo/imageformats/libnkpm-qt6.so");
+  nkpm_seed_remove(NKPM_SEED_DIR);
+  return true;
+}
+
 static struct nh_info NickelKPM = (struct nh_info){
     .name = "NickelKPM",
     .desc = "Graphical package browser for kpm",
@@ -222,4 +240,4 @@ static struct nh_dlsym NickelKPMDlsym[] = {
 };
 // clang-format on
 
-NickelHook(.init = nkpm_init, .info = &NickelKPM, .hook = NickelKPMHook, .dlsym = NickelKPMDlsym, .uninstall = nullptr);
+NickelHook(.init = nkpm_init, .info = &NickelKPM, .hook = NickelKPMHook, .dlsym = NickelKPMDlsym, .uninstall = nkpm_uninstall);

@@ -109,6 +109,10 @@ func HashDef(def *PackageDef) (string, error) {
 	// (APP-TREE.md §12.1). An all-zero table collapses to nil so a bare `[install]`
 	// hashes identically to omitting it, mirroring nilIfEmpty (A3).
 	norm.Install = normInstall(norm.Install)
+	// [fw6] is functional like [install]: it selects the asset of a 6.x device.
+	// Its tested_fw is advisory and registry-only, like the base tested_fw
+	// (QT6-FIRMWARE6.md section 3c).
+	norm.Fw6 = normFw6(norm.Fw6)
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(&norm); err != nil {
@@ -164,6 +168,27 @@ func normInstall(i *config.Install) *config.Install {
 	return i
 }
 
+// normFw6 returns a copy of the [fw6] table without its tested_fw and with
+// empty checksums collapsed to nil (A3).
+func normFw6(f *config.Fw6) *config.Fw6 {
+	f = f.Clone()
+	if f != nil {
+		f.TestedFw = ""
+		f.Checksums = nilIfEmptyMap(f.Checksums)
+	}
+	return f
+}
+
+// localFw6 is the [fw6] table as packages.d stores it: a deep copy without the
+// registry-only tested_fw.
+func localFw6(f *config.Fw6) *config.Fw6 {
+	f = f.Clone()
+	if f != nil {
+		f.TestedFw = ""
+	}
+	return f
+}
+
 // DefFromPackage projects a local package def onto the syncable payload, dropping
 // pin/registry/id so its hash can be compared against a registry def (§9.7).
 //
@@ -181,6 +206,7 @@ func DefFromPackage(p *config.Package) *PackageDef {
 		Conflicts:   p.Conflicts,
 		Checksums:   p.Checksums,
 		Install:     p.Install.Clone(),
+		Fw6:         localFw6(p.Fw6),
 		Uninstall:   p.Uninstall,
 		Configs:     p.Configs,
 	}
@@ -209,6 +235,7 @@ func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 		Conflicts:   d.Conflicts,
 		Checksums:   d.Checksums,
 		Install:     d.Install.Clone(), // deep copy — never share the pointer (§12.2)
+		Fw6:         localFw6(d.Fw6),
 		Uninstall:   d.Uninstall,
 		Configs:     d.Configs,
 	}
@@ -239,6 +266,11 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	ri, _ := HashDef(&PackageDef{Install: remote.Install})
 	if li != ri {
 		out = append(out, "install: (changed)")
+	}
+	lf, _ := HashDef(&PackageDef{Fw6: local.Fw6})
+	rf, _ := HashDef(&PackageDef{Fw6: remote.Fw6})
+	if lf != rf {
+		out = append(out, "fw6: (changed)")
 	}
 	lh, _ := HashDef(&PackageDef{Uninstall: local.Uninstall})
 	rh, _ := HashDef(&PackageDef{Uninstall: remote.Uninstall})
