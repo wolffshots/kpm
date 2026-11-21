@@ -180,6 +180,40 @@ func TestCheckKey(t *testing.T) {
 	}
 }
 
+// Keys come from both files (SSH.md section 3): no duplicates, a missing file
+// is not an error, and a key only in the shared file can log in.
+func TestLoadKeysBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	f := Files{Dir: filepath.Join(dir, "kpm", "ssh"), SharedKeys: filepath.Join(dir, "authorized_keys")}
+	if keys, bad, err := f.LoadKeys(); err != nil || len(keys) != 0 || len(bad) != 0 {
+		t.Fatalf("no files: %d keys, %v, %v", len(keys), bad, err)
+	}
+	s1, k1 := newKey(t)
+	s2, k2 := newKey(t)
+	os.MkdirAll(f.Dir, 0o755)
+	os.WriteFile(f.AuthorizedKeys(), []byte(k1), 0o644)
+	os.WriteFile(f.SharedKeys, []byte(k1+k2+"junk\n"), 0o644)
+	keys, bad, err := f.LoadKeys()
+	if err != nil || len(keys) != 2 || len(bad) != 1 || bad[0].File != f.SharedKeys || bad[0].Line != 3 {
+		t.Fatalf("keys %d bad %+v err %v; want 2 keys and line 3 of the shared file", len(keys), bad, err)
+	}
+
+	srv := &Server{Files: f, Log: &Logger{Path: filepath.Join(dir, "sshd.log")}}
+	for _, s := range []ssh.Signer{s1, s2} {
+		if _, err := srv.checkKey("root", s.PublicKey(), "10.0.0.3"); err != nil {
+			t.Errorf("key %s refused: %v", ssh.FingerprintSHA256(s.PublicKey()), err)
+		}
+	}
+	os.Remove(f.AuthorizedKeys())
+	if _, err := srv.checkKey("root", s2.PublicKey(), "10.0.0.3"); err != nil {
+		t.Errorf("shared key refused when kpm's own file is missing: %v", err)
+	}
+	log, _ := os.ReadFile(srv.Log.Path)
+	if !strings.Contains(string(log), f.SharedKeys+" line 3 skipped: not a public key") {
+		t.Errorf("bad line of the shared file not logged:\n%s", log)
+	}
+}
+
 func TestLimiter(t *testing.T) {
 	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
 	l := newLimiter(func() time.Time { return now })

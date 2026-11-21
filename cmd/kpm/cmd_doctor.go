@@ -13,7 +13,6 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/registry"
-	"kpm/internal/sshd"
 	"kpm/internal/state"
 	"kpm/internal/uninstall"
 )
@@ -117,7 +116,7 @@ func (a *App) cmdDoctor(args []string) int {
 	// packages shows it (SSH.md section 8).
 	var sshRow *jsonDoctorSSH
 	if len(pos) == 0 {
-		sshRow = sshDoctor(sshd.Files{Dir: a.paths.SSHDir()})
+		sshRow = sshDoctor(sshFiles(a.paths))
 	}
 
 	if jsonMode {

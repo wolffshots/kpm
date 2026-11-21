@@ -3,11 +3,16 @@
 // UI rules of nickel-ui-research-2026-11-17.md: the page is built once, before
 // its first show, and later statuses change label text in place. No style sheet
 // of Nickel is replaced: a bold name label adds to the Label sheet. kpm opens
-// from the home screen, which has no dark mode, so the page stays light.
+// from the home screen, which has no dark mode, so the page stays light. The eye
+// icon still has a dark variant: it follows a darkMode=true parent.
 
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QJsonArray>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QVBoxLayout>
 
 #include "kpmprocess.h"
@@ -25,14 +30,19 @@ SshPage::SshPage(QWidget *parent) : QWidget(parent) {
   grid->setColumnStretch(1, 1);
   enabledValue = addRow(grid, 0, "Enabled");
   statusValue = addRow(grid, 1, "Status");
-  addressValue = addRow(grid, 2, "Address");
+  // The IP address is hidden until the user taps the eye (SSH.md section 7).
+  eyeButton = construct_TouchLabel(this);
+  eyeButton->setObjectName("sshAddressEye");
+  eyeButton->setAlignment(Qt::AlignCenter);
+  addressValue = addRow(grid, 2, "Address", nullptr, eyeButton);
+  QObject::connect(eyeButton, SIGNAL(tapped(bool)), this, SLOT(toggleAddress()));
   hostKeyValue = addRow(grid, 3, "Host key");
   keysValue = addRow(grid, 4, "Keys");
   errorValue = addRow(grid, 5, "Last error", &errorName);
   errorValue->setWordWrap(true);
   v->addLayout(grid);
 
-  noKeyNote = new Label(Label::Small, "Add your public key to .adds/kpm/ssh/authorized_keys over USB.");
+  noKeyNote = new Label(Label::Small, "Add your public key to .adds/authorized_keys over USB.");
   noKeyNote->setWordWrap(true);
   noKeyNote->setStyleSheet(noKeyNote->styleSheet() + "\nLabel { font-weight: bold; }");
   v->addWidget(noKeyNote);
@@ -57,16 +67,113 @@ SshPage::SshPage(QWidget *parent) : QWidget(parent) {
   apply(QJsonObject());
 }
 
-Label *SshPage::addRow(QGridLayout *grid, int row, const QString &name, Label **nameOut) {
+// addRow adds a name and a value label. An extra widget goes right of the value.
+Label *SshPage::addRow(QGridLayout *grid, int row, const QString &name, Label **nameOut, QWidget *extra) {
   Label *n = new Label(Label::Small, name);
   if (nameOut != nullptr) {
     *nameOut = n;
   }
   n->setStyleSheet(n->styleSheet() + "\nLabel { font-weight: bold; }");
-  grid->addWidget(n, row, 0, Qt::AlignLeft | Qt::AlignTop);
   Label *value = new Label(Label::Small, ""); // Label is plain text
-  grid->addWidget(value, row, 1, Qt::AlignLeft | Qt::AlignTop);
+  if (extra == nullptr) {
+    grid->addWidget(n, row, 0, Qt::AlignLeft | Qt::AlignTop);
+    grid->addWidget(value, row, 1, Qt::AlignLeft | Qt::AlignTop);
+    return value;
+  }
+  grid->addWidget(n, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+  QHBoxLayout *h = new QHBoxLayout();
+  h->setContentsMargins(0, 0, 0, 0);
+  h->setSpacing(12);
+  h->addWidget(value, 0, Qt::AlignVCenter);
+  h->addWidget(extra, 0, Qt::AlignVCenter);
+  h->addStretch(1);
+  grid->addLayout(h, row, 1);
   return value;
+}
+
+// eyeIcon draws the eye of the Address row: open (tap to show) or crossed out
+// (tap to hide). The light variant is black and the dark variant is white. Each
+// variant is drawn in its own color, so no invertPixels() call is necessary (the
+// Qt 5.2 fault in nickel-ui-research-2026-11-17.md).
+static QPixmap eyeIcon(int size, bool crossed, bool dark) {
+  QImage img(size, size, QImage::Format_ARGB32);
+  img.fill(Qt::transparent);
+  QPainter p(&img);
+  p.setRenderHint(QPainter::Antialiasing);
+  QColor c = dark ? Qt::white : Qt::black;
+  qreal w = qMax<qreal>(2.0, size / 12.0);
+  p.setPen(QPen(c, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+  // The outline: two curves that meet at the corners of the eye.
+  qreal left = w, right = size - w, mid = size / 2.0, h = size * 0.3;
+  QPainterPath outline;
+  outline.moveTo(left, mid);
+  outline.quadTo(mid, mid - 2 * h, right, mid);
+  outline.quadTo(mid, mid + 2 * h, left, mid);
+  p.drawPath(outline);
+  p.setBrush(c);
+  p.drawEllipse(QPointF(mid, mid), size * 0.14, size * 0.14);
+
+  if (crossed) {
+    // Clear a gap along the line, then draw the line in it.
+    QLineF slash(size * 0.15, size * 0.85, size * 0.85, size * 0.15);
+    p.setCompositionMode(QPainter::CompositionMode_Clear);
+    p.setPen(QPen(Qt::transparent, 3 * w, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(slash);
+    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    p.setPen(QPen(c, w, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(slash);
+  }
+  p.end();
+  return QPixmap::fromImage(img);
+}
+
+// darkPage is true when a parent has the Nickel darkMode property set
+// (nickel-ui-research-2026-11-17.md, dark mode).
+bool SshPage::darkPage() const {
+  for (const QWidget *w = this; w != nullptr; w = w->parentWidget()) {
+    if (w->property("darkMode").toBool()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void SshPage::hideAddress() {
+  addressShown = false;
+  updateAddress();
+}
+
+void SshPage::toggleAddress() {
+  addressShown = !addressShown;
+  updateAddress();
+}
+
+void SshPage::showEvent(QShowEvent *event) {
+  QWidget::showEvent(event);
+  updateAddress(); // a parent can change darkMode while the page is hidden
+}
+
+// updateAddress sets the Address row text and the eye. It sets a new pixmap only
+// when the size or the variant changes, so a status refresh does not repaint the
+// icon.
+void SshPage::updateAddress() {
+  bool has = !address.isEmpty();
+  addressValue->setText(!has ? QString("No network address") : (addressShown ? address : QString("Hidden")));
+  eyeButton->setVisible(has);
+  if (!has) {
+    return;
+  }
+  addressValue->ensurePolished();
+  int size = qMax(24, addressValue->fontMetrics().height() * 6 / 5);
+  bool dark = darkPage();
+  int state = size * 4 + (addressShown ? 2 : 0) + (dark ? 1 : 0);
+  if (state == eyeState) {
+    return;
+  }
+  eyeState = state;
+  eyeButton->setFixedSize(size * 2, size + size / 2); // a larger tap area than the icon
+  eyeButton->setPixmap(eyeIcon(size, addressShown, dark));
 }
 
 void SshPage::load() {
@@ -115,7 +222,8 @@ void SshPage::apply(const QJsonObject &st) {
   if (user.isEmpty()) {
     user = "root";
   }
-  addressValue->setText(addrs.isEmpty() ? QString("No network address") : user + "@" + addrs.at(0).toString());
+  address = addrs.isEmpty() ? QString() : QString("%1@%2:%3").arg(user, addrs.at(0).toString()).arg(port);
+  updateAddress();
 
   QString fp = st.value("host_key").toString();
   hostKeyValue->setText(fp.isEmpty() ? QString("Made at the first start") : fp);

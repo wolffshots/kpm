@@ -48,8 +48,9 @@
 //                              place (flash-reduction win 4)
 //   --exercise-ssh <dir>       offscreen: drive the SSH tab (SSH.md section 7): the
 //                              no-key note, a reload after a key is added, Enable
-//                              (a real `kpm ssh serve` on 127.0.0.1), Disable; writes
-//                              ssh-nokey.png and ssh-running.png
+//                              (a real `kpm ssh serve` on 127.0.0.1), Disable, the
+//                              hidden address and its eye; writes ssh-nokey.png,
+//                              ssh-address.png and ssh-running.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -1989,7 +1990,7 @@ static void waitUntil(std::function<bool()> cond, int ms, std::function<void()> 
 static const char *kSimSSHPort = "52222";
 static const char *kSimSSHKey =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXjRvBuW0k5dGi1PmtqmH3A7quTrNfnBdqUmND7STII sim\n";
-static const char *kSimNoKeyNote = "Add your public key to .adds/kpm/ssh/authorized_keys over USB.";
+static const char *kSimNoKeyNote = "Add your public key to .adds/authorized_keys over USB.";
 
 static QString sshDir() { return QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.adds/kpm/ssh"; }
 
@@ -2006,11 +2007,60 @@ static bool visibleLabel(QWidget *root, const QString &text) {
 }
 
 static void writeSandboxFile(const QString &path, const QByteArray &data) {
-  QDir().mkpath(sshDir());
+  QDir().mkpath(QFileInfo(path).absolutePath());
   QFile f(path);
   f.open(QIODevice::WriteOnly);
   f.write(data);
   f.close();
+}
+
+// eyePixels counts the opaque dark and light pixels of the eye icon.
+static void eyePixels(QLabel *eye, int *dark, int *light) {
+  QImage img = eye->pixmap(Qt::ReturnByValue).toImage().convertToFormat(QImage::Format_ARGB32);
+  *dark = *light = 0;
+  for (int y = 0; y < img.height(); ++y) {
+    for (int x = 0; x < img.width(); ++x) {
+      QRgb px = img.pixel(x, y);
+      if (qAlpha(px) < 200) continue;
+      if (qGray(px) < 60) ++*dark;
+      if (qGray(px) > 200) ++*light;
+    }
+  }
+}
+
+// checkAddress drives the eye of the Address row (SSH.md section 7): hidden by
+// default, a tap shows root@<ip>:<port>, a second tap hides it. The icon changes
+// with each tap, and it is white under a darkMode=true parent. It returns the
+// faults, or an empty string.
+static QString checkAddress(SshPage *page, const QString &port, const QString &dir) {
+  QLabel *eye = page->findChild<QLabel *>("sshAddressEye");
+  if (eye == nullptr || !eye->isVisible()) return "no eye icon; ";
+  if (!visibleLabel(page, "Hidden")) return "the address is not hidden; ";
+  QString why;
+  qint64 openKey = eye->pixmap(Qt::ReturnByValue).cacheKey();
+  int dark = 0, light = 0;
+  eyePixels(eye, &dark, &light);
+  if (dark == 0 || light != 0) why += "the light eye is not black; ";
+  sendClick(eye);
+  QLabel *shown = labelContaining(page, "root@");
+  if (shown == nullptr || !shown->isVisible() || !shown->text().endsWith(":" + port)) {
+    why += "a tap did not show root@<ip>:" + port + "; ";
+  } else {
+    qApp->processEvents(); // the layout runs before the next paint
+    if (shown->width() < shown->sizeHint().width()) why += "the shown address is clipped; ";
+    if (!dir.isEmpty()) saveGrab(dir + "/ssh-address.png");
+  }
+  if (eye->pixmap(Qt::ReturnByValue).cacheKey() == openKey) why += "the icon did not change; ";
+  sendClick(eye);
+  if (!visibleLabel(page, "Hidden") || labelContaining(page, "root@") != nullptr) why += "a second tap did not hide it; ";
+
+  page->setProperty("darkMode", true);
+  page->hideAddress();
+  eyePixels(eye, &dark, &light);
+  if (light == 0 || dark != 0) why += "the dark eye is not white; ";
+  page->setProperty("darkMode", false);
+  page->hideAddress();
+  return why;
 }
 
 // Step 4: Disable stops the server and turns ssh off at boot.
@@ -2054,7 +2104,9 @@ static void sshStepEnable(SshPage *page, const QString &dir) {
 // Step 2: the user adds a key over USB. The tab reads the status again on open.
 static void sshStepKey(BrowseDialog *browse, SshPage *page, QLabel *sshTab, QLabel *modsTab, const QString &dir) {
   (void)browse;
-  writeSandboxFile(sshDir() + "/authorized_keys", kSimSSHKey);
+  // The key goes into the shared file that kpm only reads (SSH.md section 3).
+  writeSandboxFile(QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.adds/authorized_keys", kSimSSHKey);
+  sendClick(page->findChild<QLabel *>("sshAddressEye")); // shown when the user leaves the tab
   writeSandboxFile(sshDir() + "/config.toml",
                    QByteArray("enabled = false\nport = ") + kSimSSHPort + "\nlisten = \"127.0.0.1\"\n");
   sendClick(modsTab);
@@ -2068,6 +2120,12 @@ static void sshStepKey(BrowseDialog *browse, SshPage *page, QLabel *sshTab, QLab
               if (!visibleLabel(page, "Enable") || !visibleLabel(page, "Restart") ||
                   visibleLabel(page, kSimNoKeyNote) || !visibleLabel(page, "Off")) {
                 sshFail(8, "with a key: no Enable or Restart, or the note still shows");
+                return;
+              }
+              // The address shown before the user left the tab is hidden again.
+              QString why = checkAddress(page, kSimSSHPort, QString());
+              if (!why.isEmpty()) {
+                sshFail(16, "after the reopen: " + why);
                 return;
               }
               sshStepEnable(page, dir);
@@ -2104,6 +2162,7 @@ static void runExerciseSsh(const QString &dir) {
                     if (!visibleLabel(page, "Stopped")) why += "Status row is not 'Stopped'; ";
                     if (!visibleLabel(page, kSimNoKeyNote)) why += "no-key note missing; ";
                     if (visibleLabel(page, "Enable") || visibleLabel(page, "Restart")) why += "buttons show with no key; ";
+                    if (why.isEmpty()) why += checkAddress(page, "22", dir);
                     if (!why.isEmpty()) {
                       sshFail(6, why);
                       return;

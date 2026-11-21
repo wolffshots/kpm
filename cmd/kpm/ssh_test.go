@@ -27,7 +27,7 @@ func sshSandbox(t *testing.T) sshd.Files {
 	old := sshAddrs
 	sshAddrs = func() []string { return []string{"192.168.88.132"} }
 	t.Cleanup(func() { sshAddrs = old })
-	return sshd.Files{Dir: device.New().SSHDir()}
+	return sshFiles(device.New())
 }
 
 func pubKeyLine(t *testing.T) string {
@@ -143,8 +143,8 @@ func TestSSHStartRefusesWithoutKey(t *testing.T) {
 	runSSH(t, "install")
 	for _, cmd := range []string{"start", "enable"} {
 		code, _, errOut := runSSH(t, cmd)
-		if code != exitError || !strings.Contains(errOut, f.AuthorizedKeys()) {
-			t.Errorf("%s: exit %d, stderr %q; want exit 1 that names authorized_keys", cmd, code, errOut)
+		if code != exitError || !strings.Contains(errOut, f.AuthorizedKeys()) || !strings.Contains(errOut, f.SharedKeys) {
+			t.Errorf("%s: exit %d, stderr %q; want exit 1 that names both authorized_keys files", cmd, code, errOut)
 		}
 	}
 	// A refused enable does not turn ssh on at boot.
@@ -183,7 +183,7 @@ func TestSSHUsage(t *testing.T) {
 // is a problem.
 func TestDoctorSSHRow(t *testing.T) {
 	a := newTestApp(t)
-	f := sshd.Files{Dir: a.paths.SSHDir()}
+	f := sshFiles(a.paths)
 	os.MkdirAll(f.Dir, 0o755)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -208,5 +208,32 @@ func TestDoctorSSHRow(t *testing.T) {
 	human := captureStdout(t, func() { a.cmdDoctor(nil) })
 	if !strings.Contains(human, "ssh: enabled, stopped, port "+strconv.Itoa(port)+" closed") {
 		t.Errorf("human doctor has no ssh row:\n%s", human)
+	}
+}
+
+// A key in the shared file .adds/authorized_keys counts (SSH.md section 3),
+// and kpm never writes that file.
+func TestSSHSharedKeyFile(t *testing.T) {
+	f := sshSandbox(t)
+	if f.SharedKeys != filepath.Join(os.Getenv("KPM_ROOT"), ".adds", "authorized_keys") {
+		t.Fatalf("shared key file %q", f.SharedKeys)
+	}
+	shared := pubKeyLine(t)
+	os.MkdirAll(filepath.Dir(f.SharedKeys), 0o755)
+	os.WriteFile(f.SharedKeys, []byte(shared+"bad line\n"), 0o644)
+	if !requireKeys(f, "start") {
+		t.Fatal("a key in the shared file was not enough")
+	}
+	keys := filepath.Join(t.TempDir(), "id.pub")
+	os.WriteFile(keys, []byte(shared+pubKeyLine(t)), 0o644)
+	runSSH(t, "install", "--keys", keys)
+	if b, _ := os.ReadFile(f.SharedKeys); string(b) != shared+"bad line\n" {
+		t.Fatalf("kpm wrote the shared key file: %q", b)
+	}
+	_, out, _ := runSSH(t, "status", "--json")
+	m := decodeJSON(t, lastJSON(t, out))
+	// The shared key is in both files: it counts once.
+	if m["keys"] != float64(2) || m["bad_key_lines"] != float64(1) {
+		t.Errorf("keys %v bad_key_lines %v, want 2 and 1", m["keys"], m["bad_key_lines"])
 	}
 }

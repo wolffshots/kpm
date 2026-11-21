@@ -526,6 +526,7 @@ void BrowseDialog::showSshTab() {
     return;
   }
   sshSelected = true;
+  sshPage->hideAddress(); // hidden again each time the tab opens (SSH.md section 7)
   sshPage->load();
 }
 

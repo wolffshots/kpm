@@ -104,6 +104,12 @@ func (p Paths) RegistryCache(name string) string {
 // SSHDir holds the state of `kpm ssh` (SSH.md section 3). The uninstall keeps it.
 func (p Paths) SSHDir() string { return filepath.Join(p.AddsKpm(), "ssh") }
 
+// SharedAuthorizedKeys is .adds/authorized_keys, the key file that other Kobo
+// SSH mods use. `kpm ssh` reads it and never writes it (SSH.md section 3).
+func (p Paths) SharedAuthorizedKeys() string {
+	return filepath.Join(p.Root, ".adds", "authorized_keys")
+}
+
 // LockFile is the single-instance lock (B1).
 func (p Paths) LockFile() string { return filepath.Join(p.AddsKpm(), "lock") }
 

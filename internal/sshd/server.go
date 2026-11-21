@@ -41,7 +41,7 @@ type Server struct {
 	conns     map[*ssh.ServerConn]struct{}
 	sessions  map[*session]struct{}
 	handlers  sync.WaitGroup
-	keysStamp time.Time // mtime of authorized_keys when its bad lines were last logged
+	keysStamp string // mtimes of the key files when their bad lines were last logged
 }
 
 func (s *Server) shell() string {
@@ -217,8 +217,9 @@ func (s *Server) handleConn(c net.Conn, ip string) {
 	s.Log.Printf(LevelInfo, "logout %s", ip)
 }
 
-// checkKey is the public key check (SSH.md section 6). It reads authorized_keys
-// again at each login, so a new key works without a restart.
+// checkKey is the public key check (SSH.md section 6). It reads both
+// authorized_keys files again at each login, so a new key works without a
+// restart.
 func (s *Server) checkKey(user string, key ssh.PublicKey, ip string) (*ssh.Permissions, error) {
 	fp := ssh.FingerprintSHA256(key)
 	if user != "root" {
@@ -227,40 +228,41 @@ func (s *Server) checkKey(user string, key ssh.PublicKey, ip string) (*ssh.Permi
 	}
 	keys, err := s.loadKeys()
 	if err != nil {
-		s.Log.Printf(LevelError, "read %s: %v", s.Files.AuthorizedKeys(), err)
-		return nil, errRefused
+		s.Log.Printf(LevelError, "read keys: %v", err)
 	}
 	if hasKey(keys, key) {
 		return &ssh.Permissions{Extensions: map[string]string{extFingerprint: fp}}, nil
 	}
-	s.Log.Printf(LevelWarn, "refused key %s for root from %s: not in authorized_keys", fp, ip)
+	s.Log.Printf(LevelWarn, "refused key %s for root from %s: not in an authorized_keys file", fp, ip)
 	return nil, errRefused
 }
 
-// loadKeys reads authorized_keys and logs its bad lines once for each change of
-// the file.
+// loadKeys reads both key files and logs their bad lines once for each change
+// of the files.
 func (s *Server) loadKeys() ([]ssh.PublicKey, error) {
-	keys, bad, err := LoadAuthorizedKeys(s.Files.AuthorizedKeys())
-	if err != nil || len(bad) == 0 {
-		return keys, err
+	keys, bad, err := s.Files.LoadKeys()
+	if len(bad) > 0 {
+		s.LogBadLines(bad)
 	}
-	s.LogBadLines(bad)
-	return keys, nil
+	return keys, err
 }
 
-// LogBadLines logs the skipped lines of authorized_keys, once for each version
-// of the file.
+// LogBadLines logs the skipped lines of the key files, once for each version of
+// the files.
 func (s *Server) LogBadLines(bad []BadLine) {
-	stamp := fileStamp(s.Files.AuthorizedKeys())
+	stamp := ""
+	for _, path := range s.Files.KeyFiles() {
+		stamp += fileStamp(path).String() + "|"
+	}
 	s.mu.Lock()
-	seen := !stamp.IsZero() && stamp.Equal(s.keysStamp)
+	seen := stamp == s.keysStamp
 	s.keysStamp = stamp
 	s.mu.Unlock()
 	if seen {
 		return
 	}
 	for _, b := range bad {
-		s.Log.Printf(LevelWarn, "authorized_keys line %d skipped: %s", b.Line, b.Reason)
+		s.Log.Printf(LevelWarn, "%s line %d skipped: %s", b.File, b.Line, b.Reason)
 	}
 }
 

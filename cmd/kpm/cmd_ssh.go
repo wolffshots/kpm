@@ -32,6 +32,17 @@ const sshUsage = `usage: kpm ssh <command>
   status [--json]                      show the server state
 `
 
+// sshFiles names the files of kpm ssh: the state folder and the shared key file
+// .adds/authorized_keys (SSH.md section 3).
+func sshFiles(p device.Paths) sshd.Files {
+	return sshd.Files{Dir: p.SSHDir(), SharedKeys: p.SharedAuthorizedKeys()}
+}
+
+// keyFilesText names both key files for a message.
+func keyFilesText(f sshd.Files) string {
+	return strings.Join(f.KeyFiles(), " or ")
+}
+
 // sshAddrs lists the IPv4 addresses of the device. Tests replace it.
 var sshAddrs = deviceAddrs
 
@@ -50,7 +61,7 @@ func cmdSSH(args []string) int {
 		fmt.Fprint(os.Stderr, sshUsage)
 		return exitError
 	}
-	f := sshd.Files{Dir: device.New().SSHDir()}
+	f := sshFiles(device.New())
 	sub, rest := args[0], args[1:]
 	flags, pos := splitArgs(rest, map[string]bool{"keys": true, "port": true})
 	flags, jsonMode := takeJSON(flags)
@@ -160,23 +171,24 @@ func sshInstallCmd(f sshd.Files, keysFile string, port int) int {
 		return exitError
 	}
 	cfg, _, _ := sshd.LoadConfig(f.Config())
-	keys, _, _ := sshd.LoadAuthorizedKeys(f.AuthorizedKeys())
+	keys, _, _ := f.LoadKeys()
 	fmt.Printf("ssh installed in %s\nhost key: %s\nport: %d\nkeys: %d\n", f.Dir, sshd.HostKeyFingerprint(f.HostKey()), cfg.Port, len(keys))
 	if len(keys) == 0 {
-		fmt.Printf("Add your public key to %s, then run: kpm ssh enable\n", f.AuthorizedKeys())
+		fmt.Printf("Add your public key to %s, then run: kpm ssh enable\n", keyFilesText(f))
 	}
 	return exitOK
 }
 
-// requireKeys refuses when authorized_keys has no valid key (SSH.md section 4).
+// requireKeys refuses when neither authorized_keys file has a valid key
+// (SSH.md section 4). An unreadable file is reported, but a key in the other
+// file is enough.
 func requireKeys(f sshd.Files, cmd string) bool {
-	keys, _, err := sshd.LoadAuthorizedKeys(f.AuthorizedKeys())
+	keys, _, err := f.LoadKeys()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kpm ssh %s: %v\n", cmd, err)
-		return false
 	}
 	if len(keys) == 0 {
-		fmt.Fprintf(os.Stderr, "kpm ssh %s: no valid public key in %s; add your key there first\n", cmd, f.AuthorizedKeys())
+		fmt.Fprintf(os.Stderr, "kpm ssh %s: no valid public key in %s; add your key there first\n", cmd, keyFilesText(f))
 		return false
 	}
 	return true
@@ -364,7 +376,7 @@ func sshServe(f sshd.Files) int {
 		return exitError
 	}
 	srv := &sshd.Server{Files: f, Log: logger, Env: []string{"PATH=" + sshd.DefaultPath}}
-	if _, bad, err := sshd.LoadAuthorizedKeys(f.AuthorizedKeys()); err == nil && len(bad) > 0 {
+	if _, bad, _ := f.LoadKeys(); len(bad) > 0 {
 		srv.LogBadLines(bad)
 	}
 	signal.Ignore(syscall.SIGHUP)
@@ -402,10 +414,8 @@ func sshStatus(f sshd.Files) (jsonSSHStatus, error) {
 	if err != nil {
 		return jsonSSHStatus{}, err
 	}
-	keys, bad, err := sshd.LoadAuthorizedKeys(f.AuthorizedKeys())
-	if err != nil {
-		return jsonSSHStatus{}, err
-	}
+	// An unreadable key file counts no keys. requireKeys reports it on start.
+	keys, bad, _ := f.LoadKeys()
 	st := jsonSSHStatus{
 		Installed:   exists,
 		Enabled:     cfg.Enabled,
@@ -456,9 +466,9 @@ func sshStatusCmd(f sshd.Files, jsonMode bool) int {
 	if st.HostKey != nil {
 		fmt.Printf("host key:  %s\n", *st.HostKey)
 	}
-	fmt.Printf("keys:      %d in %s\n", st.Keys, f.AuthorizedKeys())
+	fmt.Printf("keys:      %d in %s\n", st.Keys, strings.Join(f.KeyFiles(), " and "))
 	if st.BadKeyLines > 0 {
-		fmt.Printf("skipped:   %d bad line(s) in authorized_keys\n", st.BadKeyLines)
+		fmt.Printf("skipped:   %d bad line(s) in the authorized_keys files\n", st.BadKeyLines)
 	}
 	if st.LastError != nil {
 		fmt.Printf("last error: %s\n", *st.LastError)

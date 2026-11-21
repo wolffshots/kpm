@@ -24,6 +24,10 @@ public:
   // then, so the first show is the full page (no "Loading" frame).
   void load();
 
+  // hideAddress hides the IP address of the Address row again (SSH.md
+  // section 7). BrowseDialog calls it each time the tab opens.
+  void hideAddress();
+
 Q_SIGNALS:
   void loaded();
 
@@ -33,10 +37,17 @@ public Q_SLOTS:
   void onStatus(int exitCode, QJsonObject payload);
   void onActionDone(int exitCode, QJsonObject payload);
   void onFailure(QString reason);
+  void toggleAddress();
+
+protected:
+  void showEvent(QShowEvent *event) override;
 
 private:
-  Label *addRow(QGridLayout *grid, int row, const QString &name, Label **nameOut = nullptr);
+  Label *addRow(QGridLayout *grid, int row, const QString &name, Label **nameOut = nullptr,
+                QWidget *extra = nullptr);
   void apply(const QJsonObject &status);
+  void updateAddress();
+  bool darkPage() const;
   void setBusy(bool busy);
 
   Label *enabledValue = nullptr;
@@ -47,9 +58,13 @@ private:
   Label *errorName = nullptr;
   Label *errorValue = nullptr;
   Label *noKeyNote = nullptr;
+  TouchLabel *eyeButton = nullptr;
   N3ButtonLabel *toggleButton = nullptr;
   N3ButtonLabel *restartButton = nullptr;
 
+  QString address; // root@<ip>:<port>, or empty when the device has no address
+  bool addressShown = false;
+  int eyeState = -1; // the size and variant of the eye pixmap on screen
   bool enabled = false;
   bool busy = false;
 };

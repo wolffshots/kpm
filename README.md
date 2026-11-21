@@ -642,15 +642,15 @@ kpm has a built-in SSH server for root logins (`kpm ssh`, kpm 0.14.0). It works 
 Set it up:
 
 1. Run `kpm ssh install` once, or open the **SSH** tab of the package manager. kpm makes `.adds/kpm/ssh/`.
-2. Connect the Kobo over USB. Add your public key to `.adds/kpm/ssh/authorized_keys`, one OpenSSH key per line (for example the line of `id_ed25519.pub`).
+2. Connect the Kobo over USB. Add your public key to `.adds/authorized_keys`, one OpenSSH key per line (for example the line of `id_ed25519.pub`). Other Kobo SSH mods read this file too. `.adds/kpm/ssh/authorized_keys` also works.
 3. Tap **Enable** on the SSH tab, or run `kpm ssh enable`. The server starts now and at each boot.
-4. Log in with `ssh root@<device address>`. The SSH tab shows the address and the host key fingerprint.
+4. Log in with `ssh root@<device address>`. On the SSH tab, tap the eye icon to show the address. The tab hides it again each time it opens, so it is not on a screenshot. The tab also shows the host key fingerprint.
 
 How it works:
 
 - The server is the kpm binary itself (`kpm ssh serve`, in Go). It needs no other file on the device.
 - The kpm hook starts it at boot when `.adds/kpm/ssh/config.toml` has `enabled = true`. It keeps running when Nickel restarts.
-- It accepts public keys of `authorized_keys` only, for the user `root`. No password login. It reads the file again at each login, so a new key works at once.
+- It accepts the public keys of `.adds/authorized_keys` and `.adds/kpm/ssh/authorized_keys` only, for the user `root`. No password login. It reads both files again at each login, so a new key works at once. kpm never writes `.adds/authorized_keys`. `kpm ssh install --keys` writes to `.adds/kpm/ssh/authorized_keys`.
 - A key line with options (`from=`, `command=` and others) is skipped and logged: kpm cannot apply the options.
 - You get a shell with a PTY, commands without a PTY (`ssh kobo 'cmd'`), and `sftp`. OpenSSH `scp` uses sftp, so it works. The old scp protocol (`scp -O`) does not.
 - Port forwarding, agent forwarding and X11 are refused.
@@ -660,7 +660,7 @@ How it works:
 
 Next to NiLuJe usbnet: NiLuJe Dropbear holds port 22, so `kpm ssh start` refuses port 22 while it runs. Use `kpm ssh enable --port 2222` first. When kpm ssh works, turn off NiLuJe SSH with its NickelMenu item "Disable Niluje SSH and Telnet", then run `kpm ssh enable --port 22`.
 
-Security: the user partition is FAT, so these files have no Unix permissions. A person with USB access to the Kobo can add a key to `authorized_keys`. That person can already install a `KoboRoot.tgz` that runs as root, so kpm ssh gives them no new access.
+Security: the user partition is FAT, so these files have no Unix permissions. A person with USB access to the Kobo can add a key to a key file. That person can already install a `KoboRoot.tgz` that runs as root, so kpm ssh gives them no new access.
 
 Uninstall: the UI uninstall flag (`kpm_ui_uninstall`) stops the server. The folder `.adds/kpm/ssh/` stays, with your keys and the host key, so a new install keeps the same host key.
 

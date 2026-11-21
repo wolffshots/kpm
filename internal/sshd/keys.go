@@ -17,9 +17,10 @@ import (
 	"kpm/internal/device"
 )
 
-// BadLine is a line of authorized_keys that kpm skipped.
+// BadLine is a line of an authorized_keys file that kpm skipped.
 type BadLine struct {
-	Line   int // 1-based line number
+	File   string // the path, set by LoadAuthorizedKeys
+	Line   int    // 1-based line number
 	Reason string
 }
 
@@ -60,7 +61,34 @@ func LoadAuthorizedKeys(path string) ([]ssh.PublicKey, []BadLine, error) {
 		return nil, nil, err
 	}
 	keys, bad := ParseAuthorizedKeys(b)
+	for i := range bad {
+		bad[i].File = path
+	}
 	return keys, bad, nil
+}
+
+// LoadKeys reads each file of KeyFiles and returns their keys without
+// duplicates. A missing file is not an error. An unreadable file is: its error
+// is returned with the keys of the other file, so one bad file does not lock
+// out a key of the other.
+func (f Files) LoadKeys() ([]ssh.PublicKey, []BadLine, error) {
+	var keys []ssh.PublicKey
+	var bad []BadLine
+	var errs []error
+	for _, path := range f.KeyFiles() {
+		k, b, err := LoadAuthorizedKeys(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		bad = append(bad, b...)
+		for _, key := range k {
+			if !hasKey(keys, key) {
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys, bad, errors.Join(errs...)
 }
 
 // hasKey reports whether keys has k.
