@@ -39,6 +39,14 @@ public:
   static KpmProcess *sync();                        // kpm sync --json (mutating; no network — reads the registry cache)
   static KpmProcess *adoptSelf();                   // kpm adopt-self --json (network, mutating; enrols kpm's self-update)
 
+  // The SSH tab (SSH.md section 7). None needs the network or takes kpm's lock,
+  // so none rides the mutating guard: SshPage keeps its own busy state. enable,
+  // disable and restart have no --json mode (expectsPayload=false).
+  static KpmProcess *sshStatus();  // kpm ssh status --json
+  static KpmProcess *sshEnable();  // kpm ssh enable
+  static KpmProcess *sshDisable(); // kpm ssh disable
+  static KpmProcess *sshRestart(); // kpm ssh restart
+
   // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
   // are read-only offline reads (no lock, no network); set is mutating (rides the
   // single-instance lock) but never touches the network — configs are local files.

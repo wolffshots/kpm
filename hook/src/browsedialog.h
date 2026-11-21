@@ -15,6 +15,7 @@
 
 class DetailDialog;
 class QVBoxLayout;
+class SshPage;
 
 class BrowseDialog : public Dialog {
   Q_OBJECT
@@ -47,6 +48,10 @@ public Q_SLOTS:
   void showModsTab();
   void showFontsTab();
   void showDictsTab();
+  // The SSH tab (SSH.md section 7) is a page of its own, not a filter: the
+  // switch waits for its status, then swaps the page in one paint.
+  void showSshTab();
+  void onSshLoaded();
 
 private:
   BrowseDialog();
@@ -80,6 +85,8 @@ private:
   // selectTab switches which `kind` the list shows; styleTabs marks the active one
   // (§3.8). emptyStateText words the status line for a tab with no rows.
   void selectTab(const QString &kind);
+  // showListPage swaps between the package list and the SSH page.
+  void showListPage(bool list);
   void styleTabs();
   QString emptyStateText() const;
   // addPageOneChrome draws the global page-1 banners (staged, skips, stale hint)
@@ -91,6 +98,8 @@ private:
   N3ButtonLabel *modsTab = nullptr;
   N3ButtonLabel *fontsTab = nullptr;
   N3ButtonLabel *dictsTab = nullptr;
+  N3ButtonLabel *sshTab = nullptr;
+  SshPage *sshPage = nullptr;
   N3ButtonLabel *refreshButton = nullptr;
   N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;
@@ -104,6 +113,9 @@ private:
   // the field's own default for every package with no content destination, so it is
   // also where a payload with no `kind` at all lands.
   QString activeKind = QStringLiteral("mod");
+  // sshSelected is true from a tap on the SSH tab until a tap on a list tab.
+  // activeKind keeps the list tab, so a list render meanwhile stays correct.
+  bool sshSelected = false;
   // Packages the last action deliberately did not act on (INTEGRITY.md §6.4's
   // `skipped`). Rendered on page 1 until the next action replaces or clears it:
   // a skip is neither a failure nor a success, and silence is the one thing it

@@ -46,6 +46,10 @@
 //   --exercise-rowrepaint      offscreen: drive an uninstall, then assert the row
 //                              widgets SURVIVED and the acted-on row repainted in
 //                              place (flash-reduction win 4)
+//   --exercise-ssh <dir>       offscreen: drive the SSH tab (SSH.md section 7): the
+//                              no-key note, a reload after a key is added, Enable
+//                              (a real `kpm ssh serve` on 127.0.0.1), Disable; writes
+//                              ssh-nokey.png and ssh-running.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -78,6 +82,7 @@
 #include "configdialog.h"
 #include "detaildialog.h"
 #include "nickelstub.h"
+#include "sshpage.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
 #include "widgets/pagedstack.h"
@@ -1957,6 +1962,160 @@ static void runExerciseTabs(const QString &dir) {
       });
 }
 
+// ---- --exercise-ssh (SSH.md section 7) ---------------------------------
+//
+// The SSH tab against the real kpm: `kpm ssh status --json` fills the page, and
+// Enable runs a real `kpm ssh serve` in the sandbox on 127.0.0.1:52222 (the
+// sandbox sets KPM_ROOT, so serve mounts nothing). Disable stops it again.
+
+// waitUntil polls cond every 100 ms, then calls onReady, or onTimeout after ms.
+static void waitUntil(std::function<bool()> cond, int ms, std::function<void()> onReady,
+                      std::function<void()> onTimeout) {
+  QTimer *timer = new QTimer(qApp);
+  int *elapsed = new int(0);
+  QObject::connect(timer, &QTimer::timeout, qApp, [=]() {
+    *elapsed += 100;
+    if (cond()) {
+      timer->stop();
+      onReady();
+    } else if (*elapsed > ms) {
+      timer->stop();
+      onTimeout();
+    }
+  });
+  timer->start(100);
+}
+
+static const char *kSimSSHPort = "52222";
+static const char *kSimSSHKey =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXjRvBuW0k5dGi1PmtqmH3A7quTrNfnBdqUmND7STII sim\n";
+static const char *kSimNoKeyNote = "Add your public key to .adds/kpm/ssh/authorized_keys over USB.";
+
+static QString sshDir() { return QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.adds/kpm/ssh"; }
+
+static void sshFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim ssh: FAIL (%d): %s\n", code, qPrintable(why));
+  // Never leave a server behind in the sandbox.
+  QProcess::execute(QString::fromLocal8Bit(qgetenv("NKPM_KPM")), QStringList{"ssh", "stop"});
+  qApp->exit(code);
+}
+
+static bool visibleLabel(QWidget *root, const QString &text) {
+  QLabel *l = labelIn(root, text);
+  return l != nullptr && l->isVisible();
+}
+
+static void writeSandboxFile(const QString &path, const QByteArray &data) {
+  QDir().mkpath(sshDir());
+  QFile f(path);
+  f.open(QIODevice::WriteOnly);
+  f.write(data);
+  f.close();
+}
+
+// Step 4: Disable stops the server and turns ssh off at boot.
+static void sshStepDisable(SshPage *page) {
+  sendClick(labelIn(page, "Disable"));
+  waitUntil([page]() { return visibleLabel(page, "Stopped") && visibleLabel(page, "Off"); }, 15000,
+            []() {
+              QFile cfg(sshDir() + "/config.toml");
+              cfg.open(QIODevice::ReadOnly);
+              bool off = cfg.readAll().contains("enabled = false");
+              if (!off || QFile::exists(sshDir() + "/sshd.pid")) {
+                sshFail(11, "after Disable: config still on or pid file left");
+                return;
+              }
+              std::printf("sim ssh: PASS\n");
+              qApp->exit(0);
+            },
+            []() { sshFail(12, "Disable did not stop the server"); });
+}
+
+// Step 3: Enable starts a real server.
+static void sshStepEnable(SshPage *page, const QString &dir) {
+  sendClick(labelIn(page, "Enable"));
+  QString running = QString("Running on port ") + kSimSSHPort;
+  waitUntil([page, running]() { return visibleLabel(page, running); }, 15000,
+            [page, dir]() {
+              if (!visibleLabel(page, "On") || !visibleLabel(page, "Disable")) {
+                sshFail(9, "after Enable: not 'On' or no Disable button");
+                return;
+              }
+              if (labelContaining(page, "SHA256:") == nullptr) {
+                sshFail(10, "no host key fingerprint");
+                return;
+              }
+              saveGrab(dir + "/ssh-running.png");
+              sshStepDisable(page);
+            },
+            []() { sshFail(13, "Enable did not start the server"); });
+}
+
+// Step 2: the user adds a key over USB. The tab reads the status again on open.
+static void sshStepKey(BrowseDialog *browse, SshPage *page, QLabel *sshTab, QLabel *modsTab, const QString &dir) {
+  (void)browse;
+  writeSandboxFile(sshDir() + "/authorized_keys", kSimSSHKey);
+  writeSandboxFile(sshDir() + "/config.toml",
+                   QByteArray("enabled = false\nport = ") + kSimSSHPort + "\nlisten = \"127.0.0.1\"\n");
+  sendClick(modsTab);
+  if (page->isVisible() || !tabActive(modsTab) || tabActive(sshTab)) {
+    sshFail(7, "the Mods tab did not return to the list");
+    return;
+  }
+  sendClick(sshTab);
+  waitUntil([page]() { return page->isVisible() && labelIn(page, "1") != nullptr; }, 10000,
+            [page, dir]() {
+              if (!visibleLabel(page, "Enable") || !visibleLabel(page, "Restart") ||
+                  visibleLabel(page, kSimNoKeyNote) || !visibleLabel(page, "Off")) {
+                sshFail(8, "with a key: no Enable or Restart, or the note still shows");
+                return;
+              }
+              sshStepEnable(page, dir);
+            },
+            []() { sshFail(14, "the reload did not show 1 key"); });
+}
+
+static void runExerciseSsh(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        SshPage *page = browse ? browse->findChild<SshPage *>() : nullptr;
+        QLabel *sshTab = browse ? labelIn(browse, "SSH") : nullptr;
+        QLabel *modsTab = browse ? labelIn(browse, "Mods") : nullptr;
+        if (!page || !sshTab || !modsTab) {
+          sshFail(4, "no BrowseDialog, SshPage or SSH tab");
+          return;
+        }
+        if (page->isVisible()) {
+          sshFail(5, "the SSH page shows before its tab is tapped");
+          return;
+        }
+        sendClick(sshTab);
+        // Step 1: not set up, no key.
+        waitUntil([page]() { return page->isVisible(); }, 10000,
+                  [browse, page, sshTab, modsTab, dir]() {
+                    QString why;
+                    QLineEdit *search = browse->findChild<QLineEdit *>();
+                    if (!tabActive(sshTab) || tabActive(modsTab)) why += "SSH tab not active; ";
+                    if (search != nullptr && search->isVisible()) why += "search box still shows; ";
+                    if (visibleLabel(browse, "Refresh")) why += "Refresh still shows; ";
+                    if (!visibleLabel(page, "Off (not set up)")) why += "Enabled row is not 'Off (not set up)'; ";
+                    if (!visibleLabel(page, "Stopped")) why += "Status row is not 'Stopped'; ";
+                    if (!visibleLabel(page, kSimNoKeyNote)) why += "no-key note missing; ";
+                    if (visibleLabel(page, "Enable") || visibleLabel(page, "Restart")) why += "buttons show with no key; ";
+                    if (!why.isEmpty()) {
+                      sshFail(6, why);
+                      return;
+                    }
+                    saveGrab(dir + "/ssh-nokey.png");
+                    sshStepKey(browse, page, sshTab, modsTab, dir);
+                  },
+                  []() { sshFail(15, "the SSH page did not show"); });
+      },
+      []() { sshFail(3, "no rows"); });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -2257,6 +2416,7 @@ int main(int argc, char **argv) {
   QString orphanDir;
   QString appTreeDir;
   QString tabsDir;
+  QString sshDirArg;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -2295,6 +2455,8 @@ int main(int argc, char **argv) {
       appTreeDir = args.at(++i);
     } else if (a == "--exercise-tabs" && i + 1 < args.size()) {
       tabsDir = args.at(++i);
+    } else if (a == "--exercise-ssh" && i + 1 < args.size()) {
+      sshDirArg = args.at(++i);
     } else if (a == "--exercise-sync") {
       exerciseSync = true;
     } else if (a == "--exercise-staged") {
@@ -2337,6 +2499,8 @@ int main(int argc, char **argv) {
     runExerciseAppTree(appTreeDir);
   } else if (!tabsDir.isEmpty()) {
     runExerciseTabs(tabsDir);
+  } else if (!sshDirArg.isEmpty()) {
+    runExerciseSsh(sshDirArg);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

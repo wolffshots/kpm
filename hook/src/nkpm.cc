@@ -23,6 +23,7 @@
 #include "files.h"
 #include "nkpm.h"
 #include "seed.h"
+#include "ssh.h"
 
 // ---- shared Nickel symbols (definitions for nkpm.h) ---------------------
 
@@ -150,6 +151,15 @@ static int nkpm_init() {
     onUITrigger();
   });
   nh_log("NickelKPM: watching %s for UI launch", Files::ui_trigger);
+
+  // kpm ssh (SSH.md section 5): start the server when config.toml enables it.
+  // Read only that small file here, make no network call and do not wait.
+  // NickelHook does not call init on the failsafe path, so a failsafe boot
+  // starts no server. `kpm ssh start` does nothing when a server runs.
+  if (nkpm_ssh_enabled(NKPM_SSH_CONFIG) && QFile::exists(QString::fromUtf8(Files::kpm))) {
+    bool ok = QProcess::startDetached(QString::fromUtf8(Files::kpm), QStringList() << "ssh" << "start");
+    nh_log("NickelKPM: ssh is enabled, kpm ssh start %s", ok ? "launched" : "did not launch");
+  }
   return 0;
 }
 
@@ -164,8 +174,12 @@ extern "C" __attribute__((visibility("hidden"))) void nh_resources_uninstalled(v
 // nkpm_uninstall runs when the uninstall flag exists. NickelHook deletes only
 // the build that runs, so delete both builds and the seed folder of the dual
 // Kobo.tgz (QT6-FIRMWARE6.md section 3e). /mnt/onboard/.adds/kpm stays: the flag
-// removes the UI only.
+// removes the UI only. Without the hook nothing starts the ssh server, so stop
+// it too (SSH.md section 8). Its folder .adds/kpm/ssh stays.
 static bool nkpm_uninstall() {
+  if (nkpm_ssh_stop(NKPM_SSH_PID, "/proc")) {
+    nh_log("NickelKPM: stopped the kpm ssh server");
+  }
   unlink("/usr/local/Kobo/imageformats/libnkpm.so");
   unlink("/usr/local/Kobo/imageformats/libnkpm-qt6.so");
   nkpm_seed_remove(NKPM_SEED_DIR);

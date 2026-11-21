@@ -110,6 +110,12 @@ KpmProcess *KpmProcess::sync() { return start({"sync", "--json"}, false, true); 
 // stages nothing: its payload reports staged=false/reboot_required=false.
 KpmProcess *KpmProcess::adoptSelf() { return start({"adopt-self", "--json"}, true, true); }
 
+// kpm ssh (SSH.md section 7): local only, and `kpm ssh` takes no kpm lock.
+KpmProcess *KpmProcess::sshStatus() { return start({"ssh", "status", "--json"}, false, false); }
+KpmProcess *KpmProcess::sshEnable() { return start({"ssh", "enable"}, false, false, false); }
+KpmProcess *KpmProcess::sshDisable() { return start({"ssh", "disable"}, false, false, false); }
+KpmProcess *KpmProcess::sshRestart() { return start({"ssh", "restart"}, false, false, false); }
+
 // Config editing (CONFIG.md §3.2). list/show are offline reads; set is mutating
 // (takes kpm's single-instance lock) but needs no network — a config edit is a
 // local file write, so needsNetwork is false for every variant.
