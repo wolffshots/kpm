@@ -654,6 +654,7 @@ How it works:
 - A key line with options (`from=`, `command=` and others) is skipped and logged: kpm cannot apply the options.
 - You get a shell with a PTY, commands without a PTY (`ssh kobo 'cmd'`), and `sftp`. OpenSSH `scp` uses sftp, so it works. The old scp protocol (`scp -O`) does not.
 - Port forwarding, agent forwarding and X11 are refused.
+- The SSH tab has a **Force Wi-Fi** row. Turn it on to keep Wi-Fi on while the Kobo is awake, so SSH stays reachable. Sleep still turns Wi-Fi off. The row changes the Nickel developer setting `ForceWifiOn` at once, with no reboot. `kpm ssh status` shows the value of `Kobo eReader.conf`, but kpm does not change that file.
 - At most 8 connections. After 5 failed logins from one address in one minute, kpm refuses that address for 5 minutes.
 - The log is `.adds/kpm/ssh/sshd.log`. `kpm ssh status` shows its last error.
 - `config.toml` has `enabled`, `port` (default 22) and `listen` (default `0.0.0.0`). `kpm ssh enable --port 2222` changes the port.

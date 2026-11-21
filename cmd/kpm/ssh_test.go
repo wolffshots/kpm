@@ -58,7 +58,7 @@ func TestSSHStatusJSONNotInstalled(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit = %d", code)
 	}
-	want := `{"installed":false,"enabled":false,"running":false,"pid":null,"port":22,"listen":"0.0.0.0","user":"root","addresses":["192.168.88.132"],"host_key":null,"keys":0,"bad_key_lines":0,"last_error":null}`
+	want := `{"installed":false,"enabled":false,"running":false,"pid":null,"port":22,"listen":"0.0.0.0","user":"root","addresses":["192.168.88.132"],"host_key":null,"keys":0,"bad_key_lines":0,"last_error":null,"force_wifi":null}`
 	if got := lastJSON(t, out); got != want {
 		t.Errorf("status --json\n got: %s\nwant: %s", got, want)
 	}
@@ -85,7 +85,7 @@ func TestSSHStatusJSONGolden(t *testing.T) {
 	if !strings.HasPrefix(fp, "SHA256:") {
 		t.Fatalf("host key fingerprint %q", fp)
 	}
-	want := `{"installed":true,"enabled":false,"running":false,"pid":null,"port":2222,"listen":"0.0.0.0","user":"root","addresses":["192.168.88.132"],"host_key":"` + fp + `","keys":1,"bad_key_lines":1,"last_error":"listen on 0.0.0.0:2222: address already in use"}`
+	want := `{"installed":true,"enabled":false,"running":false,"pid":null,"port":2222,"listen":"0.0.0.0","user":"root","addresses":["192.168.88.132"],"host_key":"` + fp + `","keys":1,"bad_key_lines":1,"last_error":"listen on 0.0.0.0:2222: address already in use","force_wifi":null}`
 	if got := lastJSON(t, out); got != want {
 		t.Errorf("status --json\n got: %s\nwant: %s", got, want)
 	}
@@ -235,5 +235,30 @@ func TestSSHSharedKeyFile(t *testing.T) {
 	// The shared key is in both files: it counts once.
 	if m["keys"] != float64(2) || m["bad_key_lines"] != float64(1) {
 		t.Errorf("keys %v bad_key_lines %v, want 2 and 1", m["keys"], m["bad_key_lines"])
+	}
+}
+
+// status --json reports Nickel's ForceWifiOn read-only (SSH.md section 7).
+func TestSSHStatusForceWifi(t *testing.T) {
+	sshSandbox(t)
+	conf := device.New().NickelConf()
+	os.MkdirAll(filepath.Dir(conf), 0o755)
+	last := "[FeatureSettings]\nForceWifiOn=true\n"
+	for _, c := range []struct {
+		file string
+		want any
+	}{
+		{"[DeveloperSettings]\nForceWifiOn=true\n", true},
+		{"[DeveloperSettings]\nForceWifiOn=false\n", false},
+		{last, nil},
+	} {
+		os.WriteFile(conf, []byte(c.file), 0o644)
+		_, out, _ := runSSH(t, "status", "--json")
+		if got := decodeJSON(t, lastJSON(t, out))["force_wifi"]; got != c.want {
+			t.Errorf("conf %q: force_wifi = %v, want %v", c.file, got, c.want)
+		}
+	}
+	if b, _ := os.ReadFile(conf); string(b) != last {
+		t.Errorf("status changed Kobo eReader.conf: %q", b)
 	}
 }

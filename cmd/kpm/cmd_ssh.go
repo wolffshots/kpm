@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"kpm/internal/config"
 	"kpm/internal/device"
+	"kpm/internal/modconfig"
 	"kpm/internal/sshd"
 	"kpm/internal/version"
 )
@@ -406,9 +408,33 @@ type jsonSSHStatus struct {
 	Keys        int      `json:"keys"`
 	BadKeyLines int      `json:"bad_key_lines"`
 	LastError   *string  `json:"last_error"`
+	ForceWifi   *bool    `json:"force_wifi"`
 }
 
 // sshStatus collects the state of the server. It reads files only.
+// nickelForceWifi reads [DeveloperSettings] ForceWifiOn from Kobo eReader.conf.
+// kpm only reads it (SSH.md section 7): Nickel keeps its settings in memory and
+// can write over the file, so the SSH tab changes the value inside Nickel. It is
+// nil when the file or the key is missing.
+func nickelForceWifi(p device.Paths) *bool {
+	raw, err := os.ReadFile(p.NickelConf())
+	if err != nil {
+		return nil
+	}
+	decl := config.ModConfig{Name: "Kobo eReader.conf", Path: "/", Format: config.FormatINI}
+	entries, err := modconfig.List(raw, decl)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Section, "DeveloperSettings") && strings.EqualFold(e.Key, "ForceWifiOn") {
+			on := strings.EqualFold(strings.TrimSpace(e.Value), "true")
+			return &on
+		}
+	}
+	return nil
+}
+
 func sshStatus(f sshd.Files) (jsonSSHStatus, error) {
 	cfg, exists, err := sshd.LoadConfig(f.Config())
 	if err != nil {
@@ -427,6 +453,7 @@ func sshStatus(f sshd.Files) (jsonSSHStatus, error) {
 		Keys:        len(keys),
 		BadKeyLines: len(bad),
 		LastError:   ptr(sshd.LastError(f.LogFile())),
+		ForceWifi:   nickelForceWifi(device.New()),
 	}
 	if st.Addresses == nil {
 		st.Addresses = []string{}
@@ -469,6 +496,13 @@ func sshStatusCmd(f sshd.Files, jsonMode bool) int {
 	fmt.Printf("keys:      %d in %s\n", st.Keys, strings.Join(f.KeyFiles(), " and "))
 	if st.BadKeyLines > 0 {
 		fmt.Printf("skipped:   %d bad line(s) in the authorized_keys files\n", st.BadKeyLines)
+	}
+	if st.ForceWifi != nil {
+		state := "off"
+		if *st.ForceWifi {
+			state = "on"
+		}
+		fmt.Printf("force wifi: %s (Kobo eReader.conf, change it on the SSH tab)\n", state)
 	}
 	if st.LastError != nil {
 		fmt.Printf("last error: %s\n", *st.LastError)

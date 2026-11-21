@@ -9,6 +9,7 @@
 #include <QVBoxLayout>
 
 #include "nkpm.h"
+#include "forcewifi.h"
 #include "nickelstub.h"
 
 // ---- globals ------------------------------------------------------------
@@ -378,6 +379,25 @@ N3ButtonLabel *construct_N3ButtonLabel(QWidget *parent) { return new SimTouchLab
 KeyboardReceiver *construct_KeyboardReceiver(QLineEdit *lineEdit) { return new SimKeyboardReceiver(lineEdit); }
 
 void rebootDevice() { simShowMessage("kpm", "The device would reboot now (simulated)."); }
+
+// ---- Force Wi-Fi (forcewifi.h) -------------------------------------------
+//
+// The device build changes the Nickel DevSettings in place. The sim keeps the
+// value here. -1 means the firmware does not have it, so the row hides.
+
+static int simForceWifi = 0;
+
+int nkpm_force_wifi() { return simForceWifi; }
+
+bool nkpm_set_force_wifi(bool on) {
+  if (simForceWifi < 0) {
+    return false;
+  }
+  simForceWifi = on ? 1 : 0;
+  return true;
+}
+
+void nickelstub_setForceWifi(int value) { simForceWifi = value; }
 
 // ---- install ------------------------------------------------------------
 

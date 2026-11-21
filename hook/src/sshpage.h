@@ -38,6 +38,7 @@ public Q_SLOTS:
   void onActionDone(int exitCode, QJsonObject payload);
   void onFailure(QString reason);
   void toggleAddress();
+  void toggleForceWifi();
 
 protected:
   void showEvent(QShowEvent *event) override;
@@ -47,6 +48,7 @@ private:
                 QWidget *extra = nullptr);
   void apply(const QJsonObject &status);
   void updateAddress();
+  void updateForceWifi();
   bool darkPage() const;
   void setBusy(bool busy);
 
@@ -59,6 +61,10 @@ private:
   Label *errorValue = nullptr;
   Label *noKeyNote = nullptr;
   TouchLabel *eyeButton = nullptr;
+  Label *wifiName = nullptr;
+  Label *wifiValue = nullptr;
+  Label *wifiNote = nullptr;
+  N3ButtonLabel *wifiButton = nullptr;
   N3ButtonLabel *toggleButton = nullptr;
   N3ButtonLabel *restartButton = nullptr;
 

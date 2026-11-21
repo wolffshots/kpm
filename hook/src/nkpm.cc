@@ -21,6 +21,7 @@
 
 #include "browsedialog.h"
 #include "files.h"
+#include "forcewifi.h"
 #include "nkpm.h"
 #include "seed.h"
 #include "ssh.h"
@@ -245,7 +246,17 @@ static struct nh_dlsym NickelKPMDlsym[] = {
   { .name = "_ZN8N3Dialog12showKeyboardEv",                                    .out = nh_symoutptr(N3Dialog__showKeyboard) },
   { .name = "_ZN8N3Dialog12hideKeyboardEv",                                    .out = nh_symoutptr(N3Dialog__hideKeyboard) },
 
-  { .name = "_ZN16KeyboardReceiverC1EP9QLineEditb",                            .out = nh_symoutptr(KeyboardReceiver__constructor) },
+  // Optional Force Wi-Fi set of the SSH tab (forcewifi.cc). A missing symbol
+  // hides the row. All present in FW 4.46.23852 and 6.0.279225.
+  { .name = "_ZN6Device16getCurrentDeviceEv",                                  .out = nh_symoutptr(Device__getCurrentDevice), .desc = "Device::getCurrentDevice()", .optional = true },
+  { .name = "_ZN8SettingsC2ERK6Deviceb",                                       .out = nh_symoutptr(Settings__constructor), .desc = "Settings::Settings(Device const&, bool)", .optional = true },
+  { .name = "_ZN8SettingsD2Ev",                                                .out = nh_symoutptr(Settings__destructor), .desc = "Settings::~Settings()", .optional = true },
+  { .name = "_ZTV8Settings",                                                   .out = nh_symoutptr(Settings__vtable), .desc = "vtable for Settings", .optional = true },
+  { .name = "_ZTV11DevSettings",                                               .out = nh_symoutptr(DevSettings__vtable), .desc = "vtable for DevSettings", .optional = true },
+  { .name = "_ZN11DevSettings11forceWifiOnEv",                                 .out = nh_symoutptr(DevSettings__forceWifiOn), .desc = "DevSettings::forceWifiOn()", .optional = true },
+  { .name = "_ZN11DevSettings14setForceWifiOnEb",                              .out = nh_symoutptr(DevSettings__setForceWifiOn), .desc = "DevSettings::setForceWifiOn(bool)", .optional = true },
+
+  { .name = "_ZN16KeyboardReceiverC1EP9QLineEditb",                           .out = nh_symoutptr(KeyboardReceiver__constructor) },
   { .name = "_ZN13KeyboardFrame14createKeyboardE14KeyboardScriptRK7QLocale",   .out = nh_symoutptr(KeyboardFrame__createKeyboard) },
   { .name = "_ZN24SearchKeyboardController11setReceiverEP16KeyboardReceiverb", .out = nh_symoutptr(SearchKeyboardController__setReceiver) },
   { .name = "_ZN24SearchKeyboardController9setGoTextERK7QString",              .out = nh_symoutptr(SearchKeyboardController__setGoText) },

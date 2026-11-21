@@ -30,8 +30,9 @@ func TestParseRealSource(t *testing.T) {
 	// so the hook injects no menu row and dlsyms only the dialog symbols. Six
 	// optional (all null-checked): N3Dialog::enableFullViewMode,
 	// N3Dialog::enableBackButton, and the status-bar chrome-control set
-	// (statusBarController/hide/show/isVisible).
-	const wantTotal, wantOptional = 33, 6
+	// (statusBarController/hide/show/isVisible). Since 0.14.0 also the seven
+	// optional Force Wi-Fi names of the SSH tab (forcewifi.cc, SSH.md section 7).
+	const wantTotal, wantOptional = 40, 13
 	if len(syms) != wantTotal {
 		t.Errorf("total symbols = %d, want %d", len(syms), wantTotal)
 	}

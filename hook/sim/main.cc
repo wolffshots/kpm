@@ -83,6 +83,7 @@
 #include "configdialog.h"
 #include "detaildialog.h"
 #include "nickelstub.h"
+#include "forcewifi.h"
 #include "sshpage.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
@@ -2063,6 +2064,27 @@ static QString checkAddress(SshPage *page, const QString &port, const QString &d
   return why;
 }
 
+// checkForceWifi drives the Force Wi-Fi row (SSH.md section 7): it starts Off,
+// a tap turns the Nickel setting on, and the row shows the new value. It leaves
+// the setting on, so "Off" on the page names only the Enabled row after this.
+static QString checkForceWifi(SshPage *page) {
+  QLabel *value = page->findChild<QLabel *>("sshForceWifiValue");
+  QLabel *button = page->findChild<QLabel *>("sshForceWifiButton");
+  QLabel *note = labelContaining(page, "Sleep still turns Wi-Fi off.");
+  if (value == nullptr || button == nullptr || note == nullptr || !value->isVisible() || !button->isVisible() ||
+      !note->isVisible() || !visibleLabel(page, "Force Wi-Fi")) {
+    return "the Force Wi-Fi row or its note does not show; ";
+  }
+  qApp->processEvents(); // the layout runs before the next paint
+  if (note->height() < note->heightForWidth(note->width())) return "the Force Wi-Fi note is clipped; ";
+  if (value->text() != "Off" || button->text() != "Turn on") return "Force Wi-Fi does not start Off; ";
+  sendClick(button);
+  if (value->text() != "On" || button->text() != "Turn off" || nkpm_force_wifi() != 1) {
+    return "a tap did not turn Force Wi-Fi on; ";
+  }
+  return QString();
+}
+
 // Step 4: Disable stops the server and turns ssh off at boot.
 static void sshStepDisable(SshPage *page) {
   sendClick(labelIn(page, "Disable"));
@@ -2107,6 +2129,7 @@ static void sshStepKey(BrowseDialog *browse, SshPage *page, QLabel *sshTab, QLab
   // The key goes into the shared file that kpm only reads (SSH.md section 3).
   writeSandboxFile(QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.adds/authorized_keys", kSimSSHKey);
   sendClick(page->findChild<QLabel *>("sshAddressEye")); // shown when the user leaves the tab
+  nickelstub_setForceWifi(0); // a firmware with the setting, now off
   writeSandboxFile(sshDir() + "/config.toml",
                    QByteArray("enabled = false\nport = ") + kSimSSHPort + "\nlisten = \"127.0.0.1\"\n");
   sendClick(modsTab);
@@ -2123,7 +2146,7 @@ static void sshStepKey(BrowseDialog *browse, SshPage *page, QLabel *sshTab, QLab
                 return;
               }
               // The address shown before the user left the tab is hidden again.
-              QString why = checkAddress(page, kSimSSHPort, QString());
+              QString why = checkAddress(page, kSimSSHPort, QString()) + checkForceWifi(page);
               if (!why.isEmpty()) {
                 sshFail(16, "after the reopen: " + why);
                 return;
@@ -2149,6 +2172,7 @@ static void runExerciseSsh(const QString &dir) {
           sshFail(5, "the SSH page shows before its tab is tapped");
           return;
         }
+        nickelstub_setForceWifi(-1); // a firmware without the setting
         sendClick(sshTab);
         // Step 1: not set up, no key.
         waitUntil([page]() { return page->isVisible(); }, 10000,
@@ -2163,6 +2187,10 @@ static void runExerciseSsh(const QString &dir) {
                     if (!visibleLabel(page, kSimNoKeyNote)) why += "no-key note missing; ";
                     if (visibleLabel(page, "Enable") || visibleLabel(page, "Restart")) why += "buttons show with no key; ";
                     if (why.isEmpty()) why += checkAddress(page, "22", dir);
+                    QLabel *wifi = page->findChild<QLabel *>("sshForceWifiValue");
+                    if (wifi == nullptr || wifi->isVisible() || visibleLabel(page, "Force Wi-Fi")) {
+                      why += "the Force Wi-Fi row shows on a firmware without it; ";
+                    }
                     if (!why.isEmpty()) {
                       sshFail(6, why);
                       return;

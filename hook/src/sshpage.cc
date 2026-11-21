@@ -15,6 +15,7 @@
 #include <QPixmap>
 #include <QVBoxLayout>
 
+#include "forcewifi.h"
 #include "kpmprocess.h"
 #include "sshpage.h"
 #include "widgets/label.h"
@@ -36,9 +37,20 @@ SshPage::SshPage(QWidget *parent) : QWidget(parent) {
   eyeButton->setAlignment(Qt::AlignCenter);
   addressValue = addRow(grid, 2, "Address", nullptr, eyeButton);
   QObject::connect(eyeButton, SIGNAL(tapped(bool)), this, SLOT(toggleAddress()));
-  hostKeyValue = addRow(grid, 3, "Host key");
-  keysValue = addRow(grid, 4, "Keys");
-  errorValue = addRow(grid, 5, "Last error", &errorName);
+  // Force Wi-Fi is a Nickel setting that the hook changes in place
+  // (forcewifi.h). The row hides when the firmware does not have it.
+  wifiButton = construct_N3ButtonLabel(this);
+  wifiButton->setObjectName("sshForceWifiButton");
+  wifiValue = addRow(grid, 3, "Force Wi-Fi", &wifiName, wifiButton);
+  wifiValue->setObjectName("sshForceWifiValue");
+  QObject::connect(wifiButton, SIGNAL(tapped(bool)), this, SLOT(toggleForceWifi()));
+  wifiNote = new Label(Label::Small, "Keeps Wi-Fi on while the device is awake, so SSH stays reachable. "
+                                     "Sleep still turns Wi-Fi off.");
+  wifiNote->setWordWrap(true);
+  grid->addWidget(wifiNote, 4, 1); // no alignment: a wrapped label must fill its cell to get its full height
+  hostKeyValue = addRow(grid, 5, "Host key");
+  keysValue = addRow(grid, 6, "Keys");
+  errorValue = addRow(grid, 7, "Last error", &errorName);
   errorValue->setWordWrap(true);
   v->addLayout(grid);
 
@@ -247,6 +259,33 @@ void SshPage::apply(const QJsonObject &st) {
   toggleButton->setText(enabled ? "Disable" : "Enable");
   toggleButton->setVisible(!noKey || enabled);
   restartButton->setVisible(!noKey);
+
+  // Nickel holds this setting, not kpm: read it in place at each refresh.
+  updateForceWifi();
+}
+
+// updateForceWifi reads the setting from Nickel and fills the row. A value of
+// -1 means the firmware does not have it: the row and its note hide.
+void SshPage::updateForceWifi() {
+  int on = nkpm_force_wifi();
+  wifiName->setVisible(on >= 0);
+  wifiValue->setVisible(on >= 0);
+  wifiButton->setVisible(on >= 0);
+  wifiNote->setVisible(on >= 0);
+  if (on < 0) {
+    return;
+  }
+  wifiValue->setText(on ? "On" : "Off");
+  wifiButton->setText(on ? "Turn off" : "Turn on");
+}
+
+void SshPage::toggleForceWifi() {
+  int on = nkpm_force_wifi();
+  if (on < 0) {
+    return;
+  }
+  nkpm_set_force_wifi(on == 0); // updateForceWifi shows the value that Nickel now has
+  updateForceWifi();
 }
 
 void SshPage::setBusy(bool b) {

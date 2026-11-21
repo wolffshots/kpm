@@ -37,6 +37,10 @@ void nickelstub_install(int screenW, int screenH);
 // nickelstub_mainWindow returns the top-level widget the screenshot driver grabs.
 QWidget *nickelstub_mainWindow();
 
+// nickelstub_setForceWifi sets the fake Nickel ForceWifiOn value: 1, 0, or -1
+// for a firmware without it (forcewifi.h).
+void nickelstub_setForceWifi(int value);
+
 // nickelstub_statusBar / nickelstub_navView expose the fake home-screen chrome so
 // the --exercise-wake driver can show()/inspect them (mimicking Nickel's wake
 // re-show). Both are zero-height, so hiding/showing them is visually inert.
