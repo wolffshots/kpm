@@ -584,6 +584,12 @@ kpm config init <id> <file> [--force]  create a missing config file from the exa
 kpm log [-n N]              print the last N log lines (default 12)
 kpm status                  print the status summary + any pending staging; fast/offline
 kpm ui                      signal the NickelKPM hook to open the graphical browser
+kpm ssh install [--keys <file>] [--port N]
+                            make .adds/kpm/ssh: host key, config.toml, authorized_keys
+kpm ssh enable [--port N]   install if needed, start at each boot, start now
+kpm ssh disable             do not start at boot, stop now
+kpm ssh start|stop|restart  control the SSH server now ("enabled" does not change)
+kpm ssh status [--json]     enabled, running, pid, port, addresses, host key, keys
 kpm version                 print the compiled-in version
 ```
 
@@ -594,8 +600,8 @@ If every selected `update` package fails and nothing stages, the exit is `1`.
 
 **Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
 `update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`,
-`config list`, `config show`, `config set`, `config init`, `doctor`, and
-`version` accept `--json`. Human/progress output streams as usual; the final
+`config list`, `config show`, `config set`, `config init`, `doctor`,
+`ssh status`, and `version` accept `--json`. Human/progress output streams as usual; the final
 stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
 object. This is what the graphical UI consumes; it also serves scripts.
 
@@ -628,6 +634,35 @@ don't take the lock and never write state.
 `KPM_ROOT` overrides the `/mnt/onboard` root (used by tests and for dev runs off
 the device). `KPM_SYSROOT` overrides the rootfs `/` so `uninstall` deletions land
 inside a sandbox during tests.
+
+## SSH
+
+kpm has a built-in SSH server for root logins (`kpm ssh`, kpm 0.14.0). It works on firmware 4.x and 6.x and replaces NiLuJe usbnet (Dropbear and telnet). The design is `kpm-archive/docs/SSH.md`.
+
+Set it up:
+
+1. Run `kpm ssh install` once, or open the **SSH** tab of the package manager. kpm makes `.adds/kpm/ssh/`.
+2. Connect the Kobo over USB. Add your public key to `.adds/kpm/ssh/authorized_keys`, one OpenSSH key per line (for example the line of `id_ed25519.pub`).
+3. Tap **Enable** on the SSH tab, or run `kpm ssh enable`. The server starts now and at each boot.
+4. Log in with `ssh root@<device address>`. The SSH tab shows the address and the host key fingerprint.
+
+How it works:
+
+- The server is the kpm binary itself (`kpm ssh serve`, in Go). It needs no other file on the device.
+- The kpm hook starts it at boot when `.adds/kpm/ssh/config.toml` has `enabled = true`. It keeps running when Nickel restarts.
+- It accepts public keys of `authorized_keys` only, for the user `root`. No password login. It reads the file again at each login, so a new key works at once.
+- A key line with options (`from=`, `command=` and others) is skipped and logged: kpm cannot apply the options.
+- You get a shell with a PTY, commands without a PTY (`ssh kobo 'cmd'`), and `sftp`. OpenSSH `scp` uses sftp, so it works. The old scp protocol (`scp -O`) does not.
+- Port forwarding, agent forwarding and X11 are refused.
+- At most 8 connections. After 5 failed logins from one address in one minute, kpm refuses that address for 5 minutes.
+- The log is `.adds/kpm/ssh/sshd.log`. `kpm ssh status` shows its last error.
+- `config.toml` has `enabled`, `port` (default 22) and `listen` (default `0.0.0.0`). `kpm ssh enable --port 2222` changes the port.
+
+Next to NiLuJe usbnet: NiLuJe Dropbear holds port 22, so `kpm ssh start` refuses port 22 while it runs. Use `kpm ssh enable --port 2222` first. When kpm ssh works, turn off NiLuJe SSH with its NickelMenu item "Disable Niluje SSH and Telnet", then run `kpm ssh enable --port 22`.
+
+Security: the user partition is FAT, so these files have no Unix permissions. A person with USB access to the Kobo can add a key to `authorized_keys`. That person can already install a `KoboRoot.tgz` that runs as root, so kpm ssh gives them no new access.
+
+Uninstall: the UI uninstall flag (`kpm_ui_uninstall`) stops the server. The folder `.adds/kpm/ssh/` stays, with your keys and the host key, so a new install keeps the same host key.
 
 ## App-tree installs
 
@@ -965,6 +1000,7 @@ purpose: a one-tap destructive action is a footgun.
 `kpm uninstall kpm` is refused. Remove kpm by hand over USB: delete
 `/mnt/onboard/.adds/kpm` (its binary, state, log, and registrations) and
 `/mnt/onboard/.adds/nm/kpm` (its NickelMenu drop-in), then reboot.
+If you use `kpm ssh`, run `kpm ssh disable` first. Keep `.adds/kpm/ssh/` if you want the same host key after a new install.
 
 ## First install & smoke test (telnet)
 
