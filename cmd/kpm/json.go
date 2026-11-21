@@ -430,6 +430,19 @@ type jsonDoctorPayload struct {
 	// reference point for each package's fw_untested (D).
 	DeviceFw *string         `json:"device_fw"`
 	Packages []jsonDoctorPkg `json:"packages"`
+	// SSH is the kpm ssh row (SSH.md section 8), null when ssh was never
+	// installed (no .adds/kpm/ssh/config.toml).
+	SSH *jsonDoctorSSH `json:"ssh"`
+}
+
+// jsonDoctorSSH is the ssh row of `kpm doctor --json` (JSON-OUTPUT.md 2.6).
+type jsonDoctorSSH struct {
+	Enabled  bool   `json:"enabled"`
+	Running  bool   `json:"running"`   // a server holds the pid file
+	PidAlive bool   `json:"pid_alive"` // the pid of the pid file is a live process
+	Port     int    `json:"port"`
+	PortOpen bool   `json:"port_open"` // a local connect to the port works
+	Detail   string `json:"detail"`    // "" when all is well, else the problems
 }
 
 // ---- config list / show (CONFIG.md §3.3) --------------------------------

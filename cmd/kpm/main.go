@@ -47,6 +47,7 @@ Usage:
   kpm log [-n N]
   kpm status
   kpm ui                       (open the graphical package manager; used by NickelMenu)
+  kpm ssh <enable|disable|start|stop|restart|status|install> [--json] [--keys <file>] [--port N]
   kpm version
 `
 
@@ -120,6 +121,10 @@ func run(argv []string) int {
 	case "ui":
 		// UI launch trigger for the NickelKPM hook: no state, no lock (§ui).
 		return cmdUI(args)
+	case "ssh":
+		// SSH server control (SSH.md section 4): no state, no lock. The
+		// long-running `kpm ssh serve` must never hold the kpm lock.
+		return cmdSSH(args)
 	}
 
 	app, err := newApp(isMutating(cmd, args))

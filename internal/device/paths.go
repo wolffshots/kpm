@@ -101,6 +101,9 @@ func (p Paths) RegistryCache(name string) string {
 	return filepath.Join(p.CacheDir(), "registry-"+name+".toml")
 }
 
+// SSHDir holds the state of `kpm ssh` (SSH.md section 3). The uninstall keeps it.
+func (p Paths) SSHDir() string { return filepath.Join(p.AddsKpm(), "ssh") }
+
 // LockFile is the single-instance lock (B1).
 func (p Paths) LockFile() string { return filepath.Join(p.AddsKpm(), "lock") }
 

@@ -13,6 +13,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/registry"
+	"kpm/internal/sshd"
 	"kpm/internal/state"
 	"kpm/internal/uninstall"
 )
@@ -112,6 +113,13 @@ func (a *App) cmdDoctor(args []string) int {
 		results = append(results, a.diagnose(p, entries, deviceFw))
 	}
 
+	// The ssh row is about the device, not a package: only a run for all
+	// packages shows it (SSH.md section 8).
+	var sshRow *jsonDoctorSSH
+	if len(pos) == 0 {
+		sshRow = sshDoctor(sshd.Files{Dir: a.paths.SSHDir()})
+	}
+
 	if jsonMode {
 		out := make([]jsonDoctorPkg, 0, len(results))
 		for _, r := range results {
@@ -124,11 +132,15 @@ func (a *App) cmdDoctor(args []string) int {
 				FwUntested: r.fwUntested,
 			})
 		}
-		jsonLine(jsonDoctorPayload{DeviceFw: ptr(deviceFw), Packages: out})
+		jsonLine(jsonDoctorPayload{DeviceFw: ptr(deviceFw), Packages: out, SSH: sshRow})
 		return exitOK
 	}
 
 	a.printDoctor(results, deviceFw)
+	if sshRow != nil {
+		fmt.Println()
+		fmt.Println(sshDoctorText(sshRow))
+	}
 	// App-tree advisories are printed after the table and never change the exit
 	// code or the --json payload: they are manual steps kpm cannot take, not
 	// diagnoses of the package (APP-TREE.md §8.1/§10.3).
@@ -390,4 +402,16 @@ func (a *App) printDoctor(results []doctorResult, deviceFw string) {
 	fmt.Println(`mod works. A backed-out mod stays mapped, and a hook that silently no-ops`)
 	fmt.Println(`leaves no trace kpm can detect. Run tools/symcheck before install to catch`)
 	fmt.Println(`missing-symbol incompatibilities statically.`)
+}
+
+// sshDoctorText is the human ssh row of `kpm doctor`.
+func sshDoctorText(d *jsonDoctorSSH) string {
+	onOff := map[bool]string{true: "enabled", false: "disabled"}[d.Enabled]
+	run := map[bool]string{true: "running", false: "stopped"}[d.Running]
+	port := map[bool]string{true: "open", false: "closed"}[d.PortOpen]
+	line := fmt.Sprintf("ssh: %s, %s, port %d %s", onOff, run, d.Port, port)
+	if d.Detail != "" {
+		line += ": " + d.Detail
+	}
+	return line
 }
