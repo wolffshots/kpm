@@ -2077,6 +2077,7 @@ static QString checkForceWifi(SshPage *page) {
   }
   qApp->processEvents(); // the layout runs before the next paint
   if (note->height() < note->heightForWidth(note->width())) return "the Force Wi-Fi note is clipped; ";
+  if (!button->property("borderedButton").toBool()) return "the Force Wi-Fi button has no outline; ";
   if (value->text() != "Off" || button->text() != "Turn on") return "Force Wi-Fi does not start Off; ";
   sendClick(button);
   if (value->text() != "On" || button->text() != "Turn off" || nkpm_force_wifi() != 1) {

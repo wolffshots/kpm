@@ -41,6 +41,7 @@ SshPage::SshPage(QWidget *parent) : QWidget(parent) {
   // (forcewifi.h). The row hides when the firmware does not have it.
   wifiButton = construct_N3ButtonLabel(this);
   wifiButton->setObjectName("sshForceWifiButton");
+  wifiButton->setProperty("borderedButton", true); // Nickel draws a 1px outline, so the row reads as a button
   wifiValue = addRow(grid, 3, "Force Wi-Fi", &wifiName, wifiButton);
   wifiValue->setObjectName("sshForceWifiValue");
   QObject::connect(wifiButton, SIGNAL(tapped(bool)), this, SLOT(toggleForceWifi()));

@@ -1,14 +1,14 @@
 # kpm — Kobo Package Manager
 
 A single static Go binary that manages third-party software on Kobo e-readers
-(firmware 4.x). Packages are distributed as `KoboRoot.tgz` release assets on git
-forges (GitHub, Codeberg, or any Gitea/Forgejo instance). kpm registers release
+(firmware 4.x, and 6.x since 0.13.0). Packages are distributed as `KoboRoot.tgz`
+(4.x) or `Kobo.tgz` (6.x) release assets on git forges (GitHub, Codeberg, or any Gitea/Forgejo instance). kpm registers release
 sources, checks for updates, stages installs into the firmware's single boot-time
 install slot, pins versions, keeps a human-readable log, and updates itself the
 same way. It is driven from NickelMenu on-device and works as a normal CLI over
-telnet/SSH.
+SSH (its own `kpm ssh` server, or any other).
 
-> Firmware 4.x only. No signature verification of assets — installing a package
+> Firmware 4.x and 6.x (see "Firmware 6.x"). No signature verification of assets — installing a package
 > trusts its author, exactly like a manual `KoboRoot.tgz` install. Assets are
 > fetched over TLS (HTTPS only; a redirect that downgrades to plain HTTP is
 > refused) with an embedded Mozilla CA bundle. Archives are walked before
@@ -454,8 +454,9 @@ its status file (always) and NickelDBus toasts (if `qndb` exists).
 ## Graphical UI (NickelKPM)
 
 kpm ships a built-in graphical package browser, **NickelKPM** (`libnkpm.so`) — a
-NickelHook Qt mod injected into Nickel. Every kpm KoboRoot.tgz installs it under
-`/usr/local/Kobo/imageformats/libnkpm.so`.
+NickelHook Qt mod injected into Nickel. Every kpm package installs it under
+`/usr/local/Kobo/imageformats/`: `libnkpm.so` (Qt 5, firmware 4.x) and, from
+`Kobo.tgz`, `libnkpm-qt6.so` (Qt 6, firmware 6.x).
 
 | Package list | Not installed | Installed |
 |---|---|---|
@@ -513,17 +514,17 @@ addition, but for now the graphical UI needs NickelMenu installed.
 **Symbol compatibility (fail-closed):** at load the hook resolves every Nickel
 C++ symbol it needs; if any required symbol is missing it refuses to load
 cleanly — Nickel runs untouched and a diagnostic log is dumped to
-`/mnt/onboard`. Verified to load on firmware **4.45.23697** (and back to
-4.33.19608); **4.20.14601 and older fail this check** (Nickel's method signatures
+`/mnt/onboard`. Verified to load on firmware **4.46.23852**, **4.45.23697** (and
+back to 4.33.19608), and **6.0.279225** (Qt 6 build); **4.20.14601 and older fail this check** (Nickel's method signatures
 drifted), so on those the UI is absent by design. Check any firmware from your
 desk with `tools/symcheck` (see "Build & release"). A crash inside the first
 15 seconds after load trips NickelHook's failsafe, which leaves the hook
 disabled on the next boot instead of bootlooping.
 
 **Removing the UI only:** create the flag file `/mnt/onboard/kpm_ui_uninstall`
-and reboot. NickelHook deletes `libnkpm.so` on the next boot; kpm itself (binary,
-config, state, packages) is untouched. (Firmware is out of scope past 4.x, same
-as NickelHardcover.)
+and reboot. On the next boot the hook deletes both builds (`libnkpm.so` and
+`libnkpm-qt6.so`) and the `kpm-seed` folder, and stops `kpm ssh`; kpm itself
+(binary, config, state, packages, `.adds/kpm/ssh`) is untouched.
 
 ### Building the hook
 
@@ -535,7 +536,14 @@ git submodule update --init --recursive          # fetch hook/NickelHook (once)
 podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/pgaskin/nickeltc:1.0 make
 ```
 
-That produces `hook/libnkpm.so`. `go run ./build` then bundles it into
+That produces `hook/libnkpm.so`. The Qt 6 build for firmware 6.x uses another
+image and makes `hook/libnkpm-qt6.so`:
+
+```sh
+podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/nicoverbruggen/kobuild:qt6-v0.5.3 make NH_QT_MAJOR=6
+```
+
+`go run ./build` then bundles it into
 `dist/KoboRoot.tgz` (it fails with a clear message if the `.so` is absent; point
 `KPM_UI_SO` at a prebuilt library to override the path). On Windows the volume
 mount is `-v "C:/…/kpm:/work" -w /work/hook` (set `MSYS_NO_PATHCONV=1` under Git
@@ -654,12 +662,19 @@ How it works:
 - A key line with options (`from=`, `command=` and others) is skipped and logged: kpm cannot apply the options.
 - You get a shell with a PTY, commands without a PTY (`ssh kobo 'cmd'`), and `sftp`. OpenSSH `scp` uses sftp, so it works. The old scp protocol (`scp -O`) does not.
 - Port forwarding, agent forwarding and X11 are refused.
-- The SSH tab has a **Force Wi-Fi** row. Turn it on to keep Wi-Fi on while the Kobo is awake, so SSH stays reachable. Sleep still turns Wi-Fi off. The row changes the Nickel developer setting `ForceWifiOn` at once, with no reboot. `kpm ssh status` shows the value of `Kobo eReader.conf`, but kpm does not change that file.
+- The SSH tab has a **Force Wi-Fi** row with a **Turn on** or **Turn off** button. Turn it on to keep Wi-Fi on while the Kobo is awake, so SSH stays reachable. Sleep still turns Wi-Fi off. The button changes the Nickel developer setting `ForceWifiOn` at once, with no reboot. Nickel saves it in `Kobo eReader.conf`, so it stays after a reboot. `kpm ssh status` shows the value of that file. The kpm CLI does not change it. The row hides on a firmware that does not have the setting.
 - At most 8 connections. After 5 failed logins from one address in one minute, kpm refuses that address for 5 minutes.
 - The log is `.adds/kpm/ssh/sshd.log`. `kpm ssh status` shows its last error.
 - `config.toml` has `enabled`, `port` (default 22) and `listen` (default `0.0.0.0`). `kpm ssh enable --port 2222` changes the port.
 
-Next to NiLuJe usbnet: NiLuJe Dropbear holds port 22, so `kpm ssh start` refuses port 22 while it runs. Use `kpm ssh enable --port 2222` first. When kpm ssh works, turn off NiLuJe SSH with its NickelMenu item "Disable Niluje SSH and Telnet", then run `kpm ssh enable --port 22`.
+Next to NiLuJe usbnet: NiLuJe Dropbear holds port 22, so `kpm ssh start` fails with "port 22 is in use" while it runs. Move from Dropbear to kpm ssh like this:
+
+1. Run `kpm ssh enable --port 2222`. Log in on port 2222 and check that it works.
+2. Stop Dropbear and telnet, and keep them off at boot. The KoboStuff NickelMenu toggle does this: it creates `NO_SSH` and `NO_TELNET` in `/usr/local/niluje/usbnet/etc`.
+3. Run `kpm ssh enable --port 22`. `enable` restarts a running server, so it moves to port 22 at once.
+4. Log in on port 22 in a new connection before you close the old one. The host key on port 22 is now the kpm key, so remove the old line from your `known_hosts` (`ssh-keygen -R <device address>`).
+
+kpm ssh does not need any part of usbnet. The stock `/etc/fstab` mounts `/dev/pts`, and kpm ssh mounts it if it is missing.
 
 Security: the user partition is FAT, so these files have no Unix permissions. A person with USB access to the Kobo can add a key to a key file. That person can already install a `KoboRoot.tgz` that runs as root, so kpm ssh gives them no new access.
 
@@ -1108,4 +1123,4 @@ Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
 ## Non-goals (v1)
 
 No dependency resolution, no repo indexes, no firmware 5.x, no asset signature
-verification, no GUI beyond NickelMenu.
+verification, no GUI outside the NickelKPM hook (launched from NickelMenu).
