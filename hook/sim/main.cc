@@ -51,6 +51,8 @@
 //                              (a real `kpm ssh serve` on 127.0.0.1), Disable, the
 //                              hidden address and its eye; writes ssh-nokey.png,
 //                              ssh-address.png and ssh-running.png
+//   --exercise-morerow <dir>   offscreen: the More page row (hook/src/morerow.cc)
+//                              on a fake MoreView; writes more-row.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -63,6 +65,7 @@
 #include <functional>
 
 #include <QApplication>
+#include <QBoxLayout>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -71,6 +74,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPixmap>
 #include <QPointer>
 #include <QProcess>
@@ -84,6 +88,7 @@
 #include "detaildialog.h"
 #include "nickelstub.h"
 #include "forcewifi.h"
+#include "morerow.h"
 #include "sshpage.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
@@ -2493,6 +2498,167 @@ static void runExerciseReload() {
       });
 }
 
+// ---- --exercise-morerow -------------------------------------------------
+//
+// The More page row (hook/src/morerow.cc). A fake MoreView copies the shape of
+// Ui_MoreView: a container with a QVBoxLayout of rows, each row a widget with
+// the children "pixmap" and "label", and Help the last row. Asserts one row
+// directly above Help, the same height as Help, visible before the first paint,
+// no second row on a show again, a tap that opens the UI, one row on a new
+// MoreView, and no row on a page that is not a MoreView. Writes more-row.png and
+// more-row-dark.png into <dir>.
+
+static int moreRowOpened = 0;
+static void moreRowOpen() { moreRowOpened++; }
+
+class SimMoreItem : public QWidget {
+public:
+  SimMoreItem(QString const &name, QString const &text, QWidget *parent) : QWidget(parent) {
+    setObjectName(name);
+    setFixedHeight(112);
+    QHBoxLayout *l = new QHBoxLayout(this);
+    l->setContentsMargins(24, 0, 0, 0);
+    l->setSpacing(0);
+    QLabel *glyph = new QLabel(this);
+    glyph->setObjectName("pixmap");
+    glyph->setFixedSize(64, 64);
+    QPixmap pm(64, 64);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setPen(QPen(palette().color(QPalette::WindowText), 3));
+    p.drawEllipse(12, 12, 40, 40);
+    p.end();
+    glyph->setPixmap(pm);
+    QLabel *label = new QLabel(text, this);
+    label->setObjectName("label");
+    label->setStyleSheet("padding-left: 20px;");
+    QFont f = label->font();
+    f.setPixelSize(30);
+    label->setFont(f);
+    l->addWidget(glyph);
+    l->addWidget(label, 1);
+  }
+
+protected:
+  void paintEvent(QPaintEvent *) override {
+    QPainter p(this);
+    p.fillRect(QRect(0, height() - 1, width(), 1), palette().color(QPalette::WindowText));
+  }
+};
+
+// buildMore returns a page with the rows of Ui_MoreView. With asMoreView false
+// the page is a plain QWidget with the same rows.
+static QWidget *buildMore(bool asMoreView, int w, int h, bool dark) {
+  QWidget *page = asMoreView ? new MoreView() : new QWidget();
+  page->resize(w, h);
+  if (dark) {
+    page->setStyleSheet("* { color: white; background-color: black; }");
+  }
+  QVBoxLayout *outer = new QVBoxLayout(page);
+  outer->setContentsMargins(0, 0, 0, 0);
+  QWidget *container = new QWidget(page);
+  container->setObjectName("moreContainer");
+  QVBoxLayout *rows = new QVBoxLayout(container);
+  rows->setContentsMargins(0, 0, 0, 0);
+  rows->setSpacing(0);
+  rows->addWidget(new SimMoreItem("activityButton", "Activity", container));
+  rows->addWidget(new SimMoreItem("notebooksButton", "Notebooks", container));
+  rows->addWidget(new SimMoreItem("settingsButton", "Settings", container));
+  rows->addWidget(new SimMoreItem("helpButton", "Help", container));
+  outer->addWidget(container);
+  outer->addStretch(1);
+  return page;
+}
+
+// checkMoreRows returns how many kpm rows the page has, and checks the place,
+// height and visibility of a single row.
+static int checkMoreRows(QWidget *page, char const *step, bool &ok) {
+  QWidget *container = page->findChild<QWidget *>("moreContainer");
+  QList<QWidget *> found = container->findChildren<QWidget *>("nkpmMoreRow", Qt::FindDirectChildrenOnly);
+  if (found.size() == 1) {
+    QBoxLayout *l = qobject_cast<QBoxLayout *>(container->layout());
+    QWidget *help = container->findChild<QWidget *>("helpButton");
+    QWidget *row = found.first();
+    if (l->indexOf(row) != l->indexOf(help) - 1) {
+      std::fprintf(stderr, "sim: FAIL %s: the row is at %d, Help at %d\n", step, l->indexOf(row), l->indexOf(help));
+      ok = false;
+    }
+    if (!row->isVisible()) {
+      std::fprintf(stderr, "sim: FAIL %s: the row is not visible\n", step);
+      ok = false;
+    }
+    if (row->height() != help->height()) {
+      std::fprintf(stderr, "sim: FAIL %s: row height %d, Help height %d\n", step, row->height(), help->height());
+      ok = false;
+    }
+  }
+  return found.size();
+}
+
+static int runExerciseMoreRow(QString const &dir, int w, int h) {
+  QDir().mkpath(dir);
+  bool ok = true;
+  nkpm_morerow_init(moreRowOpen);
+
+  // 1. The first More page: one row above Help, visible at the first show.
+  QWidget *page = buildMore(true, w, h, false);
+  page->show();
+  int n = checkMoreRows(page, "first show", ok);
+  if (n != 1) {
+    std::fprintf(stderr, "sim: FAIL first show: %d rows, want 1\n", n);
+    ok = false;
+  }
+  QApplication::processEvents();
+  page->grab().save(dir + "/more-row.png");
+
+  // 2. Hide and show again (Nickel keeps the page): still one row.
+  page->hide();
+  page->show();
+  QApplication::processEvents();
+  n = checkMoreRows(page, "show again", ok);
+  if (n != 1) {
+    std::fprintf(stderr, "sim: FAIL show again: %d rows, want 1\n", n);
+    ok = false;
+  }
+
+  // 3. A tap opens the UI.
+  QWidget *row = page->findChild<QWidget *>("nkpmMoreRow");
+  if (row) {
+    sendClick(row);
+  }
+  if (moreRowOpened != 1) {
+    std::fprintf(stderr, "sim: FAIL tap: open called %d times, want 1\n", moreRowOpened);
+    ok = false;
+  }
+  delete page;
+
+  // 4. A new MoreView (Nickel builds the page again): one row.
+  page = buildMore(true, w, h, true);
+  page->show();
+  QApplication::processEvents();
+  n = checkMoreRows(page, "new page", ok);
+  if (n != 1) {
+    std::fprintf(stderr, "sim: FAIL new page: %d rows, want 1\n", n);
+    ok = false;
+  }
+  page->grab().save(dir + "/more-row-dark.png");
+  delete page;
+
+  // 5. Not a MoreView: no row.
+  page = buildMore(false, w, h, false);
+  page->show();
+  QApplication::processEvents();
+  n = checkMoreRows(page, "other page", ok);
+  if (n != 0) {
+    std::fprintf(stderr, "sim: FAIL other page: %d rows, want 0\n", n);
+    ok = false;
+  }
+  delete page;
+
+  std::fprintf(stderr, "sim: %s --exercise-morerow\n", ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
   QApplication app(argc, argv);
 
@@ -2505,6 +2671,7 @@ int main(int argc, char **argv) {
   QString appTreeDir;
   QString tabsDir;
   QString sshDirArg;
+  QString moreRowDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -2545,6 +2712,8 @@ int main(int argc, char **argv) {
       tabsDir = args.at(++i);
     } else if (a == "--exercise-ssh" && i + 1 < args.size()) {
       sshDirArg = args.at(++i);
+    } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
+      moreRowDir = args.at(++i);
     } else if (a == "--exercise-sync") {
       exerciseSync = true;
     } else if (a == "--exercise-staged") {
@@ -2566,6 +2735,10 @@ int main(int argc, char **argv) {
   if (exerciseReload && !sizeGiven) {
     w = 600;
     h = 360;
+  }
+
+  if (!moreRowDir.isEmpty()) {
+    return runExerciseMoreRow(moreRowDir, w, h);
   }
 
   nickelstub_install(w, h);

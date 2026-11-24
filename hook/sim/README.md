@@ -372,9 +372,14 @@ them — so only `check`'s latest/update pair is ever synthesized, and only by
   tab depends on it, so without it the tab restyle would not show offscreen. The
   sim runs Qt 5.15, so whether the unpolish/polish restyle works on Kobo's Qt 5.2.1
   is device test T8.
-- **Menu injection**: the "Package manager" More-menu entry
-  (`nkpm.cc _nkpm_menu_hook`) is device-only; the sim opens `BrowseDialog`
-  directly.
+- **More page row**: `--exercise-morerow <dir>` runs `src/morerow.cc` on a fake
+  `MoreView` (Settings, Help and other rows with the `pixmap` and `label`
+  children of a Nickel `IconLeftButton`). It checks one row directly above
+  Help, the height of Help, a tap, a new page and a page that is not a
+  `MoreView`, and writes `more-row.png` and `more-row-dark.png`. The crash
+  guard writes to `/mnt/onboard`, which the sim does not have, so the sim logs
+  that the guard is off. `hook/test/moreguard_test.cc` tests the guard. The
+  other screenshot modes open `BrowseDialog` directly.
 - **Wi-Fi gate**: always reports connected, so the connect spinner / failure
   dialog paths aren't exercised.
 - **Keyboard**: the desktop's real keyboard types into the search box; Return

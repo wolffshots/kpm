@@ -62,6 +62,15 @@ public:
   explicit MainNavView(QWidget *parent);
 };
 
+// Fake More page for --exercise-morerow. The class is named MoreView so that
+// QObject::inherits("MoreView") in hook/src/morerow.cc matches it, as on the
+// device.
+class MoreView : public QWidget {
+  Q_OBJECT
+public:
+  explicit MoreView(QWidget *parent = nullptr) : QWidget(parent) {}
+};
+
 // SimStatusBarController wraps the fake status-bar widget; hide/show/isVisible
 // drive its visibility, standing in for Nickel's StatusBarController (a QObject).
 class SimStatusBarController : public QObject {
