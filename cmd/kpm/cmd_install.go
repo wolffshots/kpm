@@ -89,8 +89,8 @@ func (a *App) cmdInstall(args []string) int {
 	// A tgz package needs an [fw6] build on firmware 6.x (QT6-FIRMWARE6.md
 	// section 3c rule 4). Refuse it before anything is written.
 	line := a.paths.Line()
-	if !entry.Def.ToPackage(id, entry.Registry, "").AvailableOn(line) {
-		msg := fmt.Sprintf("%s has no build for firmware 6.x.", id)
+	if why := entry.Def.ToPackage(id, entry.Registry, "").UnavailableReason(line); why != "" {
+		msg := fmt.Sprintf("%s: %s.", id, why)
 		failJSON(msg)
 		fmt.Fprintln(os.Stderr, "kpm install:", msg)
 		return exitError

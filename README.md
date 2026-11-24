@@ -177,6 +177,7 @@ On 6.x, kpm changes these things:
 - A tgz package installs on 6.x only when its def has an `[fw6]` table (see `REGISTRY.md`). Else `install` and `update` refuse it with "no build for firmware 6.x". `update --all` skips it with a note. The UI shows the reason in place of Install.
 - A `Kobo.tgz` of a package can write only under `imageformats/`. kpm refuses a `KoboRoot.tgz` as a 6.x asset.
 - App-tree and file packages (KOReader, fonts, dictionaries) install on both lines without an `[fw6]` table.
+- A def with `builtin_fw6` is never available on 6.x, because the firmware has the function built in. kpm shows "built into firmware 6.x" and the text of the def.
 - `kpm add` writes the asset into an `[fw6]` table. The default asset there is `Kobo.tgz`.
 - A kpm self-update stages the `Kobo.tgz` of the release. At the next boot, the seed copies the new binary.
 
@@ -190,6 +191,7 @@ On the first mutating run after a firmware change, kpm does these things:
 - It marks kpm itself for a reinstall when its hook is gone. `kpm check` shows "REINSTALL (files missing)", and `kpm update --all` installs kpm again.
 - It syncs a registry def that has no `[fw6]` table from the registry cache, when the registry def has one. `kpm registry refresh` does the same.
 - If the line changed, it deletes a `KoboRoot.tgz` that it staged and that the new firmware does not read.
+- On 6.x it uninstalls each package whose def has `builtin_fw6`, with purge, and deletes its def. `kpm registry refresh` does the same. NickelClock is an example: firmware 6.x has a reader clock.
 
 Nothing on the device can start kpm after the update. To start again, install one `Kobo.tgz` by hand:
 

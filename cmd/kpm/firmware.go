@@ -9,6 +9,7 @@ import (
 
 	"kpm/internal/device"
 	"kpm/internal/state"
+	"kpm/internal/uninstall"
 )
 
 // The firmware-change check (QT6-FIRMWARE6.md section 3f). A firmware update
@@ -161,5 +162,59 @@ func (a *App) syncForLine() {
 		if p.Registry != "" && !p.AvailableOn(line) {
 			a.syncOne(cfg, p, false)
 		}
+	}
+}
+
+// removeBuiltin uninstalls each package that firmware 6.x has built in
+// (builtin_fw6, QT6-FIRMWARE6.md section 3g). It runs on line 6 after
+// syncForLine, so a def that just got the key from the registry counts. kpm
+// runs the uninstall recipe with purge, then deletes the def and the state. A
+// failed removal keeps both, and the next firmware change or registry refresh
+// tries again. The caller saves the state.
+func (a *App) removeBuiltin() {
+	if a.paths.Line() != device.Line6 {
+		return
+	}
+	pkgs, err := a.loadPackages()
+	if err != nil {
+		return
+	}
+	for _, p := range pkgs {
+		if p.BuiltinFw6 == "" || p.ID == selfID {
+			continue
+		}
+		if err := deleteGuard(); err != nil {
+			a.paths.Log("WARN", fmt.Sprintf("%s  built into firmware 6.x, not removed: %v", p.ID, err))
+			continue
+		}
+		ps := a.state.Get(p.ID)
+		plan, err := uninstall.Compute(ps.Manifest, p.Uninstall, true)
+		if err != nil {
+			a.paths.Log("WARN", fmt.Sprintf("%s  built into firmware 6.x, not removed: %v", p.ID, err))
+			continue
+		}
+		if plan.RunBefore != "" {
+			if err := runHook(plan.RunBefore); err != nil {
+				a.paths.Log("WARN", fmt.Sprintf("%s  built into firmware 6.x, not removed: run_before failed: %v", p.ID, err))
+				continue
+			}
+		}
+		res := uninstall.Execute(a.paths, plan)
+		if plan.RunAfter != "" {
+			if err := runHook(plan.RunAfter); err != nil {
+				a.paths.Log("WARN", fmt.Sprintf("%s  run_after failed: %v", p.ID, err))
+			}
+		}
+		a.logUninstall(p.ID, plan, res)
+		if !res.OK() {
+			a.paths.Log("WARN", fmt.Sprintf("%s  built into firmware 6.x, removal partial: %d failed, %d skipped", p.ID, len(res.Failed), len(res.Skipped)))
+			continue
+		}
+		if err := os.Remove(a.paths.PackageFile(p.ID)); err != nil && !os.IsNotExist(err) {
+			a.paths.Log("WARN", fmt.Sprintf("%s  built into firmware 6.x, could not remove its def: %v", p.ID, err))
+			continue
+		}
+		delete(a.state.Packages, p.ID)
+		a.paths.Log("INFO", fmt.Sprintf("%s  built into firmware 6.x (%s); uninstalled", p.ID, p.BuiltinFw6))
 	}
 }

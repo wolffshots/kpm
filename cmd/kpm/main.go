@@ -305,6 +305,7 @@ func newApp(mutating bool) (*App, error) {
 		if fwChanged {
 			a.forgetWipedInstalls()
 			a.syncForLine()
+			a.removeBuiltin()
 		}
 		a.state.Firmware = curFw
 		if err := a.state.Save(); err != nil {

@@ -61,6 +61,7 @@ type PackageDef struct {
 	NhName      string             `toml:"nh_name,omitempty"`      // DOCTOR.md
 	UpdateCheck string             `toml:"update_check,omitempty"` // INTEGRITY.md §3
 	Conflicts   []string           `toml:"conflicts,omitempty"`    // INTEGRITY.md §4
+	BuiltinFw6  string             `toml:"builtin_fw6,omitempty"`  // QT6-FIRMWARE6.md section 3g
 	Install     *config.Install    `toml:"install,omitempty"`      // APP-TREE.md §2
 	Fw6         *config.Fw6        `toml:"fw6,omitempty"`          // QT6-FIRMWARE6.md section 3c
 	Uninstall   config.Uninstall   `toml:"uninstall"`
@@ -175,6 +176,10 @@ func ParseManifest(data []byte) (*Manifest, error) {
 			continue
 		}
 		if err := def.Fw6.Validate(); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateBuiltinFw6(def.BuiltinFw6); err != nil {
 			drop(id, err.Error())
 			continue
 		}

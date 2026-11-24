@@ -56,15 +56,9 @@ func (a *App) cmdUninstall(args []string) int {
 	// overridden (a dev/CI sandbox) but KPM_SYSROOT is not, HostPath would map
 	// deletions onto the real "/", so refuse — even on Linux, where the non-Linux
 	// guard below wouldn't catch it. On a real device both are unset (G5).
-	if os.Getenv("KPM_SYSROOT") == "" {
-		if os.Getenv("KPM_ROOT") != "" {
-			fmt.Fprintln(os.Stderr, "kpm uninstall: KPM_ROOT is set but KPM_SYSROOT is not — refusing to delete against the real rootfs; set KPM_SYSROOT")
-			return exitError
-		}
-		if runtime.GOOS != "linux" {
-			fmt.Fprintln(os.Stderr, "kpm uninstall: set KPM_SYSROOT when running off-device")
-			return exitError
-		}
+	if err := deleteGuard(); err != nil {
+		fmt.Fprintln(os.Stderr, "kpm uninstall:", err)
+		return exitError
 	}
 
 	pkg, err := a.loadPackage(id)
@@ -298,4 +292,21 @@ func runHook(command string) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
+}
+
+// deleteGuard refuses deletions off-device without KPM_SYSROOT. Deletions
+// resolve against KPM_SYSROOT. If KPM_ROOT is overridden (a dev/CI sandbox) but
+// KPM_SYSROOT is not, HostPath would map deletions onto the real "/". On a real
+// device both are unset (G5).
+func deleteGuard() error {
+	if os.Getenv("KPM_SYSROOT") != "" {
+		return nil
+	}
+	if os.Getenv("KPM_ROOT") != "" {
+		return fmt.Errorf("KPM_ROOT is set but KPM_SYSROOT is not — refusing to delete against the real rootfs; set KPM_SYSROOT")
+	}
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("set KPM_SYSROOT when running off-device")
+	}
+	return nil
 }

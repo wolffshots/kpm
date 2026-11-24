@@ -74,3 +74,62 @@ func TestSaveLoadFw6(t *testing.T) {
 		t.Errorf("round trip fw6 = %+v", out.Fw6)
 	}
 }
+
+// builtin_fw6 (QT6-FIRMWARE6.md section 3g): the package is not available on
+// line 6, also with an [fw6] table, and stays available on line 4.
+func TestUnavailableReasonBuiltin(t *testing.T) {
+	p := Package{Asset: "KoboRoot.tgz", Fw6: &Fw6{Asset: "Kobo.tgz"}, BuiltinFw6: "Nickel shows a clock"}
+	if got := p.UnavailableReason(Line4); got != "" {
+		t.Errorf("line 4 reason = %q, want available", got)
+	}
+	if got := p.UnavailableReason(Line6); got != "built into firmware 6.x: Nickel shows a clock" || p.AvailableOn(Line6) {
+		t.Errorf("line 6 reason = %q, want the builtin text", got)
+	}
+	p.BuiltinFw6 = ""
+	p.Fw6 = nil
+	if got := p.UnavailableReason(Line6); got != Unavailable6 {
+		t.Errorf("line 6 reason without fw6 = %q, want %q", got, Unavailable6)
+	}
+}
+
+func TestValidateBuiltinFw6(t *testing.T) {
+	for _, c := range []struct {
+		s  string
+		ok bool
+	}{
+		{"", true},
+		{"Nickel shows a clock", true},
+		{strings.Repeat("a", MaxBuiltinFw6), true},
+		{strings.Repeat("a", MaxBuiltinFw6+1), false},
+		{"two\nlines", false},
+	} {
+		if err := ValidateBuiltinFw6(c.s); (err == nil) != c.ok {
+			t.Errorf("ValidateBuiltinFw6(%q) = %v, want ok %v", c.s, err, c.ok)
+		}
+	}
+}
+
+// builtin_fw6 survives a SaveReplace and a Load, and a sync that drops it
+// deletes it from the file.
+func TestBuiltinFw6RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nickelclock.toml")
+	p := &Package{Name: "NickelClock", Source: "github.com/shermp/NickelClock", Forge: ForgeGitHub,
+		Asset: "NickelClock-*.zip", BuiltinFw6: "Nickel shows a clock"}
+	if err := SaveReplace(path, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path, "nickelclock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BuiltinFw6 != "Nickel shows a clock" {
+		t.Errorf("loaded builtin_fw6 = %q", got.BuiltinFw6)
+	}
+	p.BuiltinFw6 = ""
+	if err := SaveReplace(path, p); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := Load(path, "nickelclock"); got.BuiltinFw6 != "" {
+		t.Errorf("builtin_fw6 = %q after a SaveReplace without it, want gone", got.BuiltinFw6)
+	}
+}
