@@ -101,6 +101,14 @@ func (p Paths) RegistryCache(name string) string {
 	return filepath.Join(p.CacheDir(), "registry-"+name+".toml")
 }
 
+// CarryoverDir holds the bundle for the upgrade to firmware 6.x and the 6.x
+// build of each package in it (QT6-FIRMWARE6.md section 3h).
+func (p Paths) CarryoverDir() string { return filepath.Join(p.AddsKpm(), "carryover") }
+
+// CarryoverBundle is the Kobo.tgz that the 4.x rcK copies to .kobo/Kobo.tgz
+// during the upgrade. The rcK block names this path, so it must not change.
+func (p Paths) CarryoverBundle() string { return filepath.Join(p.CarryoverDir(), "Kobo.tgz") }
+
 // SSHDir holds the state of `kpm ssh` (SSH.md section 3). The uninstall keeps it.
 func (p Paths) SSHDir() string { return filepath.Join(p.AddsKpm(), "ssh") }
 
