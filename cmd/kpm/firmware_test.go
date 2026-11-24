@@ -420,3 +420,89 @@ func TestDoctorSelfQt6Hook(t *testing.T) {
 		t.Errorf("verdict %q plugin %q, want loaded from libnkpm-qt6.so", res.verdict, res.plugin)
 	}
 }
+
+const clockManifest = `schema_version = 1
+[packages.nickelclock]
+name = "NickelClock"
+source = "github.com/shermp/NickelClock"
+forge = "github"
+asset = "NickelClock-*.zip"
+builtin_fw6 = "Nickel shows a clock"
+
+  [packages.nickelclock.uninstall]
+  method      = "marker-remove"
+  marker_file = "/mnt/onboard/.adds/nickelclock/uninstall"
+  purge_paths = ["/mnt/onboard/.adds/nickelclock/**"]
+`
+
+// The upgrade to 6.x uninstalls a package that firmware 6.x has built in
+// (QT6-FIRMWARE6.md section 3g). The local def comes from an older registry
+// without builtin_fw6, so kpm first syncs it from the registry cache. Then it
+// purges the user files and deletes the def and the state.
+func TestFirmwareChangeRemovesBuiltin(t *testing.T) {
+	a := newTestApp(t)
+	sys := t.TempDir()
+	t.Setenv("KPM_SYSROOT", sys)
+	seedRegistry(t, a, "main", clockManifest)
+	old := &config.Package{Name: "NickelClock", Source: "github.com/shermp/NickelClock", Forge: "github",
+		Asset: "NickelClock-*.zip", Registry: "main", Uninstall: config.Uninstall{Method: "marker-remove",
+			MarkerFile: "/mnt/onboard/.adds/nickelclock/uninstall", PurgePaths: []string{"/mnt/onboard/.adds/nickelclock/**"}}}
+	if err := config.Save(a.paths.PackageFile("nickelclock"), old); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := registry.HashDef(registry.DefFromPackage(old))
+	ps := a.state.Get("nickelclock")
+	ps.SyncedDefSHA256 = h
+	ps.InstalledVersion = "v0.4.0"
+	ps.Manifest = []string{"usr/local/Kobo/imageformats/libnickelclock.so", "mnt/onboard/.adds/nickelclock/uninstall"}
+	a.state.Firmware = fw4
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(sys, "mnt", "onboard", ".adds", "nickelclock")
+	mustWrite(t, filepath.Join(dir, "uninstall"), "")
+	mustWrite(t, filepath.Join(dir, "settings.ini"), "[main]\n")
+
+	writeFirmware(t, a, fw6)
+	var b *App
+	captureStdout(t, func() {
+		var err error
+		if b, err = newApp(true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	defer b.releaseLock()
+
+	if _, err := os.Stat(b.paths.PackageFile("nickelclock")); !os.IsNotExist(err) {
+		t.Error("the nickelclock def must be deleted")
+	}
+	if _, ok := b.state.Packages["nickelclock"]; ok {
+		t.Error("the nickelclock state must be deleted")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "settings.ini")); !os.IsNotExist(err) {
+		t.Error("the purge_paths files must be deleted")
+	}
+	if !logContains(t, b, "nickelclock  built into firmware 6.x") {
+		t.Error("the removal must be logged")
+	}
+}
+
+// On line 4, builtin_fw6 changes nothing: the package stays.
+func TestRemoveBuiltinLine4(t *testing.T) {
+	a := newTestApp(t)
+	t.Setenv("KPM_SYSROOT", t.TempDir())
+	writeFirmware(t, a, fw4)
+	p := &config.Package{Name: "NickelClock", Source: "github.com/shermp/NickelClock", Forge: "github",
+		Asset: "NickelClock-*.zip", BuiltinFw6: "Nickel shows a clock"}
+	if err := config.Save(a.paths.PackageFile("nickelclock"), p); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("nickelclock").InstalledVersion = "v0.4.0"
+	a.removeBuiltin()
+	if _, err := os.Stat(a.paths.PackageFile("nickelclock")); err != nil {
+		t.Error("the def must stay on line 4")
+	}
+	if a.state.Get("nickelclock").InstalledVersion != "v0.4.0" {
+		t.Error("the state must stay on line 4")
+	}
+}

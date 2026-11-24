@@ -166,10 +166,10 @@ type jsonSearchPkg struct {
 
 // availability returns the available and unavailable_reason fields of a row.
 func availability(p config.Package, line int) (bool, *string) {
-	if p.AvailableOn(line) {
-		return true, nil
+	if why := p.UnavailableReason(line); why != "" {
+		return false, ptr(why)
 	}
-	return false, ptr(config.Unavailable6)
+	return true, nil
 }
 
 // kindMod is the kind every package with no content-dir destination reports —

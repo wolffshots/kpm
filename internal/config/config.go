@@ -463,6 +463,12 @@ type Package struct {
 	// reason as Install: a def without the table must hash as before.
 	Fw6 *Fw6 `toml:"fw6,omitempty"`
 
+	// BuiltinFw6 is set when firmware 6.x has the function of the package built
+	// in. The text says what replaces it. On 6.x the package is not available,
+	// also with an [fw6] table, and kpm uninstalls it (QT6-FIRMWARE6.md section
+	// 3g). A top-level key, so kpm 0.13 and 0.14 ignore it and keep the def.
+	BuiltinFw6 string `toml:"builtin_fw6,omitempty"`
+
 	Uninstall Uninstall   `toml:"uninstall"`
 	Configs   []ModConfig `toml:"configs,omitempty"` // editable config declarations (CONFIG.md §2)
 
@@ -556,9 +562,39 @@ func (p Package) ForLine(line int) Package {
 
 // AvailableOn reports whether the package can install on the firmware line. On
 // line 6 a tgz package needs an [fw6] table. The app-tree and file methods
-// write to the user partition, so they install on both lines.
+// write to the user partition, so they install on both lines. A package that
+// firmware 6.x has built in is never available on line 6.
 func (p Package) AvailableOn(line int) bool {
-	return line != Line6 || p.InstallsLive() || p.Fw6 != nil
+	return p.UnavailableReason(line) == ""
+}
+
+// UnavailableReason returns why the package cannot install on the firmware
+// line, or "" when it can.
+func (p Package) UnavailableReason(line int) string {
+	switch {
+	case line != Line6:
+		return ""
+	case p.BuiltinFw6 != "":
+		return "built into firmware 6.x: " + p.BuiltinFw6
+	case p.InstallsLive() || p.Fw6 != nil:
+		return ""
+	}
+	return Unavailable6
+}
+
+// MaxBuiltinFw6 caps the builtin_fw6 text. The UI shows it in one row.
+const MaxBuiltinFw6 = 120
+
+// ValidateBuiltinFw6 checks the builtin_fw6 text of a registry def: one line
+// of at most MaxBuiltinFw6 bytes. An empty text is valid.
+func ValidateBuiltinFw6(s string) error {
+	if len(s) > MaxBuiltinFw6 {
+		return fmt.Errorf("builtin_fw6 is %d bytes, over the %d-byte limit", len(s), MaxBuiltinFw6)
+	}
+	if strings.ContainsAny(s, "\r\n\x00") {
+		return fmt.Errorf("builtin_fw6 must be one line")
+	}
+	return nil
 }
 
 // EffectiveInstallMethod returns the package's install method with the default
@@ -811,6 +847,7 @@ func Save(path string, p *Package) error {
 	if p.Fw6 != nil {
 		m["fw6"] = p.Fw6
 	}
+	setOptional(m, "builtin_fw6", p.BuiltinFw6)
 
 	// Merge the [uninstall] table: overlay only non-zero known fields onto any
 	// existing (possibly unknown-key-bearing) table; never inject empty keys.
@@ -840,7 +877,7 @@ func Save(path string, p *Package) error {
 // Deleting "install" wholesale via knownTopKeys would have destroyed those
 // unknown keys.
 var (
-	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums", "fw6"}
+	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums", "fw6", "builtin_fw6"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
 	knownInstallKeys   = []string{"method", "root", "dest", "launcher"}
 )
@@ -876,6 +913,7 @@ func SaveReplace(path string, p *Package) error {
 	if p.Fw6 != nil {
 		m["fw6"] = p.Fw6
 	}
+	setOptional(m, "builtin_fw6", p.BuiltinFw6)
 
 	// Clear known [install] keys, overlay: an [install] block a registry dropped
 	// disappears locally, unknown keys inside it survive (§12.2).

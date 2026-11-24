@@ -97,3 +97,53 @@ func TestHashDefFw6(t *testing.T) {
 		t.Errorf("FieldDiffs = %v, want the fw6 line", d)
 	}
 }
+
+// builtin_fw6 (QT6-FIRMWARE6.md section 3g) parses, an invalid text drops the
+// def, it changes the hash, and a def without it hashes as before.
+func TestBuiltinFw6Def(t *testing.T) {
+	m, err := ParseManifest([]byte(`schema_version = 1
+[packages.nickelclock]
+name = "NickelClock"
+source = "github.com/shermp/NickelClock"
+forge = "github"
+asset = "NickelClock-*.zip"
+builtin_fw6 = "Nickel shows a clock"
+
+[packages.bad]
+name = "Bad"
+source = "github.com/o/bad"
+forge = "github"
+asset = "KoboRoot.tgz"
+builtin_fw6 = "two\nlines"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := m.Packages["nickelclock"]
+	if def == nil || def.BuiltinFw6 != "Nickel shows a clock" {
+		t.Fatalf("nickelclock = %+v", def)
+	}
+	if len(m.Dropped) != 1 || m.Dropped[0].ID != "bad" {
+		t.Errorf("dropped = %v, want bad", m.Dropped)
+	}
+	plain := *def
+	plain.BuiltinFw6 = ""
+	h0, _ := HashDef(&plain)
+	h1, _ := HashDef(def)
+	if h0 == h1 {
+		t.Error("builtin_fw6 must change the hash")
+	}
+	if h, _ := HashDef(DefFromPackage(plain.ToPackage("nickelclock", "main", ""))); h != h0 {
+		t.Error("a def without builtin_fw6 must hash as before")
+	}
+	p := def.ToPackage("nickelclock", "main", "")
+	if p.BuiltinFw6 != def.BuiltinFw6 {
+		t.Errorf("ToPackage builtin_fw6 = %q", p.BuiltinFw6)
+	}
+	if h, _ := HashDef(DefFromPackage(p)); h != h1 {
+		t.Error("a projected def must hash as its registry def (no drift)")
+	}
+	if d := FieldDiffs(DefFromPackage(p), &plain); len(d) != 1 || !strings.HasPrefix(d[0], "builtin_fw6:") {
+		t.Errorf("FieldDiffs = %v, want the builtin_fw6 line", d)
+	}
+}

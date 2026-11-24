@@ -113,6 +113,8 @@ func HashDef(def *PackageDef) (string, error) {
 	// Its tested_fw is advisory and registry-only, like the base tested_fw
 	// (QT6-FIRMWARE6.md section 3c).
 	norm.Fw6 = normFw6(norm.Fw6)
+	// builtin_fw6 is functional: it removes the package on 6.x, so it must reach
+	// the local def through sync. omitempty keeps old hashes.
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(&norm); err != nil {
@@ -207,6 +209,7 @@ func DefFromPackage(p *config.Package) *PackageDef {
 		Checksums:   p.Checksums,
 		Install:     p.Install.Clone(),
 		Fw6:         localFw6(p.Fw6),
+		BuiltinFw6:  p.BuiltinFw6,
 		Uninstall:   p.Uninstall,
 		Configs:     p.Configs,
 	}
@@ -236,6 +239,7 @@ func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 		Checksums:   d.Checksums,
 		Install:     d.Install.Clone(), // deep copy — never share the pointer (§12.2)
 		Fw6:         localFw6(d.Fw6),
+		BuiltinFw6:  d.BuiltinFw6,
 		Uninstall:   d.Uninstall,
 		Configs:     d.Configs,
 	}
@@ -257,6 +261,7 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	add("min_kpm", local.MinKpm, remote.MinKpm)
 	add("update_check", local.UpdateCheck, remote.UpdateCheck)
 	add("conflicts", quoteList(local.Conflicts), quoteList(remote.Conflicts))
+	add("builtin_fw6", local.BuiltinFw6, remote.BuiltinFw6)
 	lc0, _ := HashDef(&PackageDef{Checksums: local.Checksums})
 	rc0, _ := HashDef(&PackageDef{Checksums: remote.Checksums})
 	if lc0 != rc0 {

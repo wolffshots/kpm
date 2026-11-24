@@ -589,8 +589,8 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	// package without an [fw6] table cannot install on 6.x. Like a conflict, this
 	// is permanent: a skip with a note under --all, a failure when named.
 	line := a.paths.Line()
-	if !p.AvailableOn(line) {
-		return resolved{}, nil, true, config.Unavailable6, nil
+	if why := p.UnavailableReason(line); why != "" {
+		return resolved{}, nil, true, why, nil
 	}
 	lp := p.ForLine(line)
 	p = &lp

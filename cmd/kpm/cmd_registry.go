@@ -316,6 +316,7 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	// cache when the registry def has a build for this line (QT6-FIRMWARE6.md
 	// section 3f). syncOne writes state, so save again.
 	a.syncForLine()
+	a.removeBuiltin()
 	if err := a.state.Save(); err != nil {
 		fmt.Fprintln(os.Stderr, "kpm registry refresh: state:", err)
 	}
