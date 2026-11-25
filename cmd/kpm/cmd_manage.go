@@ -214,6 +214,13 @@ func (a *App) cmdStatus(args []string) int {
 		return a.statusJSON()
 	}
 	s := a.paths.ReadStatus()
+	if a.viewChanged {
+		// The boot installed the staging after the last check or update wrote
+		// the summary, so render it again from the viewed state (viewStaged).
+		if pkgs, err := a.loadPackages(); err == nil {
+			s = a.buildStatus(pkgs)
+		}
+	}
 	if s == "" {
 		fmt.Println("kpm: no status yet — run \"kpm check\"")
 	} else {

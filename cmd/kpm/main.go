@@ -265,6 +265,10 @@ type App struct {
 	// use — netUp() falls back to device.WaitForNetwork; a test injects a fast stub
 	// so the offline paths don't wait out the ~30s network budget.
 	netWait func(host string) bool
+
+	// viewChanged is set when viewStaged changed the state of a read-only
+	// command, so the stored status summary is stale (cmdStatus).
+	viewChanged bool
 }
 
 // newApp resolves paths, ensures directories, loads state, and — for mutating
@@ -297,6 +301,7 @@ func newApp(mutating bool) (*App, error) {
 
 	if !mutating {
 		a.readOnly = true // pure read: no lock, no reconcile/seedSelf, no writes
+		a.viewStaged()
 		return a, nil
 	}
 	// Conditional forge API requests: replay the previous ETag so a forge that
@@ -538,57 +543,12 @@ func (a *App) migrateSelfSource() error {
 // filesystem hiccup can never falsely promote. An uncommitted staging that
 // vanished (a crash before the tgz went live) is rolled back, never promoted.
 func (a *App) reconcile() error {
-	// Self-clearing pass (A): re-verify ONLY packages currently flagged with
-	// missing files — never a blanket sweep, whose false-positive hazard (mods
-	// that legitimately move or delete their own files later) the design rejects.
-	// A package whose files have reappeared clears here on the next mutating run.
-	changed := a.reverifyMissing()
-
-	pending, err := a.stagedTgzPending()
+	promos, warnings, changed, err := a.settleStaged()
 	if err != nil {
-		return fmt.Errorf("reconcile: %w", err)
+		return err
 	}
-	if pending {
-		if changed {
-			return a.state.Save()
-		}
-		return nil // reboot hasn't happened yet
-	}
-	if !a.state.StagedCommitted {
-		// Staged fields may have been recorded, but the tgz never went live
-		// (interrupted stage). Nothing was installed: discard the intent.
-		if a.stateHasStaged() {
-			a.state.RollbackStaged()
-			changed = true
-		}
-		if changed {
-			if serr := a.state.Save(); serr != nil {
-				return fmt.Errorf("reconcile: save state: %w", serr)
-			}
-		}
+	if !changed {
 		return nil
-	}
-	promos := a.state.PromoteStaged()
-	if len(promos) == 0 {
-		// Committed flag set but nothing staged (e.g. already promoted): clear
-		// the stale identity so the guard doesn't see a phantom staging.
-		a.state.RollbackStaged()
-		return a.state.Save()
-	}
-	// Post-install manifest verification (A): the staged->installed flip inferred
-	// "installed" purely from the tgz vanishing, so an rcS failure or foreign tgz
-	// could promote without the files landing. Existence-check each promoted
-	// package's manifest, stamp VerifiedAt, and record any missing members. Never
-	// refuse the promotion (the tgz IS consumed) and never change the exit code.
-	now := time.Now().UTC().Format(state.TimeFormat)
-	var warnings []string
-	for _, pr := range promos {
-		ps := a.state.Get(pr.ID)
-		ps.VerifiedAt = now
-		ps.MissingFiles = verifyManifest(a.paths, ps.Manifest)
-		if len(ps.MissingFiles) > 0 {
-			warnings = append(warnings, fmt.Sprintf("%s  missing: %s", pr.ID, strings.Join(ps.MissingFiles, ", ")))
-		}
 	}
 	if serr := a.state.Save(); serr != nil { // save before logging (B5)
 		return fmt.Errorf("reconcile: save state: %w", serr)
@@ -600,6 +560,76 @@ func (a *App) reconcile() error {
 		a.paths.Log("WARN", "files missing after install: "+w)
 	}
 	return nil
+}
+
+// settleStaged is the in-memory half of reconcile. It applies the outcome of
+// the staged tgz to a.state and reports the promotions, the missing-file
+// warnings, and whether state changed. It writes and logs nothing.
+func (a *App) settleStaged() (promos []state.Promotion, warnings []string, changed bool, err error) {
+	// Self-clearing pass (A): re-verify ONLY packages currently flagged with
+	// missing files — never a blanket sweep, whose false-positive hazard (mods
+	// that legitimately move or delete their own files later) the design rejects.
+	// A package whose files have reappeared clears here on the next mutating run.
+	changed = a.reverifyMissing()
+
+	pending, err := a.stagedTgzPending()
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("reconcile: %w", err)
+	}
+	if pending {
+		return nil, nil, changed, nil // reboot hasn't happened yet
+	}
+	if !a.state.StagedCommitted {
+		// Staged fields may have been recorded, but the tgz never went live
+		// (interrupted stage). Nothing was installed: discard the intent.
+		if a.stateHasStaged() {
+			a.state.RollbackStaged()
+			changed = true
+		}
+		return nil, nil, changed, nil
+	}
+	promos = a.state.PromoteStaged()
+	if len(promos) == 0 {
+		// Committed flag set but nothing staged (e.g. already promoted): clear
+		// the stale identity so the guard doesn't see a phantom staging.
+		a.state.RollbackStaged()
+		return nil, nil, true, nil
+	}
+	// Post-install manifest verification (A): the staged->installed flip inferred
+	// "installed" purely from the tgz vanishing, so an rcS failure or foreign tgz
+	// could promote without the files landing. Existence-check each promoted
+	// package's manifest, stamp VerifiedAt, and record any missing members. Never
+	// refuse the promotion (the tgz IS consumed) and never change the exit code.
+	now := time.Now().UTC().Format(state.TimeFormat)
+	for _, pr := range promos {
+		ps := a.state.Get(pr.ID)
+		ps.VerifiedAt = now
+		ps.MissingFiles = verifyManifest(a.paths, ps.Manifest)
+		if len(ps.MissingFiles) > 0 {
+			warnings = append(warnings, fmt.Sprintf("%s  missing: %s", pr.ID, strings.Join(ps.MissingFiles, ", ")))
+		}
+	}
+	return promos, warnings, true, nil
+}
+
+// viewStaged gives a read-only command the state that the next mutating run
+// will record. Read-only commands skip reconcile (B1), but the UI opens with
+// `kpm search --json`: without this view it showed "reboot pending" after the
+// boot that installed the package. It runs settleStaged in memory only and
+// writes nothing. After a firmware change it does nothing, because the staged
+// slot can move with the firmware line (firmware.go). An error keeps the
+// stored state.
+func (a *App) viewStaged() {
+	cur, ok := a.paths.Firmware()
+	if ok && cur != a.state.Firmware && (a.state.Firmware != "" || device.LineOf(cur) == device.Line6) {
+		return
+	}
+	_, _, changed, err := a.settleStaged()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "kpm:", err)
+		return
+	}
+	a.viewChanged = changed
 }
 
 // reverifyMissing re-runs manifest verification for every package that currently

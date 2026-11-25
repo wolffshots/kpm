@@ -241,7 +241,7 @@ Exit codes: `0` OK or nothing to do, `1` error, `2` partial (some packages faile
 
 Most commands accept `--json`. See [docs/development.md](docs/development.md#machine-readable-output).
 
-After a reboot, the next mutating command (for example `kpm check`) moves staged packages to installed. `kpm status` is read-only and does not do this. After that move, kpm checks that the files of each package are on the device, and logs a `WARN` for each missing file.
+After a reboot, the next mutating command (for example `kpm check`) moves staged packages to installed in `state.json`. Read-only commands (`list`, `search`, `status`) already show these packages as installed, but they do not write the change. After that move, kpm checks that the files of each package are on the device, and logs a `WARN` for each missing file.
 
 `kpm doctor` tells you if an installed mod really loaded. It checks each NickelHook plugin for a failsafe file, a crash log, and whether Nickel mapped it. It reports `loaded`, `not-loaded`, `crashed`, `load-failed` or `unknown`. It reads only files and `/proc`, and it always exits 0.
 
