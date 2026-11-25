@@ -2209,6 +2209,80 @@ static void runExerciseSsh(const QString &dir) {
       []() { sshFail(3, "no rows"); });
 }
 
+// ---- --exercise-tabwidth ------------------------------------------------
+//
+// Nickel gives a primaryButton a min-width (nickelstub.cc models it), so a short tab
+// label grew when it was the active tab. This taps each tab in turn and asserts that
+// no tab moves or resizes at a switch.
+static const char *const kTabNames[] = {"Mods", "Fonts", "Dictionaries", "SSH", "Settings"};
+
+// A failed step is recorded and the tour goes on, so one run measures every tab.
+static bool tabWidthFailed = false;
+
+static QString tabGeometry(BrowseDialog *browse) {
+  QString out;
+  for (const char *name : kTabNames) {
+    QLabel *t = labelIn(browse, name);
+    out += QStringLiteral("%1@%2+%3 ").arg(name).arg(t ? t->x() : -1).arg(t ? t->width() : -1);
+  }
+  return out.trimmed();
+}
+
+static void tabWidthStep(BrowseDialog *browse, const QString &dir, const QString &baseline, int step) {
+  // Mods last again: back to the tab the view opened on.
+  const char *name = step < 5 ? kTabNames[step] : "Mods";
+  QLabel *tab = labelIn(browse, name);
+  if (tab == nullptr) {
+    std::fprintf(stderr, "sim: FAIL - no %s tab\n", name);
+    qApp->exit(5);
+    return;
+  }
+  sendClick(tab);
+  waitUntil([tab]() { return tabActive(tab); }, 10000,
+            [browse, dir, baseline, step, name]() {
+              QTimer::singleShot(300, qApp, [browse, dir, baseline, step, name]() {
+                QString geo = tabGeometry(browse);
+                std::fprintf(stderr, "sim: %s active: %s\n", name, qPrintable(geo));
+                saveGrab(QStringLiteral("%1/tab-%2-%3.png").arg(dir).arg(step).arg(QString(name).toLower()));
+                if (geo != baseline) {
+                  std::fprintf(stderr, "sim: FAIL - the tabs moved or resized when %s became active\n", name);
+                  tabWidthFailed = true;
+                }
+                if (step < 5) {
+                  tabWidthStep(browse, dir, baseline, step + 1);
+                  return;
+                }
+                std::fprintf(stderr, "sim: %s --exercise-tabwidth\n", tabWidthFailed ? "FAIL" : "PASS");
+                qApp->exit(tabWidthFailed ? 6 : 0);
+              });
+            },
+            [name]() {
+              std::fprintf(stderr, "sim: FAIL - the %s tab did not become active\n", name);
+              qApp->exit(7);
+            });
+}
+
+static void runExerciseTabWidth(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        if (browse == nullptr) {
+          std::fprintf(stderr, "sim: FAIL - no BrowseDialog\n");
+          qApp->exit(4);
+          return;
+        }
+        QString baseline = tabGeometry(browse);
+        std::fprintf(stderr, "sim: on open (Mods active): %s\n", qPrintable(baseline));
+        saveGrab(dir + "/tab-0-mods.png");
+        tabWidthStep(browse, dir, baseline, 1);
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
+}
+
 // ---- --exercise-wake ----------------------------------------------------
 //
 // Verifies Dialog's chrome hide/restore AND the sleep/wake ChromeGuard against
@@ -2670,6 +2744,7 @@ int main(int argc, char **argv) {
   QString orphanDir;
   QString appTreeDir;
   QString tabsDir;
+  QString tabWidthDir;
   QString sshDirArg;
   QString moreRowDir;
   bool exerciseSync = false;
@@ -2710,6 +2785,8 @@ int main(int argc, char **argv) {
       appTreeDir = args.at(++i);
     } else if (a == "--exercise-tabs" && i + 1 < args.size()) {
       tabsDir = args.at(++i);
+    } else if (a == "--exercise-tabwidth" && i + 1 < args.size()) {
+      tabWidthDir = args.at(++i);
     } else if (a == "--exercise-ssh" && i + 1 < args.size()) {
       sshDirArg = args.at(++i);
     } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
@@ -2760,6 +2837,8 @@ int main(int argc, char **argv) {
     runExerciseAppTree(appTreeDir);
   } else if (!tabsDir.isEmpty()) {
     runExerciseTabs(tabsDir);
+  } else if (!tabWidthDir.isEmpty()) {
+    runExerciseTabWidth(tabWidthDir);
   } else if (!sshDirArg.isEmpty()) {
     runExerciseSsh(sshDirArg);
   } else if (exerciseSync) {
