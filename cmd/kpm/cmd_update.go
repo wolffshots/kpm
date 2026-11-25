@@ -761,7 +761,7 @@ func firstReservedPath(manifest []string) string {
 	for _, m := range manifest {
 		lm := strings.ToLower(m)
 		if lm == "mnt/onboard/.adds/kpm" || strings.HasPrefix(lm, "mnt/onboard/.adds/kpm/") ||
-			lm == "mnt/onboard/.adds/nm/kpm" ||
+			lm == "mnt/onboard/.adds/nm/kpm" || lm == "mnt/onboard/.adds/nm/kpm-hide" ||
 			lm == "usr/local/kobo/kpm-seed" || strings.HasPrefix(lm, "usr/local/kobo/kpm-seed/") {
 			return m
 		}

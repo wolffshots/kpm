@@ -76,11 +76,13 @@ func SymlinkedConfigParent(p device.Paths, dev string) (string, bool) {
 
 // nmDir is the shared NickelMenu drop-in directory, and nmKpmFile is kpm's own
 // drop-in inside it (device.Paths.NmConfig, expressed device-absolute so the
-// policy engine can compare it without importing device's Root()). No package
-// but kpm may declare either as a launcher target.
+// policy engine can compare it without importing device's Root()). nmKpmHide is
+// the file the kpm hook writes to hide the NickelMenu button (hook/src/launch.h).
+// No package but kpm may declare any of them as a launcher target.
 var (
 	nmDir     = "/mnt/onboard/.adds/nm"
 	nmKpmFile = "/mnt/onboard/.adds/nm/kpm"
+	nmKpmHide = "/mnt/onboard/.adds/nm/kpm-hide"
 )
 
 // FoldPath returns the comparison key for a cleaned absolute device path: ASCII
@@ -283,7 +285,7 @@ func InstallPath(raw string) (string, error) {
 	if classify(abs, nil) != vAllowed {
 		return "", fmt.Errorf("%q is not a writable location", abs)
 	}
-	if pathEqual(abs, nmKpmFile) {
+	if pathEqual(abs, nmKpmFile) || pathEqual(abs, nmKpmHide) {
 		return "", fmt.Errorf("%q is kpm's own NickelMenu drop-in", abs)
 	}
 	return abs, nil
@@ -310,7 +312,7 @@ func LauncherPath(raw string) (string, error) {
 	if !under(abs, nmDir) || pathEqual(abs, nmDir) {
 		return "", fmt.Errorf("install launcher nm_file %q must be under %s", raw, nmDir)
 	}
-	if pathEqual(abs, nmKpmFile) {
+	if pathEqual(abs, nmKpmFile) || pathEqual(abs, nmKpmHide) {
 		return "", fmt.Errorf("install launcher nm_file must not be kpm's own NickelMenu drop-in")
 	}
 	// Belt and braces: /mnt/onboard/.adds/nm is inside the allowlist, so this can

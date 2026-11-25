@@ -79,11 +79,10 @@ device's `PATH` — over SSH/telnet run it by full path or add it to your shell:
 export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
 ```
 
-[NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional but
-recommended**: with it kpm gets on-device menu entries (see "NickelMenu usage"),
-including a second launch point for the graphical UI (the first is the
-"Package manager" row on the More page, see "Graphical UI"); without it kpm is
-a normal CLI over SSH/telnet. NickelDBus
+[NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional**: kpm opens
+from the "Package manager" row on the More page by default (see "Graphical
+UI"). On the Settings tab of the kpm UI you can open kpm from NickelMenu
+instead (see "NickelMenu usage"). NickelDBus
 (`qndb`) is also optional — if present, kpm shows toasts; if not, use the
 **Status** menu entry. What to do next depends on which side you start from:
 
@@ -440,7 +439,11 @@ github_token = "github_pat_..."
 ## NickelMenu usage
 
 The shipped drop-in (`/mnt/onboard/.adds/nm/kpm`) adds four entries to the main
-menu:
+menu. They are active only when the Settings tab of the kpm UI says "Open kpm
+from: NickelMenu" (see "Settings tab"). With the default, the row on the More
+screen, the kpm hook comments out each line of the file with the prefix
+`#kpm-off `, so NickelMenu shows no kpm entries. The hook does this at each
+boot, because a kpm update writes the file again with active entries.
 
 - **Check for updates** — brings Wi-Fi up, runs `kpm check --notify` in the
   background. With NickelDBus you get a toast; otherwise tap **Status**.
@@ -467,12 +470,15 @@ NickelHook Qt mod injected into Nickel. Every kpm package installs it under
 
 Launch it from the **Package manager** row on the Nickel **More** page, directly
 above Help, or from the **NickelMenu** "kpm - Package manager" entry (see
-"NickelMenu usage"). The More row needs no NickelMenu and hooks no Nickel
-function: the hook adds it when Nickel builds the More page. If Nickel crashes
-within 3 seconds after the row first shows in a boot, the file
-`/mnt/onboard/.adds/kpm/.more-row-pending` stays, and the same hook build shows
-no row from the next boot. The NickelMenu entry still works. A new kpm build
-deletes the file and tries again. It opens a full-screen browser that lists every package from your
+"NickelMenu usage"). The Settings tab chooses one of the two. The More row
+needs no NickelMenu and hooks no Nickel function: the hook adds it when Nickel
+builds the More page. If Nickel crashes within 3 seconds after the row first
+shows in a boot, the file `/mnt/onboard/.adds/kpm/.more-row-pending` stays, and
+the same hook build shows no row from the next boot. kpm then opens from
+NickelMenu, with its entries active and the NickelMenu button shown. A new kpm
+build deletes the file and tries again. If a More page shows without its Help
+row (a firmware that changed the page), the hook switches the setting to
+NickelMenu. It opens a full-screen browser that lists every package from your
 registries merged with what's installed, lets you filter with the on-screen
 keyboard, and drills into a per-package view with **Install**, **Update**,
 **Uninstall**, plus registry-wide **Refresh**, **Sync**, and **Update all**.
@@ -557,6 +563,26 @@ podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/nicoverbruggen/kobuild:q
 `KPM_UI_SO` at a prebuilt library to override the path). On Windows the volume
 mount is `-v "C:/…/kpm:/work" -w /work/hook` (set `MSYS_NO_PATHCONV=1` under Git
 Bash).
+
+### Settings tab
+
+The **Settings** tab of the kpm UI has two settings. The hook stores them in
+`/mnt/onboard/.adds/kpm/ui.toml`.
+
+| Setting | Values | Effect |
+|---|---|---|
+| Open kpm from | **Row on the More screen** (default), **NickelMenu** | The row shows on the More page, or the kpm entries are active in NickelMenu. Never both. The change applies at the next open of the More page or of the NickelMenu menu. Without NickelMenu, the tab shows no NickelMenu options and the row always shows. |
+| NickelMenu button | **Shown** (default), **Hidden** | Hides the NickelMenu button in the bottom bar of the home screen. You can change it only when kpm opens from the row on the More screen. Restart the device after you change it. |
+
+To hide the button, the hook writes `/mnt/onboard/.adds/nm/kpm-hide` with the
+NickelMenu line `experimental:menu_main_15505_enabled:0`. NickelMenu v0.6.0
+(firmware 4.x) and the Qt 6 fork (firmware 6.x) read this line. NickelMenu
+reads it only when it starts, so the change needs a restart. The NickelMenu
+items in the reading menu and the library menu stay. If the row cannot show
+(the crash guard above), the hook deletes the file at the next boot, so the
+button comes back after one more restart. The UI uninstall flag
+(`kpm_ui_uninstall`) also activates the NickelMenu entries and deletes the
+file.
 
 ## CLI reference
 
@@ -1024,7 +1050,9 @@ purpose: a one-tap destructive action is a footgun.
 
 `kpm uninstall kpm` is refused. Remove kpm by hand over USB: delete
 `/mnt/onboard/.adds/kpm` (its binary, state, log, and registrations) and
-`/mnt/onboard/.adds/nm/kpm` (its NickelMenu drop-in), then reboot.
+`/mnt/onboard/.adds/nm/kpm` (its NickelMenu drop-in) and
+`/mnt/onboard/.adds/nm/kpm-hide` (it hides the NickelMenu button, see
+"Settings tab"), then reboot.
 If you use `kpm ssh`, run `kpm ssh disable` first. Keep `.adds/kpm/ssh/` if you want the same host key after a new install.
 
 ## First install & smoke test (telnet)

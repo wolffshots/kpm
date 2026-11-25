@@ -24,6 +24,7 @@
 #include "browsedialog.h"
 #include "files.h"
 #include "forcewifi.h"
+#include "launch.h"
 #include "morerow.h"
 #include "nkpm.h"
 #include "seed.h"
@@ -157,8 +158,21 @@ static int nkpm_init() {
   nh_log("NickelKPM: watching %s for UI launch", Files::ui_trigger);
 
   // The "Package manager" row on the More page (morerow.cc). It opens the same
-  // UI as the trigger file. The NickelMenu path above stays.
-  nkpm_morerow_init(onUITrigger);
+  // UI as the trigger file. The trigger file stays for `kpm ui`.
+  int row = nkpm_morerow_init(onUITrigger);
+
+  // One way to open kpm (launch.h): the row or the NickelMenu entries. A kpm
+  // update writes .adds/nm/kpm with active entries, so apply at each boot.
+  // NickelMenu reads its files again at each menu open. It reads the hide file
+  // only at its own init, so a hide change needs a restart.
+  struct nkpm_launch s;
+  nkpm_launch_read(NKPM_UI_CONFIG, &s);
+  int nm = nkpm_nm_installed(NKPM_IMAGEFORMATS);
+  struct nkpm_launch_state st = nkpm_launch_decide(&s, nm, row);
+  int rc = nkpm_launch_apply(NKPM_NM_FILE, NKPM_NM_HIDE, st.entries, st.hide);
+  nh_log("NickelKPM: open from %s, NickelMenu %s, entries %s, button %s%s", st.use_row ? "the More row" : "NickelMenu",
+         nm ? "installed" : "not installed", st.entries ? "on" : "off", st.hide ? "hidden" : "shown",
+         rc == 0 ? "" : " (write error)");
 
   // kpm ssh (SSH.md section 5): start the server when config.toml enables it.
   // Read only that small file here, make no network call and do not wait.
@@ -188,6 +202,9 @@ static bool nkpm_uninstall() {
   if (nkpm_ssh_stop(NKPM_SSH_PID, "/proc")) {
     nh_log("NickelKPM: stopped the kpm ssh server");
   }
+  // Without the hook there is no More row: give the NickelMenu entries and
+  // button back.
+  nkpm_launch_apply(NKPM_NM_FILE, NKPM_NM_HIDE, 1, 0);
   unlink("/usr/local/Kobo/imageformats/libnkpm.so");
   unlink("/usr/local/Kobo/imageformats/libnkpm-qt6.so");
   nkpm_seed_remove(NKPM_SEED_DIR);

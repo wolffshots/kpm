@@ -207,6 +207,9 @@ func TestFirstReservedPath(t *testing.T) {
 	if firstReservedPath([]string{"usr/local/x", "mnt/onboard/.adds/kpm/bin/kpm"}) == "" {
 		t.Error("kpm's install tree must be reserved")
 	}
+	if firstReservedPath([]string{"mnt/onboard/.adds/nm/KPM-hide"}) == "" {
+		t.Error("kpm's NickelMenu hide file must be reserved")
+	}
 	if firstReservedPath([]string{"mnt/onboard/.adds/NM/kpm"}) == "" {
 		t.Error("kpm's NickelMenu drop-in must be reserved (case-insensitively)")
 	}
