@@ -79,6 +79,11 @@ KpmProcess *KpmProcess::search() { return start({"search", "--json"}, false, fal
 // state.json), so it must ride the mutating guard too — otherwise a check
 // overlapping a mutation just bounces off the lock with a "busy" error.
 KpmProcess *KpmProcess::check() { return start({"check", "--json"}, true, true); }
+// The detail page (kpm-pkg-details): info and doctor read only (no lock, no
+// network). checkOne is check for one package, so it rides the same guard.
+KpmProcess *KpmProcess::info(const QString &id) { return start({"info", id, "--json"}, false, false); }
+KpmProcess *KpmProcess::checkOne(const QString &id) { return start({"check", id, "--json"}, true, true); }
+KpmProcess *KpmProcess::doctor(const QString &id) { return start({"doctor", id, "--json"}, false, false); }
 KpmProcess *KpmProcess::registryRefresh() { return start({"registry", "refresh", "--json"}, true, true); }
 KpmProcess *KpmProcess::install(const QString &id) { return start({"install", id, "--yes", "--json"}, true, true); }
 // NICKEL-UI.md §6: `kpm update` is already non-interactive and has no --yes flag,

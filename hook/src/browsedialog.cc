@@ -436,12 +436,53 @@ void BrowseDialog::showRebootPrompt(const QString &text) {
   d->open();
 }
 
-void BrowseDialog::openDetail(QString id) {
+void BrowseDialog::openDetail(QString id) { openDetailFrom(id, nullptr); }
+
+// openDetailFrom runs `kpm info <id> --json` first and opens the detail view with
+// its result, so the page is complete at its first paint: no "Loading" frame, no
+// second e-ink update (kpm-flash-reduction-plan). When info fails the page opens
+// without the info groups, as before. `from` is a detail view to close after the
+// new one is pushed (the conflict route), in that order, as before.
+void BrowseDialog::openDetailFrom(const QString &id, DetailDialog *from) {
+  if (detailPending) {
+    if (from != nullptr) {
+      from->routeFailed(); // a second tap while info runs: keep the first
+    }
+    return;
+  }
+  QPointer<DetailDialog> source(from);
+  auto open = [this, id, source](const QJsonObject &info) {
+    detailPending = false;
+    showDetail(id, info);
+    if (source) {
+      source->closeView();
+    }
+  };
+  KpmProcess *p = KpmProcess::info(id);
+  if (p == nullptr) {
+    open(QJsonObject());
+    return;
+  }
+  detailPending = true;
+  QObject::connect(p, &KpmProcess::response, this,
+                   [open](int exitCode, QJsonObject payload) { open(exitCode == 0 ? payload : QJsonObject()); });
+  QObject::connect(p, &KpmProcess::failure, this, [open](QString) { open(QJsonObject()); });
+}
+
+void BrowseDialog::showDetail(const QString &id, const QJsonObject &info) {
   for (const QJsonValue &v : allPackages) {
     QJsonObject o = v.toObject();
     if (o.value("id").toString() == id) {
-      DetailDialog *d = DetailDialog::show(o, packageIndex());
+      DetailDialog *d = DetailDialog::show(o, packageIndex(), info);
       QObject::connect(d, &DetailDialog::changed, this, [this] { loadSearch(false); });
+      // The Check button of the page checks one package: merge its row so the
+      // list badge agrees with the page.
+      QObject::connect(d, &DetailDialog::checked, this, [this](QJsonArray packages) {
+        mergeCheck(packages);
+        if (laidOut) {
+          render(true);
+        }
+      });
       // Post-enrol "Check now" (kpm-self-enrol-plan §5): reload WITH a check so the
       // freshly-adopted kpm row repaints with its real update badge, like onRefreshDone.
       QObject::connect(d, &DetailDialog::selfEnrolled, this, [this] { loadSearch(true); });
@@ -503,10 +544,7 @@ QHash<QString, QJsonObject> BrowseDialog::packageIndex() const {
 void BrowseDialog::openConflictPackage(DetailDialog *from, const QString &id) {
   for (const QJsonValue &v : allPackages) {
     if (v.toObject().value("id").toString() == id) {
-      openDetail(id);
-      if (from != nullptr) {
-        from->closeView();
-      }
+      openDetailFrom(id, from); // closes `from` after the new view is pushed
       return;
     }
   }

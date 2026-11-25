@@ -26,6 +26,9 @@ public:
   // the caller shows a "busy" state and does not launch.
   static KpmProcess *search();                    // kpm search --json (no network)
   static KpmProcess *check();                      // kpm check --json (network; takes kpm's lock → serialized)
+  static KpmProcess *info(const QString &id);      // kpm info <id> --json (no network) — the detail page data
+  static KpmProcess *checkOne(const QString &id);  // kpm check <id> --json (network; takes kpm's lock → serialized)
+  static KpmProcess *doctor(const QString &id);    // kpm doctor <id> --json (no network, read only)
   static KpmProcess *registryRefresh();            // kpm registry refresh --json (network, mutating)
   static KpmProcess *install(const QString &id);   // kpm install <id> --yes --json (network, mutating)
   static KpmProcess *update(const QString &id);    // kpm update <id> --json (network, mutating; update has no --yes)
