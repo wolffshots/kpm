@@ -47,6 +47,7 @@ Usage:
   kpm log [-n N]
   kpm status
   kpm carryover                (firmware 4.x: build the bundle that keeps the mods on the upgrade to 6.x)
+  kpm exclude-sync [set dot-folders|off] [--dry-run] [--json]   (hide folders from the library scan)
   kpm ui                       (open the graphical package manager; used by NickelMenu)
   kpm ssh <enable|disable|start|stop|restart|status|install> [--json] [--keys <file>] [--port N]
   kpm version
@@ -83,6 +84,16 @@ func isMutating(cmd string, args []string) bool {
 		return sub == "add" || sub == "remove" || sub == "refresh"
 	case "config":
 		return sub == "set" || sub == "init"
+	case "exclude-sync":
+		// set and off write; the bare command and a dry run only read. Flags
+		// may come first, so look at the positionals.
+		flags, pos := splitArgs(args, nil)
+		for _, f := range flags {
+			if f == "--dry-run" || f == "-dry-run" {
+				return false
+			}
+		}
+		return len(pos) > 0
 	}
 	return mutatingCmds[cmd]
 }
@@ -181,6 +192,8 @@ func (a *App) dispatch(cmd string, args []string) int {
 		return a.cmdStatus(args)
 	case "carryover":
 		return a.cmdCarryover(args)
+	case "exclude-sync":
+		return a.cmdExcludeSync(args)
 	default:
 		fmt.Fprintf(os.Stderr, "kpm: unknown command %q\n\n%s", cmd, usage)
 		return exitError

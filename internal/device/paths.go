@@ -179,10 +179,10 @@ func (p Paths) Line() int {
 	return Line4
 }
 
-// NickelConf is Nickel's own Qt settings file. kpm READS it (for the
-// ExcludeSyncFolders advisory, APP-TREE.md §10) and deliberately never writes it:
-// Nickel owns the file and rewrites it, and kpm's UI runs inside a live Nickel,
-// so an edit made from here would frequently appear to succeed and then revert.
+// NickelConf is Nickel's own Qt settings file. kpm reads it, and writes only
+// [FeatureSettings] ExcludeSyncFolders, a key that Nickel never writes
+// (EXCLUDE-SYNC.md). kpm does not write other keys: Nickel keeps those in
+// memory and can write over them.
 func (p Paths) NickelConf() string {
 	return filepath.Join(p.Root, ".kobo", "Kobo", "Kobo eReader.conf")
 }

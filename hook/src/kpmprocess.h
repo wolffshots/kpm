@@ -47,6 +47,12 @@ public:
   static KpmProcess *sshDisable(); // kpm ssh disable
   static KpmProcess *sshRestart(); // kpm ssh restart
 
+  // The Settings tab row for ExcludeSyncFolders (EXCLUDE-SYNC.md section 5).
+  // The read takes no lock. set and off are mutating, with no network.
+  static KpmProcess *excludeSync();                         // kpm exclude-sync --json
+  static KpmProcess *excludeSyncSet(const QString &preset); // kpm exclude-sync set <preset> --json
+  static KpmProcess *excludeSyncOff();                      // kpm exclude-sync off --json
+
   // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
   // are read-only offline reads (no lock, no network); set is mutating (rides the
   // single-instance lock) but never touches the network — configs are local files.

@@ -231,6 +231,7 @@ kpm config init <id> <name-or-index> [--force]   (create a file from its example
 kpm log [-n N]
 kpm status
 kpm carryover                (firmware 4.x: build the bundle that keeps the mods on the upgrade to 6.x)
+kpm exclude-sync [set dot-folders|off] [--dry-run] [--json]   (hide folders from the library scan)
 kpm ui                       (open the graphical package manager; used by NickelMenu)
 kpm ssh <enable|disable|start|stop|restart|status|install> [--json] [--keys <file>] [--port N]
 kpm version
@@ -319,12 +320,7 @@ Create the file `/mnt/onboard/kpm_ui_uninstall` and reboot. At the next boot the
 
 - **Cancel a staged update.** Run `kpm unstage` before the reboot. Do not delete `.kobo/KoboRoot.tgz` or `.kobo/Kobo.tgz` by hand: kpm still thinks the packages are staged.
 - **A mod is "up to date" but does nothing.** Run `kpm doctor <id>`.
-- **Junk "books" from `.adds` in the library (firmware 4.17 and later).** Add the line below to `.kobo/Kobo/Kobo eReader.conf` over USB, with the Kobo idle. kpm does not edit this file, because Nickel writes it again. `kpm doctor` checks for the line.
-
-  ```
-  [FeatureSettings]
-  ExcludeSyncFolders=(\\.(?!kobo|adobe).+|([^.][^/]*/)+\\..+)
-  ```
+- **Junk "books" from `.adds` in the library (firmware 4.17 and later).** Run `kpm exclude-sync set dot-folders` (or use the Settings tab), then restart the device. It sets `ExcludeSyncFolders` in `.kobo/Kobo/Kobo eReader.conf`, so that Nickel does not scan folders whose name starts with a dot. `.kobo` and `.adobe-digital-editions` stay. `kpm exclude-sync` shows which dot folders are hidden, and `kpm exclude-sync off` puts back the earlier value. This replaces the dotfile hack (`libdfh.so`), which has no build for firmware 6.x.
 
 - **"conflicts with installed package".** The registry says that the two packages cannot both be installed. Run the `kpm uninstall` command that the message names, then try again. `--yes` does not override it. `kpm update --all` skips the package with a note.
 - **"checksum mismatch for asset".** The downloaded file does not match the hash in the registry. kpm deletes the file and does not install it. Tell the registry curator.
@@ -346,6 +342,8 @@ Create the file `/mnt/onboard/kpm_ui_uninstall` and reboot. At the next boot the
   cache/               downloads and registry caches
   carryover/Kobo.tgz   firmware 4.x: the bundle for the upgrade to 6.x
   ssh/                 kpm ssh: host key, config, keys, log
+  exclude-sync.json    kpm exclude-sync: the ExcludeSyncFolders value from before kpm
+  backup/              kpm exclude-sync: copies of Kobo eReader.conf before each change
 /mnt/onboard/.adds/nm/kpm          the NickelMenu entries
 /usr/local/Kobo/imageformats/      libnkpm.so (Qt 5), libnkpm-qt6.so (Qt 6)
 ```
