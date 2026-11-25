@@ -1,1176 +1,368 @@
-# kpm — Kobo Package Manager
+# kpm: Kobo package manager
 
-A single static Go binary that manages third-party software on Kobo e-readers
-(firmware 4.x, and 6.x since 0.13.0). Packages are distributed as `KoboRoot.tgz`
-(4.x) or `Kobo.tgz` (6.x) release assets on git forges (GitHub, Codeberg, or any Gitea/Forgejo instance). kpm registers release
-sources, checks for updates, stages installs into the firmware's single boot-time
-install slot, pins versions, keeps a human-readable log, and updates itself the
-same way. It is driven from NickelMenu on-device and works as a normal CLI over
-SSH (its own `kpm ssh` server, or any other).
+kpm installs, updates and removes mods on Kobo e-readers. It reads releases from GitHub, Codeberg or any Gitea or Forgejo server, stages the packages for the next boot, and updates itself the same way.
 
-> Firmware 4.x and 6.x (see "Firmware 6.x"). No signature verification of assets — installing a package
-> trusts its author, exactly like a manual `KoboRoot.tgz` install. Assets are
-> fetched over TLS (HTTPS only; a redirect that downgrades to plain HTTP is
-> refused) with an embedded Mozilla CA bundle. Archives are walked before
-> staging: absolute/`..` paths, symlink/hardlink entries whose target escapes the
-> archive, device/FIFO entries, and setuid/setgid files are rejected, and no
-> package but kpm itself may write kpm's own install tree.
+kpm is one static Go binary plus a small UI inside Nickel (NickelKPM). Use the UI on the device, or the CLI over SSH.
 
-## How it works
+![Open kpm from the More page and install a package](docs/screenshots/install.gif)
 
-Kobo's boot script extracts `/mnt/onboard/.kobo/KoboRoot.tgz` over the root
-filesystem once per reboot, then deletes it. For most packages kpm never installs
-files itself: it downloads each package's `KoboRoot.tgz`, **merges all pending
-packages into one** staged archive, and reboots. On the next run it notices the
-staged archive is gone and promotes those packages from *staged* to *installed*.
+*Recorded in the `kfw vm` emulator on firmware 6.0.279225, with a local test registry.*
 
-A few packages — KOReader and Plato — do not ship a `KoboRoot.tgz` at all. They
-ship a plain directory tree in a release zip that lives entirely under
-`/mnt/onboard/.adds/<name>/`. kpm extracts those itself, **immediately and with
-no reboot**. See [App-tree installs](#app-tree-installs).
+- Works on firmware 4.x (Qt 5) and 6.x (Qt 6). One `Kobo.tgz` installs on both.
+- Keeps your mods across the upgrade from 4.x to 6.x, with no user step.
+- Opens from a "Package manager" row on the More page. NickelMenu is optional.
+- Installs mods, KOReader, Plato, fonts and dictionaries.
+- Reads package lists from registries, for example [wolffshots/kobo-registry](https://wolffshots.github.io/kobo-registry/).
+- Has a built-in SSH server (`kpm ssh`).
 
-Everything kpm owns lives under `/mnt/onboard/.adds/kpm/` so you can inspect or
-repair it over USB:
+> kpm does not check signatures. To install a package is to trust its author, as with a manual `KoboRoot.tgz`. kpm downloads over HTTPS only, with an embedded Mozilla CA bundle, and checks each archive before it stages it. See [Security](#security).
 
-```
-/mnt/onboard/.adds/kpm/
-  bin/kpm              the static ARM binary
-  packages.d/          one TOML file per registered package (kpm.toml = itself)
-  state.json           installed/staged versions, manifests, last check
-  kpm.log              append-only history
-  status               last summary (shown by the NickelMenu Status dialog)
-  cache/               package downloads (*.tgz/*.zip/*.part, swept selectively)
-                       and registry caches (registry-<name>.toml, never swept)
-/mnt/onboard/.adds/nm/kpm   NickelMenu drop-in
-```
+## Contents
+
+- [Install](#install)
+- [First run](#first-run)
+- [Open kpm](#open-kpm)
+- [Firmware 4.x and 6.x](#firmware-4x-and-6x)
+- [Self-update](#self-update)
+- [CLI](#cli)
+- [Registries](#registries)
+- [Uninstall](#uninstall)
+- [Troubleshooting](#troubleshooting)
+- [Files on the device](#files-on-the-device)
+- [More documentation](#more-documentation)
 
 ## Install
 
-kpm is installed the same way it installs everything else: a `KoboRoot.tgz`
-goes into the firmware's boot-time install slot and the next reboot installs
-it. Grab the archive from the
-[latest release](https://github.com/wolffshots/kpm/releases/latest) or build it
-yourself:
+1. Download `Kobo.tgz` from the [latest release](https://github.com/wolffshots/kpm/releases/latest).
+2. Connect the Kobo over USB.
+3. Copy `Kobo.tgz` into the hidden `.kobo` folder of the Kobo drive.
+4. Eject the Kobo. It installs kpm at the next boot.
 
+`Kobo.tgz` works on firmware 4.x and 6.x. The release also has `KoboRoot.tgz`, which works on 4.x only. Firmware 6.x reads only `.kobo/Kobo.tgz`.
+
+Over SSH, copy the file and reboot:
+
+```sh
+scp Kobo.tgz root@<kobo>:/mnt/onboard/.kobo/Kobo.tgz
+ssh root@<kobo> reboot
 ```
-go run ./build          # produces dist/kpm and dist/KoboRoot.tgz
-```
 
-Get it into the slot either way:
+The binary is `/mnt/onboard/.adds/kpm/bin/kpm`. It is not on the `PATH` of the device. Over SSH, add it:
 
-- **Over USB** — copy the archive into the hidden install slot, then eject;
-  the Kobo reboots and installs it on boot:
-
-  ```
-  cp dist/KoboRoot.tgz /media/<you>/KOBOeReader/.kobo/KoboRoot.tgz
-  ```
-
-- **Over SSH** — if the device already has SSH access:
-
-  ```
-  scp dist/KoboRoot.tgz root@<kobo>:/mnt/onboard/.kobo/KoboRoot.tgz
-  ssh root@<kobo> reboot
-  ```
-
-The binary installs to `/mnt/onboard/.adds/kpm/bin/kpm`, which is not on the
-device's `PATH` — over SSH/telnet run it by full path or add it to your shell:
-
-```
+```sh
 export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
 ```
 
-[NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional**: kpm opens
-from the "Package manager" row on the More page by default (see "Graphical
-UI"). On the Settings tab of the kpm UI you can open kpm from NickelMenu
-instead (see "NickelMenu usage"). NickelDBus
-(`qndb`) is also optional — if present, kpm shows toasts; if not, use the
-**Status** menu entry. What to do next depends on which side you start from:
+NickelDBus (`qndb`) is optional. With it, the NickelMenu entries of kpm show toasts.
 
-### Already running NickelMenu
+## First run
 
-kpm's menu entries appear after the install reboot. Register the mods you
-already have so kpm *tracks* them instead of thinking they need a reinstall —
-seed each one with the version currently on the device:
+kpm starts with no registry, so the package list holds only kpm. Add a registry first.
 
+Over USB, create `.adds/kpm/config.toml` on the Kobo drive:
+
+```toml
+[[registries]]
+name  = "main"
+url   = "github.com/wolffshots/kobo-registry"
+forge = "github"
 ```
-kpm registry add https://github.com/wolffshots/kobo-registry
+
+Or over SSH:
+
+```sh
+kpm registry add https://github.com/wolffshots/kobo-registry --name main
+```
+
+Then, on the Kobo:
+
+1. Tap **More**, then **Package manager**.
+2. Tap **Refresh**. kpm gets the package list.
+3. Tap a package, then **Install**.
+4. A mod installs at the next boot. Tap **Reboot now**, or **Later** to stage more packages first.
+
+KOReader, Plato and dictionaries install at once, with no reboot. A font needs a reboot before Nickel uses it.
+
+### Mods that are already on the device
+
+Tell kpm the version that you have, so that it tracks the mod and does not install it again:
+
+```sh
 kpm registry refresh
-kpm install nickelmenu --installed v0.6.0 --yes    # the version you have
+kpm install nickelmenu --installed v0.6.0 --yes
 ```
 
-A hand-added `kpm add https://github.com/pgaskin/NickelMenu --installed v0.6.0`
-works too, but the registry def also carries the curated uninstall recipe.
+## Open kpm
 
-### No NickelMenu yet (SSH-first install)
+![The Settings tab of kpm](docs/screenshots/settings.gif)
 
-kpm works headless, so use it to install NickelMenu:
+By default, kpm adds a **Package manager** row to the Nickel **More** page, above Help. The row needs no NickelMenu and hooks no Nickel function.
 
-```
-kpm registry add https://github.com/wolffshots/kobo-registry
-kpm registry refresh
-kpm install nickelmenu --yes
-kpm update nickelmenu --reboot
-```
+The **Settings** tab of the UI has two settings. kpm stores them in `.adds/kpm/ui.toml`.
 
-The reboot installs NickelMenu, and kpm's menu entries appear with it.
+| Setting | Values | Effect |
+|---|---|---|
+| Open kpm from | **Row on the More screen** (default), **NickelMenu** | One of the two shows, never both. The change applies at the next open of the More page or of NickelMenu. Without NickelMenu, the row always shows. |
+| NickelMenu button | **Shown** (default), **Hidden** | Hides the NickelMenu button in the bottom bar of the home screen. Only when kpm opens from the More row. Restart the device after a change. |
 
-### Self-update
+With "Open kpm from: NickelMenu", the kpm entries in the NickelMenu main menu are active:
 
-kpm ships `packages.d/kpm.toml` with an **empty `source`**, so self-update is
-"not configured": `check`/`update` skip kpm silently and `list`/`status` show it
-as `self-update not configured` — never an error. Adopt the registry's kpm def
-to turn it on (after the `registry add`/`refresh` above):
+| Entry | What it does |
+|---|---|
+| kpm - Check for updates | Connects Wi-Fi and runs `kpm check --notify`. |
+| kpm - Update all | Connects Wi-Fi and runs `kpm update --all --reboot --notify`. The device reboots when it is done. |
+| kpm - Status | Shows the last summary (offline). |
+| kpm - Package manager | Opens the UI (`kpm ui`). |
 
-```
-kpm install kpm --adopt --yes
-```
+With the More row, the hook comments out these entries at each boot (prefix `#kpm-off `). To hide the NickelMenu button, the hook writes `.adds/nm/kpm-hide` with `experimental:menu_main_15505_enabled:0`. NickelMenu v0.6.0 and the Qt 6 fork read this line at start. The NickelMenu items in the reading menu and the library menu stay.
 
-and kpm maintains itself like any other package. Since 0.9.1 there is a
-shorthand for exactly this enrol — it refreshes the configured registries
-(best-effort: a warm cache lets it enrol offline), finds the kpm def they offer,
-and adopts it, preserving any pin:
+### What the UI does
 
-```
-kpm adopt-self
-```
+- Tabs: **Mods**, **Fonts**, **Dictionaries**, **SSH** and **Settings**. The search box filters the active tab.
+- **Refresh** gets the registry lists and checks for updates. **Update all** stages all updates. **Sync** copies registry defs into `packages.d`, so an installed package gets fixed uninstall recipes and new config entries (`kpm sync`).
+- A package page has **Install**, **Update** or **Uninstall**. A package with config files also has **Settings**, which edits the values with `kpm config set` and keeps the comments in the file.
+- If kpm self-update is off, the kpm page has **Enable self-update**.
+- All work runs in the `kpm` binary. If the binary is missing, the UI shows "kpm not found" and does nothing else.
 
-This is also the CLI command the graphical UI's **Enable self-update** button
-calls (see *Graphical UI* below), so a device with no SSH can turn self-update on
-from the touchscreen. It needs a configured registry that offers kpm and never
-hardcodes a source.
+### Safety of the More row
 
-Since 0.5.0 the adoption (`source`/`forge`) is stored in `state.json`, not in
-`kpm.toml` — the same place kpm's pin lives, and for the same reason. Every kpm
-release ships `packages.d/kpm.toml`, so a self-update overwrites that file; when
-the adoption lived there, each self-update silently un-adopted kpm and it went
-back to `self-update not configured`. Storing it in `state.json`, which updates
-never overwrite, makes the adoption durable.
+- If Nickel crashes within 3 seconds after the row first shows in a boot, the file `.adds/kpm/.more-row-pending` stays. The same hook build then shows no row from the next boot. kpm opens from NickelMenu, with its entries active and the NickelMenu button shown. A new kpm build deletes the file and tries again.
+- If a More page shows without its Help row, the hook switches the setting to NickelMenu.
+- The hook checks each Nickel symbol that it needs when it loads. If one is missing, it does not load, and Nickel runs as usual. A crash within 15 seconds of load makes NickelHook turn the hook off at the next boot.
 
-Upgrading from **0.4.1 or earlier**: if your kpm is still adopted (`status` does
-not say `self-update not configured`), 0.5.0 migrates the source into
-`state.json` automatically on its first mutating command. If a previous
-self-update already wiped it, re-adopt **once** under 0.5.0 and it sticks for
-good:
+The hook passes `kfw check` on firmware 4.45.23697, 4.45.23792, 4.46.23836, 4.46.23852, 5.18.270971, 6.0.274403 and 6.0.279225. Firmware 4.20.14601 and older fail the symbol check, so the UI does not load there. The CLI still works.
 
-```
-kpm registry refresh && kpm install kpm --adopt --yes
-```
+## Firmware 4.x and 6.x
 
-kpm's own recorded version self-heals from the running binary, so a
-USB-sideloaded kpm corrects its `installed_version` on the next mutating command.
+Firmware 6.x uses Qt 6. It reads only `.kobo/Kobo.tgz` and extracts it into `/usr/local/Kobo`. `Kobo.tgz` holds a Qt 5 and a Qt 6 build of the hook, and each Qt loads only its own build. At boot, the hook copies the kpm binary, `packages.d/kpm.toml` and the NickelMenu entry from `/usr/local/Kobo/kpm-seed` to the user partition, when the seed version changed.
 
-## Firmware 6.x
+kpm reads the firmware version from `.kobo/version`. Major 4 is the 4.x line, major 6 and later is the 6.x line. For any other major, such as 5.x, the Qt 6 core library in `/usr/lib` decides.
 
-Firmware 6.x (the Kobo OS 6 beta) uses Qt 6. It does not read `.kobo/KoboRoot.tgz`. It reads only `.kobo/Kobo.tgz`, and it extracts that file into `/usr/local/Kobo`.
+On 6.x:
 
-To install kpm on 6.x:
-
-1. Copy `Kobo.tgz` from the release into `.kobo/` on the device.
-2. Eject the device. The firmware installs the file at the next boot.
-
-The same `Kobo.tgz` also works on 4.x. It holds a Qt 5 and a Qt 6 build of the UI hook. Each Qt loads only the build of its own major version. At boot, the hook copies the kpm binary, `packages.d/kpm.toml` and the NickelMenu entry from `/usr/local/Kobo/kpm-seed` to the user partition. It copies them when the seed version differs from `.adds/kpm/.seed-version`.
-
-On 6.x, kpm changes these things:
-
-- kpm reads the firmware line from `.kobo/version`. If that file gives no version, the Qt 6 core library in `/usr/lib` decides.
 - kpm stages `.kobo/Kobo.tgz` in place of `.kobo/KoboRoot.tgz`.
-- A tgz package installs on 6.x only when its def has an `[fw6]` table (see `REGISTRY.md`). Else `install` and `update` refuse it with "no build for firmware 6.x". `update --all` skips it with a note. The UI shows the reason in place of Install.
-- A `Kobo.tgz` of a package can write only under `imageformats/`. kpm refuses a `KoboRoot.tgz` as a 6.x asset.
-- App-tree and file packages (KOReader, fonts, dictionaries) install on both lines without an `[fw6]` table.
-- A def with `builtin_fw6` is never available on 6.x, because the firmware has the function built in. kpm shows "built into firmware 6.x" and the text of the def.
-- `kpm add` writes the asset into an `[fw6]` table. The default asset there is `Kobo.tgz`.
-- A kpm self-update stages the `Kobo.tgz` of the release. At the next boot, the seed copies the new binary.
+- A mod installs only when its def has an `[fw6]` table. Else kpm shows "no build for firmware 6.x", and `update --all` skips it.
+- KOReader, Plato, fonts and dictionaries install on both lines.
+- A package that 6.x has built in, such as NickelClock, is not available. kpm removes it at the first mutating run on 6.x.
 
 ### After a firmware update
 
-A firmware update writes a new rootfs. It deletes the rootfs files of each tgz package, the kpm UI hook and NickelMenu. The user partition stays, with `.adds/kpm` (the kpm binary, its state and its package list).
+A firmware update writes a new rootfs. The mod files on the rootfs, the kpm hook and NickelMenu are gone. The user partition stays, with `.adds/kpm`.
 
-On the first mutating run after a firmware change, kpm does these things:
+At the first mutating run after the update, kpm:
 
-- It marks a package as not installed when all of its rootfs files are gone. `kpm update --all` then installs it again with the asset of the new line.
-- It marks kpm itself for a reinstall when its hook is gone. `kpm check` shows "REINSTALL (files missing)", and `kpm update --all` installs kpm again.
-- It syncs a registry def that has no `[fw6]` table from the registry cache, when the registry def has one. `kpm registry refresh` does the same.
-- If the line changed, it deletes a `KoboRoot.tgz` that it staged and that the new firmware does not read.
-- On 6.x it uninstalls each package whose def has `builtin_fw6`, with purge, and deletes its def. `kpm registry refresh` does the same. NickelClock is an example: firmware 6.x has a reader clock.
+- marks a package as not installed when all of its rootfs files are gone, so that `kpm update --all` installs it again with the asset of the new line,
+- marks itself for a reinstall when its hook is gone (`kpm check` shows "REINSTALL (files missing)"),
+- syncs a def with no `[fw6]` table from the registry cache, when the registry def has one,
+- deletes a `KoboRoot.tgz` that it staged and that the new firmware does not read.
 
 ### The upgrade from 4.x to 6.x
 
-On firmware 4.x, kpm keeps your mods across the upgrade to 6.x. You do not have to do anything.
+On 4.x, kpm keeps your mods across the upgrade to 6.x. You do not have to do anything.
 
-- kpm keeps a bundle, `.adds/kpm/carryover/Kobo.tgz`. It holds the 6.x build of kpm and of each installed package that has an `[fw6]` table. `kpm check`, `kpm update`, `kpm install` and `kpm uninstall` keep it up to date. Only a package that changed needs a download. `kpm carryover` builds it now and shows what it holds.
-- kpm adds a short block to the 4.x shutdown script `/etc/init.d/rcK`. The block acts only during the upgrade: when `.kobo/updateQt5ToQt6` and `.kobo/update.tar` exist. Then it copies the bundle to `.kobo/Kobo.tgz`. At other times it does nothing.
-- The first 6.x boot installs `.kobo/Kobo.tgz`, so kpm, NickelMenu and your other mods load at once. On its first run, kpm records the carried packages as installed with their 6.x files.
+- kpm keeps a bundle, `.adds/kpm/carryover/Kobo.tgz`, with the 6.x build of kpm and of each installed package that has an `[fw6]` table. `check`, `update`, `install` and `uninstall` keep it current. `kpm carryover` builds it now and shows what it holds.
+- kpm adds a short block to the 4.x shutdown script `/etc/init.d/rcK`. The block acts only during the upgrade, when `.kobo/updateQt5ToQt6` and `.kobo/update.tar` exist. It then copies the bundle to `.kobo/Kobo.tgz`.
+- The first 6.x boot installs the bundle, so kpm, NickelMenu and your other mods load at once. kpm records them as installed.
 
-A package without a 6.x build is not in the bundle. After the upgrade, kpm marks it as not installed, as described below. A 6.x firmware update (6.x to 6.x) is not covered: install kpm's `Kobo.tgz` by hand after it, as below.
+A package with no 6.x build is not in the bundle. An update from 6.x to 6.x is not covered.
 
-### When kpm does not start
+### If kpm does not start after a firmware update
 
-If kpm does not start after a firmware update, install one `Kobo.tgz` by hand:
+1. Copy `Kobo.tgz` of kpm into `.kobo/` and eject. The UI comes back.
+2. Open the UI and tap **Update all**. kpm installs the 6.x build of each package again.
 
-1. Copy the `Kobo.tgz` of kpm into `.kobo/` and eject. The kpm UI comes back.
-2. Open the kpm UI and tap "Update all". kpm installs the 6.x build of each package again, NickelMenu included when its def has an `[fw6]` table.
+Over SSH, `kpm update --all` does both steps.
 
-Over SSH, `kpm update --all` alone does all of this, kpm included.
+## Self-update
 
-## Registering packages
+kpm ships with self-update off. `kpm status` shows "self-update not configured". This is not an error.
 
-`kpm add <url>` writes a `packages.d/<id>.toml`. It accepts a repo URL, with an
-optional trailing `/releases`, `/releases/latest`, or `/releases/tag/<tag>` (a
-`/tag/<tag>` URL pins that tag):
+To turn it on, add a registry that offers kpm, then tap **Enable self-update** on the kpm page of the UI, or run:
 
-```
-kpm add https://codeberg.org/StrayRose/NickelHardcover
-kpm add https://github.com/owner/repo --asset "KoboRoot*.tgz"
-kpm add https://codeberg.org/o/r/releases/tag/v0.5.0     # pinned
+```sh
+kpm adopt-self
 ```
 
-- Forge is auto-detected: `github.com` → GitHub; any other host is probed at
-  `https://<host>/api/v1/version` (Forgejo/Gitea). If detection fails, pass
-  `--forge github|forgejo`.
-- Default asset is `KoboRoot.tgz`; override with `--asset <glob>`.
-- For a package you installed **before** kpm, seed its version so kpm won't think
-  a reinstall is needed: `kpm add <url> --installed v0.5.0`.
+kpm then updates itself like any other package. kpm stores its source and pin in `state.json`, so a self-update keeps them. On 6.x, a self-update stages the `Kobo.tgz` of the release, and the seed copies the new binary at the next boot.
 
-A package TOML looks like:
+## CLI
 
-```toml
-name = "NickelHardcover"
-source = "codeberg.org/StrayRose/NickelHardcover"
-forge = "forgejo"
-asset = "KoboRoot.tgz"
-pin = ""                # empty = track latest; else an exact tag (frozen: even a
-                        # rolling package is not re-fetched while a pin is set)
+Common tasks:
 
-# [uninstall]           # optional — customizes "kpm uninstall" (see below)
-# purge_paths = ["/mnt/onboard/.adds/NickelHardcover/**"]
+| Task | Command |
+|---|---|
+| See what is installed | `kpm list` |
+| Look for updates | `kpm check` |
+| Install all updates and reboot | `kpm update --all --reboot` |
+| Find a package | `kpm search [<term>]` |
+| Install a package from a registry | `kpm install <id> --yes`, then `kpm update <id> --reboot` |
+| Add a package by URL | `kpm add <url>` |
+| Hold a version | `kpm pin <id> <tag>`, `kpm unpin <id>` |
+| Cancel a staged install | `kpm unstage` |
+| Check that a mod loaded | `kpm doctor [<id>]` |
+| See the history | `kpm log [-n N]` |
+
+All commands:
+
+```
+kpm add <url> [--asset <glob>] [--forge github|forgejo] [--name <id>] [--installed <ver>]
+kpm remove <id>              (unregister only: see "kpm uninstall" to delete files)
+kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]
+kpm list
+kpm check [--notify]
+kpm update [<id>...] [--all] [--reboot] [--notify]
+kpm unstage                  (cancel a pending staged update)
+kpm pin <id> <tag>
+kpm unpin <id>
+kpm registry add <url> [--name <n>] [--ref <branch>] [--path <p>] [--forge github|forgejo]
+kpm registry remove <name>
+kpm registry list
+kpm registry refresh [<name>]
+kpm search [<term>]
+kpm doctor [<id>]            (diagnose whether installed Nickel plugins actually loaded)
+kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
+kpm adopt-self               (enrol kpm's own self-update from a configured registry)
+kpm sync [<id>...] [--overwrite]
+kpm config list <id>
+kpm config show <id> <name-or-index>
+kpm config set <id> <name> --key K [--section S] --value V
+kpm config set <id> <name> --line N --value V [--append|--delete]
+kpm config init <id> <name-or-index> [--force]   (create a file from its example template)
+kpm log [-n N]
+kpm status
+kpm carryover                (firmware 4.x: build the bundle that keeps the mods on the upgrade to 6.x)
+kpm ui                       (open the graphical package manager; used by NickelMenu)
+kpm ssh <enable|disable|start|stop|restart|status|install> [--json] [--keys <file>] [--port N]
+kpm version
 ```
 
-(kpm's own pin is stored in `state.json`, not `kpm.toml`, so it survives a
-self-update that overwrites the TOML.)
+Exit codes: `0` OK or nothing to do, `1` error, `2` partial (some packages failed, others staged), `3` confirmation required (`install` or `uninstall` without `--yes`). If every package of an `update` fails, the exit code is `1`.
+
+Most commands accept `--json`. See [docs/development.md](docs/development.md#machine-readable-output).
+
+After a reboot, the next mutating command (for example `kpm check`) moves staged packages to installed. `kpm status` is read-only and does not do this. After that move, kpm checks that the files of each package are on the device, and logs a `WARN` for each missing file.
+
+`kpm doctor` tells you if an installed mod really loaded. It checks each NickelHook plugin for a failsafe file, a crash log, and whether Nickel mapped it. It reports `loaded`, `not-loaded`, `crashed`, `load-failed` or `unknown`. It reads only files and `/proc`, and it always exits 0.
 
 ## Registries
 
-Instead of adding each package by URL, you can trust a **registry**: a git repo
-that ships package definitions (the same TOML schema as `packages.d`, plus
-curated `[uninstall]` recipes). kpm fetches its `registry.toml` over raw-file
-HTTPS — no git client, no clone. A registry holds *definitions only*, never
-binaries; the actual software still comes from each package's own release page.
+A registry is a git repository with a `registry.toml` of package definitions. It holds no binaries. Each package still comes from its own release page.
 
-A public registry of common Kobo mods lives at
-[wolffshots/kobo-registry](https://github.com/wolffshots/kobo-registry) —
-**browse its packages at
-[wolffshots.github.io/kobo-registry](https://wolffshots.github.io/kobo-registry/)**.
-
-Trusting a registry is the same trust decision as running `kpm add` on each of
-its entries yourself: a def chooses the source repo and the uninstall recipe
-(including `run_before`/`run_after` hooks, which run as root). There is **no def
-signing** in this version, just as there is no asset signing — TLS with the
-embedded CA bundle protects the fetch, not the maintainer's intent.
-
-**Checksum verification narrows that gap; it does not close it.** From 0.10.0 a
-registry entry may carry a per-release `sha256` (see below), which kpm verifies
-against the downloaded bytes and hard-fails on a mismatch. It raises the bar
-against a compromised CDN or a silent upstream re-upload, but it is a *curator
-attestation* rather than a signature: it authenticates the asset against a
-registry you already chose to trust, it is opt-in per release, and it is
-best-effort across kpm versions — an older kpm ignores the field and downloads
-with TLS-only verification, so it binds nobody who has not updated.
-
-**A registry repo** has one file at its root, `registry.toml`:
-
-```toml
-schema_version = 1
-
-[packages.nickelmenu]
-name   = "NickelMenu"
-source = "github.com/pgaskin/NickelMenu"
-forge  = "github"
-asset  = "KoboRoot.tgz"
-min_kpm = "0.3.0"                 # optional; older kpm skips it with a note
-
-  [packages.nickelmenu.uninstall]
-  method       = "marker"
-  marker_file  = "/mnt/onboard/.adds/nm/uninstall"
-  needs_reboot = true
-```
-
-Package ids follow the `[a-z0-9-]+` rule. Fields match the local schema except
-there is **no `pin`** (pins are a local decision, never distributed) and the
-optional `min_kpm`. `schema_version` must be `1`; a newer schema tells you to
-update kpm.
-
-**Three optional fields change what install/update actually do** (0.10.0). Unlike
-`description`/`homepage`/`tested_fw`, they are functional: they are copied into
-your local `packages.d` def and a curator edit to them propagates via `kpm sync`.
-A def whose declarations are malformed is dropped from the registry entirely, so
-a typo makes the package disappear rather than misbehave — kpm logs a `WARN`
-naming the id and the reason on every refresh and every cache read, so a
-vanished package is diagnosable from `kpm log`.
-
-| Field | What it does | `min_kpm = "0.10.0"` required? |
-|---|---|---|
-| `update_check = "rolling"` | detect a changed release when the tag never moves | **yes** |
-| `conflicts = ["<id>", …]` | refuse to install alongside a named package | **yes** |
-| `checksums` (tag → sha256) | verify the downloaded asset against a curator-recorded hash | no |
-
-```toml
-# KoboCloud publishes every build under the permanent tag "latest", so comparing
-# tags can never detect an update. "rolling" compares the release's published_at
-# and asset size instead. min_kpm is mandatory: an older kpm ignores the key and
-# would report this package up to date forever.
-[packages.kobocloud]
-name         = "KoboCloud"
-source       = "github.com/fsantini/KoboCloud"
-forge        = "github"
-asset        = "KoboRoot.tgz"
-update_check = "rolling"
-min_kpm      = "0.10.0"
-
-# kobo-tweaks auto-uninstalls NickelClock as part of its own install, which would
-# delete a kpm-tracked package's files behind kpm's back. min_kpm is mandatory:
-# an older kpm ignores `conflicts` and would let that happen.
-[packages.kobo-tweaks]
-name      = "Kobo Tweaks"
-source    = "github.com/…/kobo-tweaks"
-forge     = "github"
-asset     = "KoboRoot.tgz"
-conflicts = ["nickelclock"]
-min_kpm   = "0.10.0"
-
-# A checksum is a per-release curator attestation, keyed by the exact upstream
-# tag (a single leading "v" is insignificant). Releases you have not verified are
-# simply absent — they install unverified, exactly as before.
-[packages.nickelclock.checksums]
-"v0.4.0" = "3b1f8c…64 lowercase hex chars…"
-```
-
-Curator notes:
-
-- `conflicts` is declared **once**, on whichever side is natural. kpm checks both
-  directions, so the counterpart entry needs no edit.
-- Get a hash with `curl -sL <browser_download_url> | sha256sum`, or read it out
-  of `kpm log` — every successful download logs a `CHECKSUM` line with the hash
-  it saw, whether or not a checksum was declared. Hash the asset **exactly as
-  published** (for a zip-wrapped asset, the zip — not the tgz inside it).
-  GitHub also shows a `sha256:`-prefixed digest on recent asset uploads; you can
-  paste that verbatim — the prefix and any surrounding whitespace are stripped.
-- Never put a `checksums` block on a `rolling` def: a rolling tag's asset changes
-  with no registry edit, so the hash would be correct exactly once. kpm treats
-  the combination as a parse error and drops the def. (A *local* def hand-edited
-  to carry both degrades to unverified with a `WARN` instead, so a bad edit can
-  never make a package permanently un-installable.)
-- `update_check = "rolling"` without `min_kpm` is also a parse error and drops
-  the def. An older kpm ignores the key and would report the package up to date
-  forever, which is the exact failure the field exists to fix.
-
-**Using registries** (CLI/telnet — there is no NickelMenu entry for these):
-
-```
+```sh
 kpm registry add https://github.com/owner/kobo-registry --name main
-kpm registry refresh                # the only registry command that hits the network
-                                    #   (registry add also runs a one-time forge probe unless --forge is given)
-kpm search                          # what's available (marks installed / updatable / min_kpm)
-kpm search nickel                   # filter by id or name
-kpm install nickelmenu              # prints the def and exits 3 (review first)
-kpm install nickelmenu --yes        # writes packages.d/nickelmenu.toml, stamped registry = "main"
-kpm check && kpm update nickelmenu  # then it behaves exactly like a hand-added package
+kpm registry refresh        # the only registry command that uses the network
+kpm search nickel
+kpm install nickelmenu      # prints the def and exits 3, so you can review it
+kpm install nickelmenu --yes
 ```
 
-Key behaviors:
-
-- **Network only in `registry refresh`** (plus an optional one-time
-  forge-detection probe during `registry add`, skipped with `--forge`).
-  `search`/`install`/`sync` read the on-device cache
-  (`cache/registry-<name>.toml`) exclusively, so they work offline and are
-  predictable. `search`/`registry list` show a cache-age note
-  (`cached 3d ago`) instead of silently refetching. Refresh uses ETags, so an
-  unchanged registry is a cheap 304.
-- **Provenance & `sync`.** An installed def is stamped `registry = "<name>"`.
-  When a registry publishes a fixed uninstall recipe or changed asset glob,
-  `kpm sync` re-copies every field *except* your local `pin` and reports a
-  per-package diff. `sync` is deliberately manual — `check`/`update` never
-  change install/uninstall behavior underneath you. If you hand-edit a
-  registry-managed def, `sync` detects the drift and skips it (use
-  `--overwrite` to replace, or delete the `registry =` line to detach). If a
-  package disappears from its registry, `sync` warns but leaves your working
-  copy intact.
-- **Conflicts.** If several registries offer the same id, the earliest in
-  config order wins; the rest are shadowed (a `WARN` is logged once per
-  refresh).
-- **`--adopt`.** `kpm install <id> --adopt` takes over an existing hand-added
-  def (or kpm's own placeholder), writing the registry def while preserving your
-  local pin and installed state — how kpm's own def gets a real source once a
-  registry carries it.
-- **Firmware note.** If a registry def declares `tested_fw` (the newest firmware
-  it was confirmed working on) and your device is running a newer firmware, the
-  `kpm install` review prints an advisory note (`last confirmed on firmware …;
-  your device runs … — it may not work`). It is advisory only — it never blocks
-  the install or changes the exit code, the comparison is major.minor (a build
-  bump alone never warns), and an unknown firmware stays silent.
-
-Registries are configured in `/mnt/onboard/.adds/kpm/config.toml`
-(`[[registries]]` entries), managed by the CLI and hand-editable; unknown keys
-(and `github_token`) are preserved across edits, though comments are not.
+To trust a registry is the same decision as to add each of its packages by hand. Its uninstall recipes run as root. [docs/packages.md](docs/packages.md) describes the def format, the registry format, checksums, conflicts and the install methods.
 
 ### Private repositories
 
-kpm reads a private GitHub registry or package repository with a GitHub token.
-Put the token in `/mnt/onboard/.adds/kpm/config.toml` as a top-level key, above
-the `[[registries]]` tables:
+kpm can read a private GitHub registry or package repository with a GitHub token. Put it at the top of `.adds/kpm/config.toml`, above the `[[registries]]` tables:
 
 ```toml
 github_token = "github_pat_..."
 ```
 
-- Use a fine-grained token that can only read. kpm reads `registry.toml`, the
-  release list and the release assets, and **Contents: Read-only** covers all
-  three:
-  1. Open https://github.com/settings/personal-access-tokens/new.
-  2. Give it a name that identifies the device, and set an expiration.
-  3. Under **Repository access**, select **Only select repositories** and pick
-     the private repositories kpm reads.
-  4. Under **Repository permissions**, set **Contents** to **Read-only**.
-     GitHub adds **Metadata: Read-only** by itself. Leave the rest at
-     **No access**.
-  5. Generate the token and copy it. GitHub shows it only once.
+Make a fine-grained token that can only read:
 
-  A fine-grained token can always read public repositories, so public
-  packages keep working. It cannot push or change a release.
-- kpm sends the token only over HTTPS to `api.github.com`,
-  `raw.githubusercontent.com` and `github.com`. A download that GitHub
-  redirects to its storage host does not carry it.
-- With a token, kpm downloads release assets through the API asset URL. The
-  browser URL of a private repository needs a web session, not a token.
-- Every GitHub request carries the token. When it expires, every GitHub package
-  fails with `GitHub rejected github_token in .adds/kpm/config.toml`. Replace or
-  remove the key.
-- The token also raises GitHub's rate limit from 60 to 5,000 requests an hour.
-- Anyone with USB access to the Kobo can read `config.toml`, so keep the token's
-  scope narrow.
+1. Open https://github.com/settings/personal-access-tokens/new.
+2. Give it a name for the device, and set an expiration.
+3. Under **Repository access**, select **Only select repositories** and pick the private repositories.
+4. Under **Repository permissions**, set **Contents** to **Read-only**. Leave the rest at **No access**.
+5. Generate the token and copy it. GitHub shows it only once.
 
-## NickelMenu usage
-
-The shipped drop-in (`/mnt/onboard/.adds/nm/kpm`) adds four entries to the main
-menu. They are active only when the Settings tab of the kpm UI says "Open kpm
-from: NickelMenu" (see "Settings tab"). With the default, the row on the More
-screen, the kpm hook comments out each line of the file with the prefix
-`#kpm-off `, so NickelMenu shows no kpm entries. The hook does this at each
-boot, because a kpm update writes the file again with active entries.
-
-- **Check for updates** — brings Wi-Fi up, runs `kpm check --notify` in the
-  background. With NickelDBus you get a toast; otherwise tap **Status**.
-- **Update all** — brings Wi-Fi up, runs `kpm update --all --reboot --notify`.
-  This stages every pending package and reboots to install them.
-- **Status** — shows the status file in a dialog (offline, instant).
-- **Package manager** — runs `kpm ui`, which opens the graphical browser (see
-  "Graphical UI"). This is the launch point for the NickelKPM hook.
-
-Because NickelMenu's `cmd_spawn` reports success on *spawn*, not on completion,
-long-running work can't report back through the menu — kpm signals completion via
-its status file (always) and NickelDBus toasts (if `qndb` exists).
-
-## Graphical UI (NickelKPM)
-
-kpm ships a built-in graphical package browser, **NickelKPM** (`libnkpm.so`) — a
-NickelHook Qt mod injected into Nickel. Every kpm package installs it under
-`/usr/local/Kobo/imageformats/`: `libnkpm.so` (Qt 5, firmware 4.x) and, from
-`Kobo.tgz`, `libnkpm-qt6.so` (Qt 6, firmware 6.x).
-
-| Package list | Not installed | Installed |
-|---|---|---|
-| ![Package manager list](docs/screenshots/browse.png) | ![Package detail — install](docs/screenshots/detail-not-installed.png) | ![Package detail — uninstall](docs/screenshots/detail-installed.png) |
-
-Launch it from the **Package manager** row on the Nickel **More** page, directly
-above Help, or from the **NickelMenu** "kpm - Package manager" entry (see
-"NickelMenu usage"). The Settings tab chooses one of the two. The More row
-needs no NickelMenu and hooks no Nickel function: the hook adds it when Nickel
-builds the More page. If Nickel crashes within 3 seconds after the row first
-shows in a boot, the file `/mnt/onboard/.adds/kpm/.more-row-pending` stays, and
-the same hook build shows no row from the next boot. kpm then opens from
-NickelMenu, with its entries active and the NickelMenu button shown. A new kpm
-build deletes the file and tries again. If a More page shows without its Help
-row (a firmware that changed the page), the hook switches the setting to
-NickelMenu. It opens a full-screen browser that lists every package from your
-registries merged with what's installed, lets you filter with the on-screen
-keyboard, and drills into a per-package view with **Install**, **Update**,
-**Uninstall**, plus registry-wide **Refresh**, **Sync**, and **Update all**.
-**Sync** re-copies registry defs into `packages.d` so an existing install picks
-up new config declarations and uninstall-recipe fixes without SSH — the offline
-UI equivalent of `kpm sync` (distinct from **Refresh**, which only refetches the
-registry list and re-checks versions). When self-update is not yet enrolled the
-kpm row shows a **self-update off** badge and its detail page carries an **Enable
-self-update** button; one tap runs `kpm adopt-self` (kpm 0.9.1) to wire kpm's own
-source in from your configured registry, then offers to check for an update — so
-a device with no SSH can turn self-update on from the touchscreen. On the package
-list the title-bar **✕** closes the UI; in a package's detail view the **←**
-returns to the list and **✕** closes the whole UI. All real work is done by
-shelling out to the `kpm` binary (`--json` mode); the hook is a thin,
-crash-isolated view layer. Staged changes prompt a **Reboot now / Later** dialog,
-matching kpm's stage-then-reboot install model.
-
-Above the search box the browse view carries three tabs: **Mods**, **Fonts**,
-and **Dictionaries**. A package lands in a tab by where it installs: KOReader,
-Plato, and kpm itself show under Mods, a package that installs into
-`/mnt/onboard/fonts` shows under Fonts, and a package that installs into
-`/mnt/onboard/.kobo/custom-dict` shows under Dictionaries. Refresh, Sync, and
-Update all stay global across every tab, and the search box filters inside
-whichever tab is active.
-
-Installed packages whose registry entry declares config files (CONFIG.md) also
-get a **Settings** button: it lists the package's config files, shows their
-entries (ini keys or text lines), and edits values with the on-screen keyboard —
-each save is a surgical write through `kpm config set`, so comments and layout
-in the file survive untouched. Files marked `reload = "reboot"` prompt for a
-restart on the way out; others take effect on their own.
-
-While the browser is open it hides the home screen's status and nav bars so the
-dialog (and its keyboard) render full-screen, and restores them when you close
-it — so the launcher is a NickelMenu entry rather than an injected home-screen
-row (see below).
-
-If the `kpm` binary is missing, the browser shows a "kpm not found — install kpm
-first" message and does nothing else (it never crashes Nickel).
-
-**Requires NickelMenu.** Through kpm 0.6.x the hook injected its own row into the
-home/library **More** tab. Firmware **4.23.15505+** moved that menu to a
-bottom-nav-bar button, so the old anchor no longer fires (confirmed dead on
-4.45.23697), and since **0.7.0** the UI is launched from a NickelMenu item that
-runs `kpm ui`. A NickelMenu-independent launch button is a possible future
-addition, but for now the graphical UI needs NickelMenu installed.
-
-**Symbol compatibility (fail-closed):** at load the hook resolves every Nickel
-C++ symbol it needs; if any required symbol is missing it refuses to load
-cleanly — Nickel runs untouched and a diagnostic log is dumped to
-`/mnt/onboard`. Verified to load on firmware **4.46.23852**, **4.45.23697** (and
-back to 4.33.19608), and **6.0.279225** (Qt 6 build); **4.20.14601 and older fail this check** (Nickel's method signatures
-drifted), so on those the UI is absent by design. Check any firmware from your
-desk with `tools/symcheck` (see "Build & release"). A crash inside the first
-15 seconds after load trips NickelHook's failsafe, which leaves the hook
-disabled on the next boot instead of bootlooping.
-
-**Removing the UI only:** create the flag file `/mnt/onboard/kpm_ui_uninstall`
-and reboot. On the next boot the hook deletes both builds (`libnkpm.so` and
-`libnkpm-qt6.so`) and the `kpm-seed` folder, and stops `kpm ssh`; kpm itself
-(binary, config, state, packages, `.adds/kpm/ssh`) is untouched.
-
-### Building the hook
-
-The hook is C++ built with the NickelTC cross-toolchain via a container. From the
-repo root:
-
-```sh
-git submodule update --init --recursive          # fetch hook/NickelHook (once)
-podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/pgaskin/nickeltc:1.0 make
-```
-
-That produces `hook/libnkpm.so`. The Qt 6 build for firmware 6.x uses another
-image and makes `hook/libnkpm-qt6.so`:
-
-```sh
-podman run --rm -v "$PWD":"$PWD" -w "$PWD/hook" ghcr.io/nicoverbruggen/kobuild:qt6-v0.5.3 make NH_QT_MAJOR=6
-```
-
-`go run ./build` then bundles it into
-`dist/KoboRoot.tgz` (it fails with a clear message if the `.so` is absent; point
-`KPM_UI_SO` at a prebuilt library to override the path). On Windows the volume
-mount is `-v "C:/…/kpm:/work" -w /work/hook` (set `MSYS_NO_PATHCONV=1` under Git
-Bash).
-
-### Settings tab
-
-The **Settings** tab of the kpm UI has two settings. The hook stores them in
-`/mnt/onboard/.adds/kpm/ui.toml`.
-
-| Setting | Values | Effect |
-|---|---|---|
-| Open kpm from | **Row on the More screen** (default), **NickelMenu** | The row shows on the More page, or the kpm entries are active in NickelMenu. Never both. The change applies at the next open of the More page or of the NickelMenu menu. Without NickelMenu, the tab shows no NickelMenu options and the row always shows. |
-| NickelMenu button | **Shown** (default), **Hidden** | Hides the NickelMenu button in the bottom bar of the home screen. You can change it only when kpm opens from the row on the More screen. Restart the device after you change it. |
-
-To hide the button, the hook writes `/mnt/onboard/.adds/nm/kpm-hide` with the
-NickelMenu line `experimental:menu_main_15505_enabled:0`. NickelMenu v0.6.0
-(firmware 4.x) and the Qt 6 fork (firmware 6.x) read this line. NickelMenu
-reads it only when it starts, so the change needs a restart. The NickelMenu
-items in the reading menu and the library menu stay. If the row cannot show
-(the crash guard above), the hook deletes the file at the next boot, so the
-button comes back after one more restart. The UI uninstall flag
-(`kpm_ui_uninstall`) also activates the NickelMenu entries and deletes the
-file.
-
-## CLI reference
-
-```
-kpm add <url> [--asset <glob>] [--forge github|forgejo] [--name <id>] [--installed <ver>]
-                            register a package from a forge release URL
-kpm remove <id>             unregister only (deletes the TOML; files stay — see uninstall)
-kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]
-                            delete a package's installed files (see "Uninstalling")
-kpm list [--json]           offline table: id, installed, staged, latest, pin
-kpm check [--notify]        query forges for all packages; update state + status file
-kpm update [<id>...] [--all] [--reboot] [--notify]
-                            download, verify, merge and stage updates; reboot to install
-                            (after a reboot promotes a staged install, kpm existence-checks
-                            the package's manifest and logs a WARN naming any files that
-                            never landed; the missing state shows in search/status --json
-                            and self-clears once the files reappear)
-kpm unstage                 cancel a pending staging (remove the kpm-staged tgz, clear staged state)
-kpm pin <id> <tag>          pin to an exact tag (downgrade allowed)
-kpm unpin <id>              track latest again
-kpm registry add <url> [--name <n>] [--ref <branch>] [--path <p>] [--forge github|forgejo]
-                            trust a registry of package definitions (see "Registries")
-kpm registry remove <name>  forget a registry and its cache (installed packages unaffected)
-kpm registry list           name, url, ref, cache age, package count
-kpm registry refresh [<name>]  refetch registry.toml (all by default; the only registry
-                            network call besides registry add's one-time forge probe)
-kpm search [<term>]         list/filter packages across cached registries
-kpm doctor [<id>]           diagnose whether installed Nickel plugins actually loaded
-                            (read-only; no lock, no network — see below)
-kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
-                            copy a package def from a registry into packages.d
-kpm adopt-self [--json]     enrol kpm's own self-update from a configured registry
-                            (best-effort refresh + install kpm --adopt in one step)
-kpm sync [<id>...] [--overwrite]  re-copy registry defs for registry-managed packages
-kpm config list <id>        declared config files for a package (offline)
-kpm config show <id> <file> entries of one config file — ini keys or text lines
-                            (<file> = declared name, case-insensitive, or 1-based index)
-kpm config set <id> <file> (--key K [--section S] | --line N [--append|--delete]) --value V
-                            edit one entry; surgical write, comments/layout preserved
-kpm config init <id> <file> [--force]  create a missing config file from the example
-                            template its registry entry ships (refuses to overwrite)
-kpm log [-n N]              print the last N log lines (default 12)
-kpm status                  print the status summary + any pending staging; fast/offline
-kpm ui                      signal the NickelKPM hook to open the graphical browser
-kpm ssh install [--keys <file>] [--port N]
-                            make .adds/kpm/ssh: host key, config.toml, authorized_keys
-kpm ssh enable [--port N]   install if needed, start at each boot, start now
-kpm ssh disable             do not start at boot, stop now
-kpm ssh start|stop|restart  control the SSH server now ("enabled" does not change)
-kpm ssh status [--json]     enabled, running, pid, port, addresses, host key, keys
-kpm version                 print the compiled-in version
-```
-
-Exit codes: `0` ok / nothing to do, `1` error, `2` partial (some packages failed
-but others still staged), `3` confirmation required (`uninstall`/`install`
-without `--yes`).
-If every selected `update` package fails and nothing stages, the exit is `1`.
-
-**Machine-readable output:** `status`, `list`, `search`, `check`, `install`,
-`update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`,
-`config list`, `config show`, `config set`, `config init`, `doctor`,
-`ssh status`, and `version` accept `--json`. Human/progress output streams as usual; the final
-stdout line is the marker `BEGIN_JSON` immediately followed by one compact JSON
-object. This is what the graphical UI consumes; it also serves scripts.
-
-`doctor` answers a question `status` cannot: an "installed / up to date" package
-may still do nothing. It checks each installed NickelHook plugin for a failsafe
-quarantine sibling, a fresh NickelHook crash dump-log, and whether the plugin is
-actually mapped into the running Nickel, reporting `loaded` / `not-loaded` /
-`crashed` / `load-failed` / `unknown`. This is how kpm can now explain cases like
-NickelNote installing cleanly on firmware 4.45 yet never rendering. It reads only
-files and `/proc` — no lock, no network — and a bad verdict is never a command
-failure (exit stays 0). A `loaded` verdict proves the plugin mapped in, not that
-the mod works; a hook that silently no-ops leaves no trace, so `tools/symcheck` is
-the static pre-install complement. See DOCTOR.md.
-
-`update` merges all pending packages into one staged `KoboRoot.tgz` (kpm's own
-entries are merged last so nothing can clobber the new binary). Re-running
-`update` before a reboot re-merges the already-staged packages so none are lost.
-A download or verification failure skips only that package. kpm refuses to
-overwrite a `KoboRoot.tgz` it didn't stage (verified by content hash), so a
-manual install is never clobbered — and `kpm unstage` cancels a pending staging
-(it removes the tgz only if kpm staged it, then clears the staged state).
-
-Only one mutating kpm command runs at a time: it takes a lock at
-`.adds/kpm/lock`, and a second mutating command fails with "another kpm instance
-is running" (a lock older than 10 minutes is assumed stale and broken).
-Read-only commands (`list`/`status`/`log`/`version`/`search`/`doctor`/
-`registry list`/`config list`/`config show`)
-don't take the lock and never write state.
-
-`KPM_ROOT` overrides the `/mnt/onboard` root (used by tests and for dev runs off
-the device). `KPM_SYSROOT` overrides the rootfs `/` so `uninstall` deletions land
-inside a sandbox during tests.
+- kpm sends the token only over HTTPS to `api.github.com`, `raw.githubusercontent.com` and `github.com`. A redirect to the GitHub storage host does not carry it.
+- The token also raises the GitHub rate limit from 60 to 5,000 requests an hour.
+- When the token expires, each GitHub package fails with `GitHub rejected github_token in .adds/kpm/config.toml`. Replace or remove the key.
+- A person with USB access to the Kobo can read `config.toml`. Keep the scope of the token small.
 
 ## SSH
 
-kpm has a built-in SSH server for root logins (`kpm ssh`, kpm 0.14.0). It works on firmware 4.x and 6.x and replaces NiLuJe usbnet (Dropbear and telnet). The design is `kpm-archive/docs/SSH.md`.
+`kpm ssh` is an SSH server in the kpm binary, for root logins with a public key. It replaces NiLuJe usbnet.
 
-Set it up:
+1. Add your public key to `.adds/authorized_keys` on the Kobo drive.
+2. Tap **Enable** on the **SSH** tab, or run `kpm ssh enable`.
+3. Log in with `ssh root@<device address>`. The SSH tab shows the address and the host key fingerprint.
 
-1. Run `kpm ssh install` once, or open the **SSH** tab of the package manager. kpm makes `.adds/kpm/ssh/`.
-2. Connect the Kobo over USB. Add your public key to `.adds/authorized_keys`, one OpenSSH key per line (for example the line of `id_ed25519.pub`). Other Kobo SSH mods read this file too. `.adds/kpm/ssh/authorized_keys` also works.
-3. Tap **Enable** on the SSH tab, or run `kpm ssh enable`. The server starts now and at each boot.
-4. Log in with `ssh root@<device address>`. On the SSH tab, tap the eye icon to show the address. The tab hides it again each time it opens, so it is not on a screenshot. The tab also shows the host key fingerprint.
+[docs/ssh.md](docs/ssh.md) has the details: sftp and scp, Force Wi-Fi, limits, and the move from Dropbear.
 
-How it works:
+## Uninstall
 
-- The server is the kpm binary itself (`kpm ssh serve`, in Go). It needs no other file on the device.
-- The kpm hook starts it at boot when `.adds/kpm/ssh/config.toml` has `enabled = true`. It keeps running when Nickel restarts.
-- It accepts the public keys of `.adds/authorized_keys` and `.adds/kpm/ssh/authorized_keys` only, for the user `root`. No password login. It reads both files again at each login, so a new key works at once. kpm never writes `.adds/authorized_keys`. `kpm ssh install --keys` writes to `.adds/kpm/ssh/authorized_keys`.
-- A key line with options (`from=`, `command=` and others) is skipped and logged: kpm cannot apply the options.
-- You get a shell with a PTY, commands without a PTY (`ssh kobo 'cmd'`), and `sftp`. OpenSSH `scp` uses sftp, so it works. The old scp protocol (`scp -O`) does not.
-- Port forwarding, agent forwarding and X11 are refused.
-- The SSH tab has a **Force Wi-Fi** row with a **Turn on** or **Turn off** button. Turn it on to keep Wi-Fi on while the Kobo is awake, so SSH stays reachable. Sleep still turns Wi-Fi off. The button changes the Nickel developer setting `ForceWifiOn` at once, with no reboot. Nickel saves it in `Kobo eReader.conf`, so it stays after a reboot. `kpm ssh status` shows the value of that file. The kpm CLI does not change it. The row hides on a firmware that does not have the setting.
-- At most 8 connections. After 5 failed logins from one address in one minute, kpm refuses that address for 5 minutes.
-- The log is `.adds/kpm/ssh/sshd.log`. `kpm ssh status` shows its last error.
-- `config.toml` has `enabled`, `port` (default 22) and `listen` (default `0.0.0.0`). `kpm ssh enable --port 2222` changes the port.
+### A package
 
-Next to NiLuJe usbnet: NiLuJe Dropbear holds port 22, so `kpm ssh start` fails with "port 22 is in use" while it runs. Move from Dropbear to kpm ssh like this:
+In the UI, open the package and tap **Uninstall**. On the CLI:
 
-1. Run `kpm ssh enable --port 2222`. Log in on port 2222 and check that it works.
-2. Stop Dropbear and telnet, and keep them off at boot. The KoboStuff NickelMenu toggle does this: it creates `NO_SSH` and `NO_TELNET` in `/usr/local/niluje/usbnet/etc`.
-3. Run `kpm ssh enable --port 22`. `enable` restarts a running server, so it moves to port 22 at once.
-4. Log in on port 22 in a new connection before you close the old one. The host key on port 22 is now the kpm key, so remove the old line from your `known_hosts` (`ssh-keygen -R <device address>`).
-
-kpm ssh does not need any part of usbnet. The stock `/etc/fstab` mounts `/dev/pts`, and kpm ssh mounts it if it is missing.
-
-Security: the user partition is FAT, so these files have no Unix permissions. A person with USB access to the Kobo can add a key to a key file. That person can already install a `KoboRoot.tgz` that runs as root, so kpm ssh gives them no new access.
-
-Uninstall: the UI uninstall flag (`kpm_ui_uninstall`) stops the server. The folder `.adds/kpm/ssh/` stays, with your keys and the host key, so a new install keeps the same host key.
-
-## App-tree installs
-
-Most packages install by staging a `KoboRoot.tgz` for the firmware to unpack on
-the next reboot. **KOReader** and **Plato** do not: their releases are a plain
-directory tree in a zip that lives under `/mnt/onboard/.adds/<name>/`, with no
-root files and nothing for the firmware to do. kpm extracts those itself.
-
-The practical differences:
-
-| | tgz packages | app-tree packages |
-|---|---|---|
-| When it takes effect | after a reboot | immediately, except a font package (see [Fonts](#fonts)) |
-| `kpm update` reports | `staged — reboot to install` | `installed` |
-| `--reboot` | reboots | does nothing, except for a font package |
-| `kpm uninstall` | removes files on the next reboot | removes them now |
-| `install_method` in `--json` | `"tgz"` | `"app-tree"` |
-| `kind` in `--json` | `"mod"` | `"mod"`, or `"font"` for a package installed into `/mnt/onboard/fonts` |
-
-A def opts in with an `[install]` table:
-
-```toml
-[packages.koreader.install]
-method = "app-tree"
-root   = "koreader"                       # the prefix inside the zip to extract
-dest   = "/mnt/onboard/.adds/koreader"    # where its contents land
-
-  [packages.koreader.install.launcher]    # optional NickelMenu entry
-  nm_file  = "/mnt/onboard/.adds/nm/koreader"
-  nm_entry = "menu_item:main:KOReader:cmd_spawn:quiet:exec /mnt/onboard/.adds/koreader/koreader.sh"
+```sh
+kpm uninstall <id>           # prints the plan and exits 3
+kpm uninstall <id> --yes     # applies it
 ```
 
-`dest` must be inside kpm's writable allowlist (`.adds`/`.kobo` on the user
-partition, `/usr/local`, `/opt` on the rootfs) and must be a package-specific
-directory, never a shared root like `.adds` itself. A content directory such
-as `/mnt/onboard/fonts` is the one exception: every font package shares it,
-under the per-file ownership rule in [Fonts](#fonts). Every entry in the zip is
-validated **before a single byte is written**: absolute paths, `..` traversal,
-backslashes, control characters, symlinks, device nodes and setuid entries are all
-refused, and each destination is re-checked against the same path policy
-`kpm uninstall` uses immediately before the write that uses it. Any violation
-fails the whole install — a half-extracted app is worse than none.
+`--purge` also deletes the user data of the package. `--reboot` reboots after it. Some mods remove themselves at the next boot. `kpm remove <id>` only forgets the package and keeps its files. See [docs/packages.md](docs/packages.md#uninstall) for the recipes and the path rules.
 
-Because most of these packages install as soon as `kpm update` finishes, a run
-that only updates app-tree packages needs no reboot, and the "Update all"
-NickelMenu entry completes without one. A font package is the exception:
-Nickel does not use a new or replaced font until the next reboot, so a
-font-only run still asks for one. See [Fonts](#fonts).
+### Only the UI
 
-### What survives an update
+Create the file `/mnt/onboard/kpm_ui_uninstall` and reboot. At the next boot the hook deletes both hook builds and the `kpm-seed` folder, stops `kpm ssh`, activates the NickelMenu entries and deletes `.adds/nm/kpm-hide`. The kpm binary, config, state and packages stay.
 
-**kpm deletes only files it previously installed.** Everything else inside
-`.adds/koreader` — your settings, statistics, annotations, downloaded plugins,
-Plato's `Settings.toml` and `dictionaries/` — is user data by definition and is
-never touched. kpm knows exactly what it installed because it records a manifest
-every time, so this needs no configuration and cannot be got wrong by a curator.
+### kpm itself
 
-A plain `kpm uninstall koreader` therefore removes the app and leaves your data;
-`--purge` removes the whole directory.
+`kpm uninstall kpm` is refused. Remove kpm by hand:
 
-### Launching them
-
-kpm writes the NickelMenu entry the def declares, and **never overwrites one that
-already exists** — if you have customised your entry, it is left alone and kpm
-says so. `kpm update <id> --force-launcher` rewrites it.
-
-If NickelMenu is not installed, kpm writes the drop-in anyway (it is inert until
-NickelMenu arrives) and warns:
-
-```
-koreader: NickelMenu not detected — install it ("kpm install nickelmenu") to get a launch entry
-```
-
-If you use **KFMon** instead, its shipped config already points at
-`/mnt/onboard/.adds/koreader/koreader.sh` and `/mnt/onboard/.adds/plato/plato.sh`,
-so a kpm install/update keeps working. The one thing kpm cannot do is place the
-launcher *icon*: KFMon watches `/mnt/onboard/koreader.png` and
-`/mnt/onboard/icons/plato.png`, which sit at the root of the user partition —
-outside kpm's writable allowlist. Copy them from the release zip over USB.
-`kpm doctor` tells you if that step is missing.
-
-### Firmware 4.17+ and your library
-
-From firmware 4.17 Nickel indexes files inside hidden folders, so an app tree
-under `.adds/` can show up as junk "books" in your library. The fix is one line in
-`/mnt/onboard/.kobo/Kobo/Kobo eReader.conf`:
-
-```
-[FeatureSettings]
-ExcludeSyncFolders=(\\.(?!kobo|adobe).+|([^.][^/]*/)+\\..+)
-```
-
-**kpm deliberately does not make this edit.** Nickel owns that file, rewrites it,
-and reverts changes made while it is running — and kpm's own UI runs *inside*
-Nickel, so an edit from there would often appear to work and then silently revert.
-Edit it over USB with the Kobo idle. `kpm doctor` detects whether the line is
-present and prints exactly what to add if it is not.
-
-### Firmware 5.x
-
-KOReader publishes a separate `koreader-kobov5-*.zip` for firmware 5.x. The
-registry entry tracks the 4.x build; on a firmware 5 device kpm shows the
-"untested on your firmware" note at install time. The failure mode if you ignore
-it is an app that does not start — not a brick, and uninstall still works.
-
-### Fonts
-
-Font packages use the same app-tree method as KOReader and Plato. The install
-destination is always `/mnt/onboard/fonts`, and it is flat: kpm refuses a font
-zip that carries a subfolder, because Nickel reads only the files directly
-inside `fonts`, not anything nested under it.
-
-```toml
-[packages.kf-core-fonts.install]
-method = "app-tree"
-dest   = "/mnt/onboard/fonts"
-```
-
-**Reboot to use a new or replaced font.** Installing or updating a font
-package writes its files right away, but Nickel does not use a new or
-replaced font until the next reboot. kpm's own reboot prompt covers this: the
-same **Reboot now / Later** dialog appears for a font install, update, or
-uninstall.
-
-**Ownership.** `/mnt/onboard/fonts` is a directory every font package shares,
-so kpm applies a per-file rule in place of the usual one-package-per-directory
-rule: kpm never overwrites a font it did not install. If you already copied a
-font into that folder by hand, move it off the device before kpm installs a
-package that ships the same filename.
-
-**Uninstall removes only what kpm installed.** A font package's uninstall
-deletes the files recorded in its own manifest, and nothing else. Your own
-fonts, and the `fonts` folder itself, survive an install, update, or uninstall
-of any font package kpm manages.
-
-Two limits are worth knowing, and neither happens with an ordinary font package.
-A tgz package can ship a file into the fonts folder. Nickel unpacks that file at
-boot, so kpm never runs the ownership check, and a shipped font that uses your
-filename replaces yours. A package definition can also name one file in the
-fonts folder in its `extra_paths`, and kpm then deletes that file at uninstall.
-
-**Older kpm and font packages.** kpm 0.11.0 and earlier reject a font package
-definition when they load the registry, because `/mnt/onboard/fonts` was not
-yet a writable destination for those versions. Each rejected def is named in
-one line, with the reason "not within a writable location". This is
-cosmetic: the def is safely dropped, and the line stops appearing once the
-device's kpm updates to 0.12.0 or later.
-
-### Dictionaries
-
-A dictionary package uses the `file` method. kpm places the release asset
-itself, unchanged, in `/mnt/onboard/.kobo/custom-dict`. Nickel (firmware 4.24
-and later) lists each `dicthtml-*.zip` in that folder as a custom dictionary.
-
-```toml
-[packages.dict-example.install]
-method = "file"
-dest   = "/mnt/onboard/.kobo/custom-dict/dicthtml-example.zip"
-```
-
-- `dest` names the file. The file must sit directly in `custom-dict`, with a
-  `dicthtml-*.zip` name. kpm refuses any other dest when it loads the def.
-- **No reboot.** Nickel lists `custom-dict` again at each lookup, so kpm uses
-  no reboot prompt for a dictionary, and "Update all" finishes without a
-  reboot. This comes from reading libnickel 4.46. No device test has confirmed
-  it yet. If a lookup still shows the old entries, select another dictionary
-  in the lookup popup and back, or reboot.
-- kpm moves the downloaded file into place with a rename, so an update needs
-  no free space beyond the download.
-- The ownership rules are the ones for fonts. kpm never overwrites a
-  dictionary it did not install, and an uninstall removes only its own file.
-- kpm 0.11.0 and earlier drop a `file` def as an unknown install method. Give
-  the def `min_kpm = "0.12.0"`.
-
-## Uninstalling packages
-
-`kpm remove <id>` only unregisters a package (deletes its TOML); the installed
-files stay. To delete the files, use `kpm uninstall <id>`.
-
-Uninstall is destructive and kpm runs non-interactively, so it never prompts:
-it prints a **plan** and, without `--yes`, exits `3` so you can review first.
-
-```
-kpm uninstall nickelhardcover              # prints the plan, exits 3
-kpm uninstall nickelhardcover --dry-run    # prints the plan, changes nothing, exits 0
-kpm uninstall nickelhardcover --yes        # applies it
-kpm uninstall nickelhardcover --yes --purge   # also removes user data (purge_paths)
-```
-
-On success kpm clears the package from `state.json` and deletes its
-`packages.d/<id>.toml` (keep it with `--keep-registration`). `--reboot` reboots
-afterwards; some packages need a reboot to finish (see the marker method).
-
-**Path safety.** Every deletion candidate — whether from the recorded manifest,
-`extra_paths`, or `purge_paths` — is checked against a policy:
-
-- A **hard denylist** is always refused, even via `allow_paths`: `/bin`, `/sbin`,
-  `/lib`, `/drivers`, `/dev`, `/proc`, `/sys`, `/root`, `/var`; all of `/etc`
-  **except** `/etc/udev/rules.d` and `/etc/dbus-1` (so `/etc/passwd`, `/etc/shadow`,
-  `/etc/inittab`, `/etc/init.d`, `/etc/fstab`, … can never be deleted); all of
-  `/usr/local/Kobo` **except** `/usr/local/Kobo/imageformats` (where NickelHook
-  mods like `libnm.so` live); everything at/under `/mnt/onboard` **except**
-  `/mnt/onboard/.adds`, `/mnt/onboard/.kobo`, and `/mnt/onboard/fonts` (so the
-  book library is protected, and a purge of the whole `fonts` folder at once is
-  still refused, see [Fonts](#fonts));
-  plus kpm's own `bin`, `state.json`, and `kpm.log`.
-- An **allowlist** is deletable: `/mnt/onboard/.adds`, `/mnt/onboard/.kobo`,
-  `/usr/local`, `/usr/bin`, `/usr/lib`, `/opt`, `/etc/udev/rules.d`, `/etc/dbus-1`.
-  Because the denylist is checked first, `allow_paths` can extend the allowlist to
-  new locations (e.g. `/srv/...`) but never re-enable any denied path above.
-- Per-package `allow_paths` extends the allowlist but can never override the
-  denylist.
-- Anything else is **skipped with a WARN** and the rest of the removal continues.
-
-Symlinks are never followed (the link itself is removed); shared directories
-survive because kpm only `rmdir`s directories that end up empty. `--force` only
-bypasses a failing `run_before`, never the path policy.
-
-### The `[uninstall]` table
-
-Every field is optional. A bad `[uninstall]` block only errors when `uninstall`
-runs — it never breaks `add`/`check`/`update`. And a package file that is
-entirely unreadable (malformed TOML, or a filename that isn't a valid id) is
-skipped with a warning in the log rather than making every package invisible;
-that one package simply doesn't exist until you fix the file.
-
-One exception: a file with **malformed TOML** blocks `kpm install` and
-`kpm update` with a message naming it, because kpm cannot see what conflicts that
-package declares and will not answer the question from a partial view. Fix the
-file or `kpm remove` it. A file whose *filename* isn't a valid id is only warned
-about — it was never registered, so it cannot declare anything.
-
-(`kpm pin`/`unpin` rewrite the package's TOML, preserving unknown fields but
-**not comments** — a TOML-library limitation.)
-
-```toml
-[uninstall]
-method       = "manifest"   # "manifest" (default) | "marker" | "marker-remove"
-extra_paths  = []           # extra software artifacts to always delete
-purge_paths  = []           # user data/config; deleted ONLY with --purge
-keep_paths   = []           # protect these (subtracted from the deletion set)
-allow_paths  = []           # extend the deletable-path allowlist (never the denylist)
-marker_file  = ""           # marker: file to create; marker-remove: file to delete (required for both)
-needs_reboot = false        # defaults to true for marker/marker-remove, false otherwise
-run_before   = ""           # /bin/sh -c before removal; nonzero aborts (unless --force)
-run_after    = ""           # /bin/sh -c after removal; nonzero is logged, not fatal
-```
-
-Configured paths are absolute device paths. Entries in `extra_paths`,
-`purge_paths`, and `keep_paths` may end in `/**` to mean "this directory,
-recursively". `run_before`/`run_after` run as root, exactly like the package's
-own install already did.
-
-**Manifest method** (the default) deletes exactly what the package installed —
-the manifest kpm captured when it staged the package — plus `extra_paths`, minus
-`keep_paths`. Example, NickelHardcover, also wiping its data with `--purge`:
-
-```toml
-# packages.d/nickelhardcover.toml
-name = "NickelHardcover"
-source = "codeberg.org/StrayRose/NickelHardcover"
-forge = "forgejo"
-asset = "KoboRoot.tgz"
-
-[uninstall]
-purge_paths = ["/mnt/onboard/.adds/NickelHardcover/**"]
-```
-
-```
-kpm uninstall nickelhardcover --yes --purge   # removes files AND the data dir
-```
-
-If a package predates kpm it has no manifest; set `extra_paths` (or update it
-through kpm once) or uninstall refuses.
-
-**Marker method** is for packages with their own removal mechanism, like
-NickelMenu: instead of deleting files out from under a running Nickel, kpm
-creates the file NickelMenu watches for and reboots. NickelMenu removes itself
-on the next boot:
-
-```toml
-# packages.d/nickelmenu.toml
-name = "NickelMenu"
-source = "github.com/pgaskin/NickelMenu"
-forge = "github"
-asset = "KoboRoot.tgz"
-
-[uninstall]
-method       = "marker"
-marker_file  = "/mnt/onboard/.adds/nm/uninstall"
-needs_reboot = true
-```
-
-```
-kpm uninstall nickelmenu --yes --reboot   # writes the marker, reboots to finish
-```
-
-`extra_paths`/`purge_paths`/`keep_paths` still apply for the marker method (e.g.
-purge NickelMenu's config dir alongside the marker with `--purge`).
-
-**Marker-remove method** is the inverse convention used by NickelHook mods like
-NickelClock, NickelDBus, and NickelTypeFix: the package *ships* a trigger file
-whose *absence* makes it remove itself on the next boot. kpm deletes that file
-and reboots — deleting the mod's files directly would rip a loaded `.so` out
-from under Nickel instead of following the package's supported path:
-
-```toml
-# packages.d/nickelclock.toml
-name = "NickelClock"
-source = "github.com/shermp/NickelClock"
-forge = "github"
-asset = "NickelClock-*.zip"
-
-[uninstall]
-method      = "marker-remove"
-marker_file = "/mnt/onboard/.adds/nickelclock/uninstall"
-purge_paths = ["/mnt/onboard/.adds/nickelclock/**"]
-```
-
-```
-kpm uninstall nickelclock --yes --reboot   # deletes the trigger, reboots to finish
-```
-
-If the trigger file is already absent (the package is already uninstalling, or
-was removed by hand), the uninstall succeeds as a no-op — the reboot note still
-applies. A *directory* at the marker path is an error. The other fields compose
-exactly as for `marker` (e.g. `--purge` removes the config dir alongside the
-trigger delete).
-
-There is no NickelMenu entry for uninstall — it stays CLI-only (telnet/SSH) on
-purpose: a one-tap destructive action is a footgun.
-
-### Removing kpm itself
-
-`kpm uninstall kpm` is refused. Remove kpm by hand over USB: delete
-`/mnt/onboard/.adds/kpm` (its binary, state, log, and registrations) and
-`/mnt/onboard/.adds/nm/kpm` (its NickelMenu drop-in) and
-`/mnt/onboard/.adds/nm/kpm-hide` (it hides the NickelMenu button, see
-"Settings tab"), then reboot.
-If you use `kpm ssh`, run `kpm ssh disable` first. Keep `.adds/kpm/ssh/` if you want the same host key after a new install.
-On firmware 4.x, kpm also added a block to `/etc/init.d/rcK` (see "The upgrade from 4.x to 6.x"). Without `.adds/kpm/carryover/Kobo.tgz` the block does nothing. To remove it, delete the lines from `# kpm carry-over: begin` to `# kpm carry-over: end`.
-
-## First install & smoke test (telnet)
-
-After the bootstrap reboot, connect over telnet/SSH (as root) and confirm:
-
-```
-# kpm version
-0.9.2
-
-# kpm add https://codeberg.org/StrayRose/NickelHardcover
-registered nickelhardcover -> codeberg.org/StrayRose/NickelHardcover [forgejo], asset "KoboRoot.tgz"
-
-# kpm check
-kpm 0.9.2 — checked 2026-07-19 10:30
-nickelhardcover  - -> v0.5.1  UPDATE AVAILABLE
-kpm              0.9.2        self-update not configured
-1 update available. Use "Update all" to install (reboots).
-
-# kpm update --all           # stage without rebooting
-1 package(s) staged — reboot to install
-
-# kpm log
-2026-07-19 10:30:00  CHECK      nickelhardcover  - -> v0.5.1 available
-2026-07-19 10:31:02  STAGE      nickelhardcover  - -> v0.5.1
-
-# reboot                     # firmware installs the staged tgz on boot
-# kpm check                  # after reboot, the next mutating command promotes
-                             #   staged -> installed (status is read-only and shows
-                             #   the result; it does not itself promote)
-```
-
-Inspect `/mnt/onboard/.adds/kpm/kpm.log` at any time for the full history.
+1. On 4.x, over SSH, delete the lines from `# kpm carry-over: begin` to `# kpm carry-over: end` in `/etc/init.d/rcK`. Without the bundle the block does nothing, so you can also skip this step.
+2. If you use `kpm ssh`, run `kpm ssh disable`.
+3. Remove the UI with `kpm_ui_uninstall` and reboot (see above). This also removes the `kpm-seed` folder, which can copy the binary back at boot.
+4. Over USB, delete `.adds/kpm` and `.adds/nm/kpm`. Keep `.adds/kpm/ssh/` if you want the same host key after a new install.
 
 ## Troubleshooting
 
-- **A staged update you want to cancel.** Run `kpm unstage` (before rebooting).
-  It removes the staged `KoboRoot.tgz` only if kpm staged it and clears the
-  staged state. Deleting `.kobo/KoboRoot.tgz` by hand instead desyncs kpm (it
-  will still promote the packages it thought it staged), so prefer `unstage`.
-- **Corrupt `state.json`.** If the state file ever becomes unreadable, kpm
-  renames it to `state.json.corrupt-<timestamp>`, logs a `WARN`, and starts from
-  empty state rather than failing every command. (If it can neither rename nor
-  copy the corrupt file aside, it errors instead of overwriting the only copy.)
-  Re-seed installed versions with `kpm add <url> --installed <ver>`; kpm's own
-  version re-seeds automatically. If an update was staged but not yet installed
-  when the corruption happened, its `.kobo/KoboRoot.tgz` becomes "foreign"
-  afterward — reboot to install it, or delete that file by hand.
-- **"conflicts with installed package".** A package whose registry def declares a
-  `conflicts` entry is refused while the named package is still on the device,
-  because installing it would delete that package's files behind kpm's back:
+- **Cancel a staged update.** Run `kpm unstage` before the reboot. Do not delete `.kobo/KoboRoot.tgz` or `.kobo/Kobo.tgz` by hand: kpm still thinks the packages are staged.
+- **A mod is "up to date" but does nothing.** Run `kpm doctor <id>`.
+- **Junk "books" from `.adds` in the library (firmware 4.17 and later).** Add the line below to `.kobo/Kobo/Kobo eReader.conf` over USB, with the Kobo idle. kpm does not edit this file, because Nickel writes it again. `kpm doctor` checks for the line.
 
   ```
-  kpm install: "kobo-tweaks" conflicts with installed package "nickelclock" — uninstall it first: kpm uninstall nickelclock
+  [FeatureSettings]
+  ExcludeSyncFolders=(\\.(?!kobo|adobe).+|([^.][^/]*/)+\\..+)
   ```
 
-  Run the command it names, then retry — the block is a pure function of live
-  state, so it clears itself with no fixup. (If the blocker was `kpm remove`d, its
-  files remain but its def is gone, so `kpm uninstall` alone cannot work; the
-  message then names the re-register step first.) `--yes` deliberately does
-  **not** override it (the graphical UI always passes `--yes`), and there is no
-  force flag: kpm cannot make "install anyway" safe, because the *other*
-  package's installer does the deleting, so kpm never learns which files went
-  away.
+- **"conflicts with installed package".** The registry says that the two packages cannot both be installed. Run the `kpm uninstall` command that the message names, then try again. `--yes` does not override it. `kpm update --all` skips the package with a note.
+- **"checksum mismatch for asset".** The downloaded file does not match the hash in the registry. kpm deletes the file and does not install it. Tell the registry curator.
+- **Corrupt `state.json`.** kpm renames it to `state.json.corrupt-<time>`, logs a `WARN` and starts with an empty state. Give the installed versions again with `kpm add <url> --installed <ver>`. kpm finds its own version.
+- **The log.** `.adds/kpm/kpm.log` rotates to `kpm.log.1` at 256 KiB. `kpm log` reads only the current file.
+- **The UI does not open.** Check `.adds/kpm/.more-row-pending` (see [Safety of the More row](#safety-of-the-more-row)), and that `/usr/local/Kobo/imageformats/libnkpm.so` (4.x) or `libnkpm-qt6.so` (6.x) exists. A firmware update removes them. Install `Kobo.tgz` again.
 
-  `kpm update` enforces the same rule for a package that is registered but not
-  yet installed. Naming it explicitly (`kpm update <id>`) is an error; under
-  `kpm update --all` it is **skipped with a note** and the run still succeeds — a
-  conflict is permanent, so failing the whole run would make "Update all" error
-  out forever. A pair that is *already* installed is reported by `kpm status`
-  (`CONFLICT: … cannot both be installed`) but never blocked — the collision has
-  already happened, and refusing would strand both.
-- **"checksum mismatch for asset …".** The registry declares a `sha256` for that
-  release and the downloaded bytes did not match. kpm deletes the partial file
-  and refuses to install; other packages in the same run still stage. There is no
-  retry (the bytes are what the server serves), and no override. Either the
-  upstream release was re-uploaded — tell the curator, the entry needs updating —
-  or something between you and the forge is serving different bytes.
-- **`status.txt` is now `status`.** The last-summary file lost its extension in
-  0.10.0, so Nickel's `ExcludeSyncFolders` firmware variant stops importing it as
-  a book. The first command that writes a status removes the old file for you;
-  until then `kpm status` still reads it.
-- **The log.** `kpm.log` rotates to `kpm.log.1` once it passes 256 KiB (a single
-  older file is kept). `kpm log` only reads the current file; open `kpm.log.1`
-  over USB for older history.
+## Files on the device
 
-## Build & release
+```
+/mnt/onboard/.adds/kpm/
+  bin/kpm              the static ARM binary
+  packages.d/          one TOML file per package (kpm.toml is kpm itself)
+  config.toml          registries and github_token
+  ui.toml              the Settings tab
+  state.json           installed and staged versions, manifests, last check
+  kpm.log              the history
+  status               the last summary (NickelMenu "Status")
+  cache/               downloads and registry caches
+  carryover/Kobo.tgz   firmware 4.x: the bundle for the upgrade to 6.x
+  ssh/                 kpm ssh: host key, config, keys, log
+/mnt/onboard/.adds/nm/kpm          the NickelMenu entries
+/usr/local/Kobo/imageformats/      libnkpm.so (Qt 5), libnkpm-qt6.so (Qt 6)
+```
 
-- `go vet ./...` and `go test ./...` — unit tests (httptest forge fixtures,
-  tar-merge, URL parsing, state reconcile) run on any host.
-- `go run ./build` cross-compiles the `linux/arm/GOARM=7` static binary
-  (`CGO_ENABLED=0`) and assembles `dist/KoboRoot.tgz` entirely in Go — no
-  `tar`/WSL needed on Windows — then self-checks the archive's exact member list
-  and modes. Override the embedded version with `KPM_VERSION=<v> go run ./build`.
-- `go run ./tools/symcheck <kobo-firmware.zip>` — **required pre-release gate**
-  for the UI hook: verifies every Nickel symbol `nkpm.cc` resolves at load
-  against that firmware's `libnickel.so.1.0.0` (accepts a firmware zip,
-  a `KoboRoot.tgz`, a bare `libnickel.so*`, or an https URL; see
-  `tools/symcheck/README.md`). Run it against the newest firmware before
-  tagging — a missing required symbol means the UI cleanly refuses to load
-  there.
-- `go run ./build` also writes `dist/Kobo.tgz`, the package for both firmware lines. It needs both hook builds, `hook/libnkpm.so` and `hook/libnkpm-qt6.so`. `hook/Makefile` gives the build commands.
-- Release artifacts are copied to `releases/<version>/KoboRoot.tgz`.
+## Security
 
-## Non-goals (v1)
+- kpm downloads over HTTPS only. It refuses a redirect to plain HTTP. It uses an embedded Mozilla CA bundle.
+- kpm checks each archive before it stages it. It refuses absolute and `..` paths, links that point outside the archive, device and FIFO entries, and setuid or setgid files. No package except kpm can write the kpm files.
+- kpm checks a registry `sha256` when the registry has one for that release.
+- `kpm uninstall` never deletes a path on its denylist, for example `/etc/passwd` or your books. See [Path safety](docs/packages.md#path-safety).
 
-No dependency resolution, no repo indexes, no firmware 5.x, no asset signature
-verification, no GUI outside the NickelKPM hook (launched from NickelMenu).
+## More documentation
+
+| Read | When |
+|---|---|
+| [docs/packages.md](docs/packages.md) | You write a package def or a registry, or want the install and uninstall rules. |
+| [docs/ssh.md](docs/ssh.md) | You set up `kpm ssh` or move from NiLuJe usbnet. |
+| [docs/development.md](docs/development.md) | You build or test kpm or the hook, or read the `--json` output. |
+
+kpm has no dependency resolution and no asset signatures.
