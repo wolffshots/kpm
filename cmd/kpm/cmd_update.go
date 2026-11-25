@@ -821,7 +821,19 @@ func fresh(lastCheck string) bool {
 // carries a table at all) only distinguish the unverified situations in the log
 // line; see verifiedSuffix.
 func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, []string, error) {
-	final, _, err := a.fetchAsset(id, tag, ".tgz", wantSHA, declaredForTag, hasChecksums, asset)
+	return a.downloadFor(a.paths.Line(), id, tag, wantSHA, declaredForTag, hasChecksums, asset)
+}
+
+// downloadFor is download for the asset of a given firmware line. The
+// carry-over bundle uses it on line 4 to get the 6.x build (section 3h).
+func (a *App) downloadFor(line int, id, tag, wantSHA string, declaredForTag, hasChecksums bool, asset forge.Asset) (string, []string, error) {
+	// The build of another line gets its own cache name, so it never replaces
+	// the asset of the same tag for the running line.
+	ext := ".tgz"
+	if line != a.paths.Line() {
+		ext = fmt.Sprintf(".fw%d.tgz", line)
+	}
+	final, _, err := a.fetchAsset(id, tag, ext, wantSHA, declaredForTag, hasChecksums, asset)
 	if err != nil {
 		return "", nil, err
 	}
@@ -851,7 +863,7 @@ func (a *App) download(id, tag, wantSHA string, declaredForTag, hasChecksums boo
 	}
 	// On firmware 6.x the asset is a Kobo.tgz, relative to /usr/local/Kobo. Its
 	// members must stay under imageformats/ (QT6-FIRMWARE6.md section 3b).
-	if a.paths.Line() == device.Line6 {
+	if line == device.Line6 {
 		manifest, err := tgz.CheckKoboTgz(id, res, id == selfID)
 		if err != nil {
 			os.Remove(final)

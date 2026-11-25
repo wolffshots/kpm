@@ -65,6 +65,30 @@ type PackageState struct {
 	MissingFiles []string `json:"missing_files,omitempty"`
 }
 
+// Carryover is the bundle that kpm keeps on firmware 4.x: one Kobo.tgz with the
+// 6.x build of each installed package that has one. The 4.x rcK copies it to
+// .kobo/Kobo.tgz during the upgrade to 6.x, and the first 6.x boot installs it
+// (QT6-FIRMWARE6.md section 3h).
+type Carryover struct {
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+	BuiltAt string `json:"built_at"`
+	// From maps each package id to the key of its 4.x install that the bundle
+	// was built for. A different key set means the bundle is out of date.
+	From map[string]string `json:"from"`
+	// Packages maps each package id to the 6.x build in the bundle.
+	Packages map[string]CarriedPackage `json:"packages"`
+}
+
+// CarriedPackage is the 6.x build of one package in the carry-over bundle.
+// After the upgrade, kpm records these values as the installed package.
+type CarriedPackage struct {
+	Version     string   `json:"version"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	SHA256      string   `json:"sha256"`
+	Manifest    []string `json:"manifest"`
+}
+
 // RegistryState records the cache freshness of one configured registry
 // (REGISTRY.md §9.4). LastFetched is an RFC3339 timestamp; Etag is the server's
 // ETag if it sent one (used for conditional If-None-Match refresh).
@@ -96,6 +120,9 @@ type State struct {
 	// the firmware-change check (QT6-FIRMWARE6.md section 3f). Empty means not
 	// recorded yet, which is not a change.
 	Firmware string `json:"firmware,omitempty"`
+	// Carryover records the bundle that kpm keeps on firmware 4.x for the
+	// upgrade to 6.x (QT6-FIRMWARE6.md section 3h). Nil when there is none.
+	Carryover *Carryover `json:"carryover,omitempty"`
 
 	path string // where it was loaded from, for Save
 	// CorruptBackup is set (not serialized) when Load recovered from an

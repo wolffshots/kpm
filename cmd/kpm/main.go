@@ -46,6 +46,7 @@ Usage:
   kpm config init <id> <name-or-index> [--force]   (create a file from its example template)
   kpm log [-n N]
   kpm status
+  kpm carryover                (firmware 4.x: build the bundle that keeps the mods on the upgrade to 6.x)
   kpm ui                       (open the graphical package manager; used by NickelMenu)
   kpm ssh <enable|disable|start|stop|restart|status|install> [--json] [--keys <file>] [--port N]
   kpm version
@@ -65,7 +66,7 @@ const (
 var mutatingCmds = map[string]bool{
 	"add": true, "remove": true, "uninstall": true, "check": true,
 	"update": true, "pin": true, "unpin": true, "unstage": true,
-	"install": true, "sync": true, "adopt-self": true,
+	"install": true, "sync": true, "adopt-self": true, "carryover": true,
 }
 
 // isMutating decides whether a command acquires the lock. Most commands are
@@ -134,43 +135,52 @@ func run(argv []string) int {
 	}
 	defer app.releaseLock()
 
+	code := app.dispatch(cmd, args)
+	app.carryoverAfter(cmd)
+	return code
+}
+
+// dispatch runs one command on a ready App.
+func (a *App) dispatch(cmd string, args []string) int {
 	switch cmd {
 	case "add":
-		return app.cmdAdd(args)
+		return a.cmdAdd(args)
 	case "remove":
-		return app.cmdRemove(args)
+		return a.cmdRemove(args)
 	case "uninstall":
-		return app.cmdUninstall(args)
+		return a.cmdUninstall(args)
 	case "list":
-		return app.cmdList(args)
+		return a.cmdList(args)
 	case "check":
-		return app.cmdCheck(args)
+		return a.cmdCheck(args)
 	case "update":
-		return app.cmdUpdate(args)
+		return a.cmdUpdate(args)
 	case "unstage":
-		return app.cmdUnstage(args)
+		return a.cmdUnstage(args)
 	case "pin":
-		return app.cmdPin(args)
+		return a.cmdPin(args)
 	case "unpin":
-		return app.cmdUnpin(args)
+		return a.cmdUnpin(args)
 	case "registry":
-		return app.cmdRegistry(args)
+		return a.cmdRegistry(args)
 	case "config":
-		return app.cmdConfig(args)
+		return a.cmdConfig(args)
 	case "search":
-		return app.cmdSearch(args)
+		return a.cmdSearch(args)
 	case "doctor":
-		return app.cmdDoctor(args)
+		return a.cmdDoctor(args)
 	case "install":
-		return app.cmdInstall(args)
+		return a.cmdInstall(args)
 	case "adopt-self":
-		return app.cmdAdoptSelf(args)
+		return a.cmdAdoptSelf(args)
 	case "sync":
-		return app.cmdSync(args)
+		return a.cmdSync(args)
 	case "log":
-		return app.cmdLog(args)
+		return a.cmdLog(args)
 	case "status":
-		return app.cmdStatus(args)
+		return a.cmdStatus(args)
+	case "carryover":
+		return a.cmdCarryover(args)
 	default:
 		fmt.Fprintf(os.Stderr, "kpm: unknown command %q\n\n%s", cmd, usage)
 		return exitError
@@ -300,6 +310,14 @@ func newApp(mutating bool) (*App, error) {
 	if err := a.reconcile(); err != nil {
 		a.releaseLock()
 		return nil, err
+	}
+	// The carry-over bundle (section 3h) runs before forgetWipedInstalls, so
+	// the check sees the 6.x files of the carried packages.
+	if a.adoptCarryover() && !(curFw != "" && curFw != oldFw) {
+		if err := a.state.Save(); err != nil {
+			a.releaseLock()
+			return nil, err
+		}
 	}
 	if curFw != "" && curFw != oldFw {
 		if fwChanged {

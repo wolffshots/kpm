@@ -193,7 +193,19 @@ On the first mutating run after a firmware change, kpm does these things:
 - If the line changed, it deletes a `KoboRoot.tgz` that it staged and that the new firmware does not read.
 - On 6.x it uninstalls each package whose def has `builtin_fw6`, with purge, and deletes its def. `kpm registry refresh` does the same. NickelClock is an example: firmware 6.x has a reader clock.
 
-Nothing on the device can start kpm after the update. To start again, install one `Kobo.tgz` by hand:
+### The upgrade from 4.x to 6.x
+
+On firmware 4.x, kpm keeps your mods across the upgrade to 6.x. You do not have to do anything.
+
+- kpm keeps a bundle, `.adds/kpm/carryover/Kobo.tgz`. It holds the 6.x build of kpm and of each installed package that has an `[fw6]` table. `kpm check`, `kpm update`, `kpm install` and `kpm uninstall` keep it up to date. Only a package that changed needs a download. `kpm carryover` builds it now and shows what it holds.
+- kpm adds a short block to the 4.x shutdown script `/etc/init.d/rcK`. The block acts only during the upgrade: when `.kobo/updateQt5ToQt6` and `.kobo/update.tar` exist. Then it copies the bundle to `.kobo/Kobo.tgz`. At other times it does nothing.
+- The first 6.x boot installs `.kobo/Kobo.tgz`, so kpm, NickelMenu and your other mods load at once. On its first run, kpm records the carried packages as installed with their 6.x files.
+
+A package without a 6.x build is not in the bundle. After the upgrade, kpm marks it as not installed, as described below. A 6.x firmware update (6.x to 6.x) is not covered: install kpm's `Kobo.tgz` by hand after it, as below.
+
+### When kpm does not start
+
+If kpm does not start after a firmware update, install one `Kobo.tgz` by hand:
 
 1. Copy the `Kobo.tgz` of kpm into `.kobo/` and eject. The kpm UI comes back.
 2. Open the kpm UI and tap "Update all". kpm installs the 6.x build of each package again, NickelMenu included when its def has an `[fw6]` table.
@@ -1019,6 +1031,7 @@ purpose: a one-tap destructive action is a footgun.
 `/mnt/onboard/.adds/kpm` (its binary, state, log, and registrations) and
 `/mnt/onboard/.adds/nm/kpm` (its NickelMenu drop-in), then reboot.
 If you use `kpm ssh`, run `kpm ssh disable` first. Keep `.adds/kpm/ssh/` if you want the same host key after a new install.
+On firmware 4.x, kpm also added a block to `/etc/init.d/rcK` (see "The upgrade from 4.x to 6.x"). Without `.adds/kpm/carryover/Kobo.tgz` the block does nothing. To remove it, delete the lines from `# kpm carry-over: begin` to `# kpm carry-over: end`.
 
 ## First install & smoke test (telnet)
 
