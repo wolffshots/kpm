@@ -29,13 +29,13 @@ vpath %.h  ../src ../src/widgets .
 # Device sources compiled unmodified + sim shim/entry.
 CC_SRCS  := browsedialog.cc detaildialog.cc configdialog.cc kpmprocess.cc \
             dialog.cc label.cc elidedlabel.cc packagerow.cc configrow.cc pagedstack.cc \
-            sshpage.cc morerow.cc moreguard.cc nickelstub.cc main.cc
+            sshpage.cc settingspage.cc launch.cc morerow.cc moreguard.cc nickelstub.cc main.cc
 OBJS     := $(addprefix $(BUILD)/,$(CC_SRCS:.cc=.o))
 
 # Headers carrying Q_OBJECT (moc'd), one translation unit each.
 MOC_HDRS := browsedialog.h detaildialog.h configdialog.h kpmprocess.h \
             dialog.h label.h elidedlabel.h packagerow.h configrow.h pagedstack.h \
-            sshpage.h nickelstub.h
+            sshpage.h settingspage.h nickelstub.h
 MOC_OBJS := $(addprefix $(BUILD)/moc_,$(MOC_HDRS:.h=.o))
 
 TARGET := nkpm-sim

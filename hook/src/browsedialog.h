@@ -15,6 +15,7 @@
 
 class DetailDialog;
 class QVBoxLayout;
+class SettingsPage;
 class SshPage;
 
 class BrowseDialog : public Dialog {
@@ -52,6 +53,8 @@ public Q_SLOTS:
   // switch waits for its status, then swaps the page in one paint.
   void showSshTab();
   void onSshLoaded();
+  // The Settings tab (settingspage.h): where kpm opens from.
+  void showSettingsTab();
 
 private:
   BrowseDialog();
@@ -85,8 +88,9 @@ private:
   // selectTab switches which `kind` the list shows; styleTabs marks the active one
   // (§3.8). emptyStateText words the status line for a tab with no rows.
   void selectTab(const QString &kind);
-  // showListPage swaps between the package list and the SSH page.
-  void showListPage(bool list);
+  // showPage swaps between the package list (nullptr), the SSH page and the
+  // Settings page.
+  void showPage(QWidget *page);
   void styleTabs();
   QString emptyStateText() const;
   // addPageOneChrome draws the global page-1 banners (staged, skips, stale hint)
@@ -100,6 +104,8 @@ private:
   N3ButtonLabel *dictsTab = nullptr;
   N3ButtonLabel *sshTab = nullptr;
   SshPage *sshPage = nullptr;
+  N3ButtonLabel *settingsTab = nullptr;
+  SettingsPage *settingsPage = nullptr;
   N3ButtonLabel *refreshButton = nullptr;
   N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;

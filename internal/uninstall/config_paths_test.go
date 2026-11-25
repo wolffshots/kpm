@@ -18,6 +18,8 @@ func TestInstallPathRefusesKpmNmDropIn(t *testing.T) {
 		"/mnt/onboard/.adds/nm/KPM",
 		"/mnt/onboard/.adds/NM/Kpm",
 		"mnt/onboard/.adds/nm/kpm", // tar-style
+		"/mnt/onboard/.adds/nm/kpm-hide",
+		"/mnt/onboard/.adds/nm/KPM-Hide",
 	} {
 		if _, err := InstallPath(raw); err == nil {
 			t.Errorf("InstallPath(%q) must refuse kpm's own NickelMenu drop-in", raw)

@@ -46,10 +46,39 @@
 #include <NickelHook.h>
 
 #include "files.h"
+#include "launch.h"
 #include "moreguard.h"
 #include "morerow.h"
 
 namespace {
+
+// rowAvailable is 1 while the row can show this boot: the filter is installed
+// and no More page lacked its Help row.
+int rowAvailable = 0;
+
+// rowWanted reads the settings at each More page open, so a change on the
+// Settings tab applies at the next open, with no restart.
+bool rowWanted() {
+  struct nkpm_launch s;
+  nkpm_launch_read(NKPM_UI_CONFIG, &s);
+  return nkpm_launch_decide(&s, nkpm_nm_installed(NKPM_IMAGEFORMATS), rowAvailable).use_row;
+}
+
+// noHelpRow runs when a More page shows without its Help row, so the row has
+// no anchor (a firmware that renamed "helpButton", for example). If the row is
+// the way to open kpm, switch to NickelMenu and show its button again, so the
+// user does not lose the kpm UI. The setting stays NickelMenu until the user
+// changes it on the Settings tab.
+void noHelpRow() {
+  if (!rowWanted()) {
+    return;
+  }
+  rowAvailable = 0;
+  struct nkpm_launch s = {0, 0};
+  int rc = nkpm_launch_write(NKPM_UI_CONFIG, &s);
+  rc |= nkpm_launch_apply(NKPM_NM_FILE, NKPM_NM_HIDE, 1, 0);
+  nh_log("NickelKPM: the More page has no Help row: kpm now opens from NickelMenu (%s)", rc == 0 ? "ok" : "write error");
+}
 
 // The build id of the crash guard. Each build of the hook runs "make clean"
 // first (hook/Makefile), so each build compiles this file again.
@@ -190,6 +219,11 @@ protected:
     if ((type == QEvent::Polish || type == QEvent::Show) && watched->isWidgetType() &&
         watched->objectName() == QLatin1String("helpButton")) {
       insert(static_cast<QWidget *>(watched));
+    } else if (type == QEvent::Show && watched->inherits("MoreView") &&
+               !watched->findChild<QWidget *>(QStringLiteral("helpButton"))) {
+      // Qt shows the children before the parent gets its Show event, so the
+      // Help row of a normal More page has been seen at this point.
+      noHelpRow();
     }
     return false;
   }
@@ -201,6 +235,9 @@ private:
     if (!layout || layout->indexOf(help) < 0 ||
         parent->findChild<QWidget *>(QString::fromLatin1(kRowName), Qt::FindDirectChildrenOnly)) {
       return;
+    }
+    if (!rowWanted()) {
+      return; // the Settings tab chose NickelMenu
     }
     // Only the More page: another page with a "helpButton" gets no row.
     QWidget *page = parent;
@@ -239,16 +276,22 @@ private:
 
 } // namespace
 
-void nkpm_morerow_init(void (*open)()) {
+int nkpm_morerow_init(void (*open)()) {
   if (!nkpm_moreguard_allow(NKPM_MORE_MARKER, kBuild)) {
     nh_log("NickelKPM: More row off: %s is left from a crash of this build", NKPM_MORE_MARKER);
-    return;
+    return 0;
   }
   QCoreApplication *app = QCoreApplication::instance();
   if (!app) {
     nh_log("NickelKPM: More row off: no application object at init");
-    return;
+    return 0;
   }
   app->installEventFilter(new MoreRowFilter(open, app));
+  rowAvailable = 1;
   nh_log("NickelKPM: More row filter installed (build %s)", kBuild);
+  return 1;
+}
+
+int nkpm_morerow_available() {
+  return rowAvailable;
 }

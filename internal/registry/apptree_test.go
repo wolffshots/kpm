@@ -269,6 +269,7 @@ func TestParseManifestDropsBadLauncher(t *testing.T) {
 		{"nm_file outside .adds/nm", "/mnt/onboard/.adds/koreader/nm", "menu_item:main:K:cmd_spawn:x"},
 		{"nm_file is kpm's own", "/mnt/onboard/.adds/nm/kpm", "menu_item:main:K:cmd_spawn:x"},
 		{"nm_file is kpm's own, FAT32 case", "/mnt/onboard/.adds/nm/KPM", "menu_item:main:K:cmd_spawn:x"},
+		{"nm_file is kpm's hide file", "/mnt/onboard/.adds/nm/kpm-hide", "menu_item:main:K:cmd_spawn:x"},
 		{"nm_file is the shared dir", "/mnt/onboard/.adds/nm", "menu_item:main:K:cmd_spawn:x"},
 		{"nm_entry missing", "/mnt/onboard/.adds/nm/koreader", ""},
 		{"colon in the label", "/mnt/onboard/.adds/nm/koreader", "menu_item:main:KOReader: the reader:cmd_spawn:x"},

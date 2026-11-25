@@ -18,6 +18,7 @@
 #include "files.h"
 #include "kpmprocess.h"
 #include "nkpm.h"
+#include "settingspage.h"
 #include "sshpage.h"
 #include "widgets/label.h"
 #include "widgets/packagerow.h"
@@ -74,6 +75,9 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   sshTab = construct_N3ButtonLabel(this);
   sshTab->setText("SSH");
   tabBar->addWidget(sshTab);
+  settingsTab = construct_N3ButtonLabel(this);
+  settingsTab->setText("Settings");
+  tabBar->addWidget(settingsTab);
   // Left-aligned: the trailing stretch keeps the tabs together at the
   // leading edge, where the footer's does the opposite for the actions.
   tabBar->addStretch(1);
@@ -82,6 +86,7 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   QObject::connect(fontsTab, SIGNAL(tapped(bool)), this, SLOT(showFontsTab()));
   QObject::connect(dictsTab, SIGNAL(tapped(bool)), this, SLOT(showDictsTab()));
   QObject::connect(sshTab, SIGNAL(tapped(bool)), this, SLOT(showSshTab()));
+  QObject::connect(settingsTab, SIGNAL(tapped(bool)), this, SLOT(showSettingsTab()));
   styleTabs(); // Mods is the tab the view opens on
 
   lineEdit = construct_TouchLineEdit(nullptr);
@@ -95,6 +100,9 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   sshPage->hide();
   layout->addWidget(sshPage, 1);
   QObject::connect(sshPage, &SshPage::loaded, this, &BrowseDialog::onSshLoaded);
+  settingsPage = new SettingsPage(this);
+  settingsPage->hide();
+  layout->addWidget(settingsPage, 1);
   QObject::connect(pages, &PagedStack::requestPage, this, &BrowseDialog::requestPage);
   QObject::connect(pages, &PagedStack::afterLayout, this, &BrowseDialog::onFirstLayout);
 
@@ -535,13 +543,27 @@ void BrowseDialog::onSshLoaded() {
   if (!sshSelected || sshPage->isVisible()) {
     return;
   }
-  showListPage(false);
+  showPage(sshPage);
   styleTabs();
 }
 
-// showListPage shows the package list (search box, pages, list actions) or the
-// SSH page. All changes happen in one event loop pass, so it is one e-ink update.
-void BrowseDialog::showListPage(bool list) {
+// showSettingsTab reads the settings in place and shows the page at once: the
+// page runs no kpm command.
+void BrowseDialog::showSettingsTab() {
+  if (settingsPage->isVisible() || kpmMissing) {
+    return;
+  }
+  sshSelected = false;
+  settingsPage->load();
+  showPage(settingsPage);
+  styleTabs();
+}
+
+// showPage shows the package list (page nullptr: search box, pages, list
+// actions), the SSH page or the Settings page. All changes happen in one event
+// loop pass, so it is one e-ink update.
+void BrowseDialog::showPage(QWidget *page) {
+  bool const list = page == nullptr;
   if (!list) {
     hideKeyboard();
   }
@@ -552,7 +574,8 @@ void BrowseDialog::showListPage(bool list) {
       b->setVisible(list);
     }
   }
-  sshPage->setVisible(!list);
+  sshPage->setVisible(page == sshPage);
+  settingsPage->setVisible(page == settingsPage);
 }
 
 // selectTab switches which `kind` the list shows. render(false) is the path a
@@ -560,14 +583,14 @@ void BrowseDialog::showListPage(bool list) {
 // repaint, it re-records the page-1 banner states, and it rebuilds from page 1 —
 // which is every tab-switch hazard handled by one call that already exists.
 void BrowseDialog::selectTab(const QString &kind) {
-  bool fromSsh = sshSelected;
+  bool fromPage = sshSelected || settingsPage->isVisible();
   sshSelected = false;
-  if (sshPage->isVisible()) {
-    showListPage(true);
+  if (sshPage->isVisible() || settingsPage->isVisible()) {
+    showPage(nullptr);
   }
   if (kind == activeKind) {
-    if (fromSsh) {
-      styleTabs(); // back to the list tab the SSH page covered: its rows are current
+    if (fromPage) {
+      styleTabs(); // back to the list tab the page covered: its rows are current
     }
     return;
   }
@@ -588,9 +611,13 @@ void BrowseDialog::styleTabs() {
       {modsTab, QStringLiteral("mod")},
       {fontsTab, QStringLiteral("font")},
       {dictsTab, QStringLiteral("dictionary")},
-      {sshTab, QStringLiteral("ssh")}};
+      {sshTab, QStringLiteral("ssh")},
+      {settingsTab, QStringLiteral("settings")}};
   // The SSH tab is active only once its page shows (see onSshLoaded).
   QString active = sshSelected && sshPage != nullptr && sshPage->isVisible() ? QStringLiteral("ssh") : activeKind;
+  if (settingsPage != nullptr && settingsPage->isVisible()) {
+    active = QStringLiteral("settings");
+  }
   for (const QPair<N3ButtonLabel *, QString> &t : tabs) {
     if (t.first == nullptr) {
       continue;
@@ -672,7 +699,7 @@ void BrowseDialog::setActionsEnabled(bool enabled) {
     // but with no kpm binary there is no list to filter and never will be, and a tap
     // that only moves the active highlight over an unchanging page reads as a broken
     // control. This is the one state that disables them.
-    for (N3ButtonLabel *tab : {modsTab, fontsTab, dictsTab, sshTab}) {
+    for (N3ButtonLabel *tab : {modsTab, fontsTab, dictsTab, sshTab, settingsTab}) {
       if (tab != nullptr) {
         tab->setEnabled(false);
       }

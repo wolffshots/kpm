@@ -154,6 +154,7 @@ func checkEntryType(hdr *tar.Header, normalizedName string) error {
 var kpmReservedLinkPrefixes = []string{
 	"mnt/onboard/.adds/kpm",
 	"mnt/onboard/.adds/nm/kpm",
+	"mnt/onboard/.adds/nm/kpm-hide",
 }
 
 // checkLinkTarget validates a symlink/hardlink target. Absolute targets are
