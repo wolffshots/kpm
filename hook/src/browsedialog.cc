@@ -78,6 +78,12 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   settingsTab = construct_N3ButtonLabel(this);
   settingsTab->setText("Settings");
   tabBar->addWidget(settingsTab);
+  // Nickel's style sheet gives a primaryButton a min-width (140px on Dragon), so a
+  // short label grew when it became the active tab and the tabs moved at each switch.
+  // A widget's own sheet wins over that rule: each tab keeps its text width.
+  for (N3ButtonLabel *tab : {modsTab, fontsTab, dictsTab, sshTab, settingsTab}) {
+    tab->setStyleSheet(QStringLiteral("min-width: 0px;"));
+  }
   // Left-aligned: the trailing stretch keeps the tabs together at the
   // leading edge, where the footer's does the opposite for the actions.
   tabBar->addStretch(1);
