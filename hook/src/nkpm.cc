@@ -7,6 +7,8 @@
 // menu off the More tab, so the old createMenuTextItem/"Settings" anchor no
 // longer fires (verified on 4.45.23697). The hook is now init-only — it watches
 // Files::ui_trigger and opens BrowseDialog — and hooks no Nickel functions.
+// morerow.cc adds a More page row without a hook, by an event filter on the
+// "helpButton" widget (kpm-nickelmenu-less-research-2026-11-24.md section 8).
 
 #include <QFile>
 #include <QFileSystemWatcher>
@@ -22,6 +24,7 @@
 #include "browsedialog.h"
 #include "files.h"
 #include "forcewifi.h"
+#include "morerow.h"
 #include "nkpm.h"
 #include "seed.h"
 #include "ssh.h"
@@ -152,6 +155,10 @@ static int nkpm_init() {
     onUITrigger();
   });
   nh_log("NickelKPM: watching %s for UI launch", Files::ui_trigger);
+
+  // The "Package manager" row on the More page (morerow.cc). It opens the same
+  // UI as the trigger file. The NickelMenu path above stays.
+  nkpm_morerow_init(onUITrigger);
 
   // kpm ssh (SSH.md section 5): start the server when config.toml enables it.
   // Read only that small file here, make no network call and do not wait.

@@ -236,5 +236,13 @@ KeyboardFrame *Dialog::buildKeyboardFrame(KeyboardReceiver *receiver, QString go
   QObject::connect(ctl, SIGNAL(commitRequested()), this, SLOT(hideKeyboard()));
   QObject::connect(ctl, SIGNAL(commitRequested()), this, SLOT(commit()));
 
+  // Firmware 6.x shows the keyboard frame when the keyboard is created, so the
+  // dialog opened with the keyboard over its bottom buttons. 4.x keeps it
+  // hidden. Hide it here. A tap on the line edit shows it again (above).
+  if (keyboard->isVisible()) {
+    hideKeyboard();
+    nh_log("NickelKPM: keyboard shown at creation, hidden");
+  }
+
   return keyboard;
 }

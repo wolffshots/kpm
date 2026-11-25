@@ -20,8 +20,7 @@ static char const *const kpm = kpm_sim_path();
 constexpr char const *kpm = "/mnt/onboard/.adds/kpm/bin/kpm";
 #endif
 
-// Resource icon (nkpm.qrc). The More-menu entry row is icon-less; this is only
-// a bundled asset (NICKEL-UI.md §3).
+// Resource icon (nkpm.qrc). The More page row draws it (morerow.cc).
 constexpr char const *icon = ":/nkpm/icon.png";
 
 // Wi-Fi status glyph reused from Nickel's own resources for the connect spinner

@@ -81,8 +81,9 @@ export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
 
 [NickelMenu](https://github.com/pgaskin/NickelMenu) is **optional but
 recommended**: with it kpm gets on-device menu entries (see "NickelMenu usage"),
-including the launch point for the graphical UI (the UI needs NickelMenu — see
-"Graphical UI"); without it kpm is a normal CLI over SSH/telnet. NickelDBus
+including a second launch point for the graphical UI (the first is the
+"Package manager" row on the More page, see "Graphical UI"); without it kpm is
+a normal CLI over SSH/telnet. NickelDBus
 (`qndb`) is also optional — if present, kpm shows toasts; if not, use the
 **Status** menu entry. What to do next depends on which side you start from:
 
@@ -476,8 +477,14 @@ NickelHook Qt mod injected into Nickel. Every kpm package installs it under
 |---|---|---|
 | ![Package manager list](docs/screenshots/browse.png) | ![Package detail — install](docs/screenshots/detail-not-installed.png) | ![Package detail — uninstall](docs/screenshots/detail-installed.png) |
 
-Launch it from the **NickelMenu** "kpm - Package manager" entry (see "NickelMenu
-usage"). It opens a full-screen browser that lists every package from your
+Launch it from the **Package manager** row on the Nickel **More** page, directly
+above Help, or from the **NickelMenu** "kpm - Package manager" entry (see
+"NickelMenu usage"). The More row needs no NickelMenu and hooks no Nickel
+function: the hook adds it when Nickel builds the More page. If Nickel crashes
+within 3 seconds after the row first shows in a boot, the file
+`/mnt/onboard/.adds/kpm/.more-row-pending` stays, and the same hook build shows
+no row from the next boot. The NickelMenu entry still works. A new kpm build
+deletes the file and tries again. It opens a full-screen browser that lists every package from your
 registries merged with what's installed, lets you filter with the on-screen
 keyboard, and drills into a per-package view with **Install**, **Update**,
 **Uninstall**, plus registry-wide **Refresh**, **Sync**, and **Update all**.

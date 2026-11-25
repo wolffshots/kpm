@@ -29,7 +29,7 @@ vpath %.h  ../src ../src/widgets .
 # Device sources compiled unmodified + sim shim/entry.
 CC_SRCS  := browsedialog.cc detaildialog.cc configdialog.cc kpmprocess.cc \
             dialog.cc label.cc elidedlabel.cc packagerow.cc configrow.cc pagedstack.cc \
-            sshpage.cc nickelstub.cc main.cc
+            sshpage.cc morerow.cc moreguard.cc nickelstub.cc main.cc
 OBJS     := $(addprefix $(BUILD)/,$(CC_SRCS:.cc=.o))
 
 # Headers carrying Q_OBJECT (moc'd), one translation unit each.
@@ -43,8 +43,17 @@ TARGET := nkpm-sim
 .PHONY: all clean
 all: $(TARGET)
 
-$(TARGET): $(OBJS) $(MOC_OBJS)
+# The kpm icon (Files::icon), drawn by the More page row.
+RCC_OBJ := $(BUILD)/qrc_nkpm.o
+
+$(TARGET): $(OBJS) $(MOC_OBJS) $(RCC_OBJ)
 	$(CXX) -o $@ $^ $(QT_LIBS)
+
+$(BUILD)/qrc_nkpm.cpp: ../res/nkpm.qrc ../res/icon.png | $(BUILD)
+	rcc -name nkpm $< -o $@
+
+$(BUILD)/qrc_nkpm.o: $(BUILD)/qrc_nkpm.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD):
 	mkdir -p $(BUILD)
