@@ -14,6 +14,8 @@
 #   ./run.sh --exercise-ssh out               offscreen: drive the SSH tab (SSH.md section 7)
 #   ./run.sh --exercise-settings out          offscreen: drive the Hide in library row (EXCLUDE-SYNC.md section 5)
 #   ./run.sh --exercise-tabwidth out          offscreen: tab widths equal and fixed at each switch
+#   ./run.sh --exercise-detailcarry out       offscreen: the details Carry-over line after Check (fake check)
+#   ./run.sh --exercise-pagesize out          offscreen: Mods rows per page stay the same after tab switches
 #   ./run.sh --exercise-init         offscreen: drive the "Create from example" flow (nickelnote pin)
 #   ./run.sh --exercise-sync         offscreen: drive the Sync flow (samplemod)
 #   ./run.sh --exercise-enroll       offscreen: drive the Enable-self-update flow (kpm)
@@ -73,6 +75,10 @@ echo "== building nkpm-sim (Qt5) =="
 make -s -C "$SIM"
 
 # ---- seed the sandbox ---------------------------------------------------
+# --exercise-pagesize needs a Mods list of more than one page.
+case " $* " in
+  *" --exercise-pagesize "*) export SEED_EXTRA_MODS="${SEED_EXTRA_MODS:-12}" ;;
+esac
 if [ "${RESEED:-1}" = "1" ]; then
   rm -rf "$SANDBOX"
 fi
@@ -85,11 +91,12 @@ export NKPM_KPM="$BUILD/kpm"
 # other commands to the real one (fixture/progress-kpm.sh).
 case " $* " in
   *" --exercise-progress "*) export REAL_KPM="$BUILD/kpm" NKPM_KPM="$SIM/fixture/progress-kpm.sh" ;;
+  *" --exercise-detailcarry "*) export REAL_KPM="$BUILD/kpm" NKPM_KPM="$SIM/fixture/carry-kpm.sh" ;;
 esac
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-tabwidth "*|*" --exercise-ssh "*|*" --exercise-settings "*|*" --exercise-rowrepaint "*|*" --exercise-details "*|*" --exercise-progress "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-tabwidth "*|*" --exercise-ssh "*|*" --exercise-settings "*|*" --exercise-rowrepaint "*|*" --exercise-details "*|*" --exercise-progress "*|*" --exercise-pagesize "*|*" --exercise-detailcarry "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="
