@@ -2363,7 +2363,7 @@ static void runExerciseSettings(const QString &dir) {
                               [dot, off, note, dir]() {
                                 QByteArray conf = readSandboxFile(simNickelConfPath());
                                 QString why;
-                                if (!conf.contains("Other=true\r\nExcludeSyncFolders = (\\\\.(k|ko|")) {
+                                if (!conf.contains("Other=true\r\nExcludeSyncFolders = ((\\\\.(k|ko|")) {
                                   why += "the conf has no preset line after Other=true: " + QString::fromUtf8(conf) + "; ";
                                 }
                                 if (tabActive(off)) why += "Off is still active; ";
