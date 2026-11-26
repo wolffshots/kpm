@@ -431,7 +431,10 @@ func (c *Client) downloadOnce(ctx context.Context, url string, dst *os.File) (n 
 		done:   make(chan struct{}),
 	}
 	go w.run()
-	ew := &writeErrTracker{w: dst}
+	ew := &writeErrTracker{w: dst, progress: progressFrom(ctx)}
+	if ew.progress != nil {
+		ew.progress(0) // a retry starts again from zero
+	}
 	// Cap total bytes written: read one past the cap so an exactly-cap asset is
 	// still accepted but anything larger is caught (B4). Reads flow through the
 	// watchdog, so the inactivity timer still resets on progress.
@@ -452,9 +455,12 @@ func (c *Client) downloadOnce(ctx context.Context, url string, dst *os.File) (n 
 
 // writeErrTracker records the last error returned by the underlying writer so
 // Download can tell a local write failure from a read/transport failure (D4).
+// It also counts the bytes written for a progress callback (WithProgress).
 type writeErrTracker struct {
-	w   io.Writer
-	err error
+	w        io.Writer
+	err      error
+	n        int64
+	progress func(done int64)
 }
 
 func (t *writeErrTracker) Write(p []byte) (int, error) {
@@ -462,7 +468,25 @@ func (t *writeErrTracker) Write(p []byte) (int, error) {
 	if err != nil {
 		t.err = err
 	}
+	t.n += int64(n)
+	if t.progress != nil && n > 0 {
+		t.progress(t.n)
+	}
 	return n, err
+}
+
+type progressKey struct{}
+
+// WithProgress returns a context that makes Download call fn with the number
+// of bytes written so far. fn gets 0 at the start of each attempt. The UI
+// progress lines use it (kpm-progress.md, protocol v1).
+func WithProgress(ctx context.Context, fn func(done int64)) context.Context {
+	return context.WithValue(ctx, progressKey{}, fn)
+}
+
+func progressFrom(ctx context.Context) func(int64) {
+	fn, _ := ctx.Value(progressKey{}).(func(int64))
+	return fn
 }
 
 type watchdogReader struct {

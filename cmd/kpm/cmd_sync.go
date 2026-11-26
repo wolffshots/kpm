@@ -92,8 +92,11 @@ func (a *App) cmdSync(args []string) int {
 	// locally-edited-and-skipped packages are neither (JSON-OUTPUT.md §2.3).
 	var changedIDs []string
 	var failed []jsonFailure
-	for _, p := range targets {
+	a.prog.AddSteps(1)
+	a.prog.Step("Syncing package definitions")
+	for i, p := range targets {
 		outcome, stateChanged, failMsg := a.syncOne(cfg, p, *overwrite)
+		a.prog.Items(i+1, len(targets))
 		if stateChanged {
 			changed = true
 		}

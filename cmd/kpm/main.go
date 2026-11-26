@@ -147,8 +147,15 @@ func run(argv []string) int {
 	}
 	defer app.releaseLock()
 
+	// Progress lines for the UI (progress.go). With them on, the payload waits
+	// for the carry-over refresh, which reports progress too.
+	app.prog = newProgress()
+	if app.prog != nil {
+		heldJSON = &[]string{}
+	}
 	code := app.dispatch(cmd, args)
 	app.carryoverAfter(cmd)
+	writeHeldJSON()
 	return code
 }
 
@@ -244,6 +251,7 @@ type App struct {
 	paths  device.Paths
 	state  *state.State
 	client *forge.Client
+	prog   *progress // UI progress lines, nil when off (progress.go)
 
 	readOnly bool          // read-only command: no lock, no state/status writes (B1)
 	locked   bool          // holds the single-instance lock (mutating commands)

@@ -125,6 +125,7 @@ private:
   // generic "Working…" (APP-TREE.md §11.3 item 3).
   void run(KpmProcess *proc, const QString &busyLabel = QString()); // shared action runner (§6 steps 2-3)
   void setBusy(bool busy, const QString &busyLabel = QString());
+  void connectProgress(KpmProcess *proc);
   void addActionButton(const QString &text, const char *slot);
   void addBlockerButton(const QString &blocker);
   // actionLabel decorates an Install/Update button label with the "(no reboot)"
