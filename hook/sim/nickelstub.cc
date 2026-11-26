@@ -34,8 +34,12 @@ static const char *kAppStyle = R"(
      with no rule keyed on it that repaint would be unobservable in the sim. Whether
      the pair takes on Kobo's Qt 5.2.1 is device test T8. The min-width models the
      Nickel rule N3ButtonLabel[primaryButton=true] { min-width: 140px; } (Dragon class,
-     firmware 4.46): a short label grows when it becomes primary. */
-  SimTouchLabel[simButton="true"][primaryButton="true"] { background: #000000; color: #ffffff; min-width: 140px; }
+     firmware 4.46): a short label grows when it becomes primary. The alignment models
+     N3ButtonLabel[primaryButton=true] { qproperty-alignment: AlignCenter; }: a
+     qproperty sets the property, so it stays after primaryButton goes false. */
+  SimTouchLabel[simButton="true"][primaryButton="true"] {
+    background: #000000; color: #ffffff; min-width: 140px; qproperty-alignment: AlignCenter;
+  }
   SimTouchLabel[simButton="true"]:disabled { color: #999999; border-color: #999999; }
   QPushButton { border: 2px solid #000000; border-radius: 4px; padding: 8px 20px; font-size: 18px; background: #ffffff; }
   QLineEdit { border: 2px solid #000000; padding: 10px; font-size: 20px; }
@@ -46,7 +50,10 @@ static const char *kAppStyle = R"(
 SimTouchLabel::SimTouchLabel(QWidget *parent, bool button) : QLabel(parent), button(button) {
   if (button) {
     setProperty("simButton", true);
-    setAlignment(Qt::AlignCenter);
+    // A Nickel N3ButtonLabel is left-aligned until a style rule centres it, and a
+    // left-aligned one is 8 px wider with its text 8 px to the right (QLabel indent,
+    // measured on firmware 4.46: kpm-integ-vm/results/ib-f46-tabs.txt).
+    setIndent(8);
   }
 }
 

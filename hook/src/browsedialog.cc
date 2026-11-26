@@ -81,8 +81,11 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   // Nickel's style sheet gives a primaryButton a min-width (140px on Dragon), so a
   // short label grew when it became the active tab and the tabs moved at each switch.
   // A widget's own sheet wins over that rule: each tab keeps its text width.
+  // The same Nickel rule centres a primaryButton through qproperty-alignment, which
+  // stays set after the tab goes inactive. A left-aligned label is wider (QLabel
+  // indent), so a tab shrank the first time it was active. Centre every tab now.
   for (N3ButtonLabel *tab : {modsTab, fontsTab, dictsTab, sshTab, settingsTab}) {
-    tab->setStyleSheet(QStringLiteral("min-width: 0px;"));
+    tab->setStyleSheet(QStringLiteral("min-width: 0px; qproperty-alignment: AlignCenter;"));
   }
   // Left-aligned: the trailing stretch keeps the tabs together at the
   // leading edge, where the footer's does the opposite for the actions.
