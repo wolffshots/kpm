@@ -102,8 +102,10 @@ func unconfiguredNote(id string) string {
 	return "unconfigured"
 }
 
-// humanTime formats an RFC3339 state timestamp as "2006-01-02 15:04" local-ish
-// (kept in the stored zone). Returns "never" for empty.
+// humanTime formats an RFC3339 state timestamp as "2006-01-02 15:04" in local
+// time, like kpm.log and the UI details page. Go reads the zone from TZ, else
+// from /etc/localtime, which Nickel links to the zone of the device setting.
+// Returns "never" for empty.
 func humanTime(rfc string) string {
 	if rfc == "" {
 		return "never"
@@ -112,5 +114,5 @@ func humanTime(rfc string) string {
 	if err != nil {
 		return rfc
 	}
-	return t.Format("2006-01-02 15:04")
+	return t.Local().Format("2006-01-02 15:04")
 }

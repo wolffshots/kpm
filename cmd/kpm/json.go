@@ -463,7 +463,7 @@ type jsonDoctorSSH struct {
 	Running  bool   `json:"running"`   // a server holds the pid file
 	PidAlive bool   `json:"pid_alive"` // the pid of the pid file is a live process
 	Port     int    `json:"port"`
-	PortOpen bool   `json:"port_open"` // a local connect to the port works
+	PortOpen bool   `json:"port_open"` // a socket listens on the port (/proc/net, else a local connect)
 	Detail   string `json:"detail"`    // "" when all is well, else the problems
 }
 

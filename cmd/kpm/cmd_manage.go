@@ -8,6 +8,7 @@ import (
 
 	"kpm/internal/config"
 	"kpm/internal/forge"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 )
 
@@ -286,7 +287,20 @@ func updateTarget(pkg *config.Package, ps *state.PackageState, pin string) (targ
 	if ps.StagedVersion != "" && tagsEqual(ps.StagedVersion, target) && !stagedRebuilt {
 		return target, false // already staged, awaiting reboot
 	}
+	if selfOlder(pkg.ID, pin, ps.InstalledVersion, target) {
+		return target, false
+	}
 	return target, !tagsEqual(ps.InstalledVersion, target) || rebuilt || selfRepair(pkg.ID, ps)
+}
+
+// selfOlder reports whether target is an older release of kpm than the
+// installed one, for example latest v0.15.0 under a 0.16.0-rc2 install. kpm
+// never offers or stages that. A pin still wins: the user chose that tag.
+// Other packages keep the tag compare: their tags need not be versions (a fork
+// tag, a date, "latest"), and a registry source can move back, for example
+// from the NickelMenu fork to upstream.
+func selfOlder(id, pin, installed, target string) bool {
+	return id == selfID && pin == "" && installed != "" && registry.CompareVersions(target, installed) < 0
 }
 
 // tagsEqual compares two release tags treating a single leading 'v' as
