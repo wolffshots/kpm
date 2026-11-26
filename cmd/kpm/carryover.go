@@ -138,6 +138,82 @@ func (a *App) fw6SourcePin(p *config.Package) (string, string) {
 	return a.effectiveSource(p), a.effectivePin(p)
 }
 
+// carryoverPlan is the work of one bundle refresh: the packages that go in
+// (kpm last), their keys, the 6.x builds kept from the last bundle, and the
+// ones that need a download. Each download is a progress step, and the
+// bundle build is one more.
+type carryoverPlan struct {
+	defs    map[string]*config.Package
+	keys    map[string]string
+	ids     []string
+	carried map[string]state.CarriedPackage
+	fetch   []string
+}
+
+// planCarryover returns the work that refreshCarryover does now, or nil when
+// the bundle is up to date. It reads only local files. without leaves one
+// package out, as if it were not installed: uninstall plans the refresh that
+// follows the removal before it removes anything. The errors are the ones of
+// refreshCarryover.
+func (a *App) planCarryover(online bool, without string) (*carryoverPlan, error) {
+	defs, keys, err := a.carryoverWant()
+	if err != nil {
+		return nil, err
+	}
+	if without != "" {
+		delete(defs, without)
+		delete(keys, without)
+	}
+	co := a.state.Carryover
+	if co != nil && sameKeys(co.From, keys) {
+		if sum, size, err := sha256AndSize(a.paths.CarryoverBundle()); err == nil && sum == co.SHA256 && size == co.Size {
+			return nil, nil
+		}
+	}
+	if _, ok := defs[selfID]; !ok {
+		return nil, fmt.Errorf("no bundle: kpm itself has no 6.x build to carry (enrol self-update with 'kpm adopt-self', or run 'kpm sync kpm' for its [fw6] table)")
+	}
+	dir := a.paths.CarryoverDir()
+	ids := sortedKeys(defs)
+	sort.SliceStable(ids, func(i, j int) bool { return ids[j] == selfID && ids[i] != selfID })
+
+	// Keep the 6.x build of each package whose key did not change. The others
+	// need a download.
+	plan := &carryoverPlan{defs: defs, keys: keys, ids: ids, carried: map[string]state.CarriedPackage{}}
+	for _, id := range ids {
+		if co != nil && co.From[id] == keys[id] {
+			if cp, ok := co.Packages[id]; ok {
+				if sum, _, err := sha256AndSize(filepath.Join(dir, id+".tgz")); err == nil && sum == cp.SHA256 {
+					plan.carried[id] = cp
+					continue
+				}
+			}
+		}
+		if !online {
+			return nil, fmt.Errorf("%s changed and its 6.x build needs a download; the next check or update builds the bundle", id)
+		}
+		plan.fetch = append(plan.fetch, id)
+	}
+	return plan, nil
+}
+
+// carryoverSteps returns the progress steps of the bundle refresh that
+// carryoverAfter(cmd) runs, so that cmd can count them in its plan before its
+// first step. without is as in planCarryover. 0 when progress is off, when
+// cmd runs no refresh, or when the refresh has nothing to do or fails before
+// its first step.
+func (a *App) carryoverSteps(cmd, without string) int {
+	online, ok := carryoverCommands[cmd]
+	if a.prog == nil || !ok || !a.locked || a.paths.Line() != device.Line4 {
+		return 0
+	}
+	plan, err := a.planCarryover(online, without)
+	if err != nil || plan == nil {
+		return 0
+	}
+	return len(plan.fetch) + 1
+}
+
 // refreshCarryover brings the bundle up to date on line 4 and makes sure the
 // rcK block is there. A package whose key did not change keeps its 6.x build
 // from the last bundle, so only a changed package uses the network. With
@@ -147,48 +223,21 @@ func (a *App) refreshCarryover(online bool) error {
 	if err := a.ensureRcKBlock(); err != nil {
 		a.paths.Log("WARN", "carry-over: rcK block: "+err.Error())
 	}
-	defs, keys, err := a.carryoverWant()
-	if err != nil {
+	plan, err := a.planCarryover(online, "")
+	if err != nil || plan == nil {
 		return err
 	}
-	co := a.state.Carryover
-	if co != nil && sameKeys(co.From, keys) {
-		if sum, size, err := sha256AndSize(a.paths.CarryoverBundle()); err == nil && sum == co.SHA256 && size == co.Size {
-			return nil
-		}
-	}
-	if _, ok := defs[selfID]; !ok {
-		return fmt.Errorf("no bundle: kpm itself has no 6.x build to carry (enrol self-update with 'kpm adopt-self', or run 'kpm sync kpm' for its [fw6] table)")
-	}
+	keys, ids, carried := plan.keys, plan.ids, plan.carried
 	dir := a.paths.CarryoverDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	ids := sortedKeys(defs)
-	sort.SliceStable(ids, func(i, j int) bool { return ids[j] == selfID && ids[i] != selfID })
-
-	// Keep the 6.x build of each package whose key did not change. The others
-	// need a download, each one a progress step.
-	carried := map[string]state.CarriedPackage{}
-	var fetch []string
-	for _, id := range ids {
-		if co != nil && co.From[id] == keys[id] {
-			if cp, ok := co.Packages[id]; ok {
-				if sum, _, err := sha256AndSize(filepath.Join(dir, id+".tgz")); err == nil && sum == cp.SHA256 {
-					carried[id] = cp
-					continue
-				}
-			}
-		}
-		if !online {
-			return fmt.Errorf("%s changed and its 6.x build needs a download; the next check or update builds the bundle", id)
-		}
-		fetch = append(fetch, id)
-	}
-	a.prog.AddSteps(len(fetch) + 1)
-	for _, id := range fetch {
+	// The command counted these steps in its plan (carryoverSteps): they are
+	// the last ones.
+	a.prog.Tail(len(plan.fetch) + 1)
+	for _, id := range plan.fetch {
 		a.prog.Step("Getting " + id + " for firmware 6")
-		cp, err := a.fetchFw6(defs[id], filepath.Join(dir, id+".tgz"))
+		cp, err := a.fetchFw6(plan.defs[id], filepath.Join(dir, id+".tgz"))
 		if err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}

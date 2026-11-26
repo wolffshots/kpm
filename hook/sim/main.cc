@@ -675,6 +675,14 @@ static int stepOf(const QString &text) {
   return text.mid(5).section(' ', 0, 0).toInt();
 }
 
+// totalOf returns the step count of a "Step 2 of 5: ..." text, 0 for none.
+static int totalOf(const QString &text) {
+  if (!text.startsWith("Step ")) {
+    return 0;
+  }
+  return text.section(' ', 3, 3).section(':', 0, 0).toInt();
+}
+
 static void runExerciseProgress(const QString &dir) {
   QDir().mkpath(dir);
   bool old = qgetenv("FAKE_OLD") == "1";
@@ -757,20 +765,38 @@ static void runExerciseProgress(const QString &dir) {
             if (run->pagesMoved) {
               fail("the list moved when the footer swapped");
             }
+            // One step count for the whole Refresh (finding 5 of the
+            // 0.16.0-rc2 device test showed "of 2", "of 3", then "of 5").
+            int refreshTotal = 0;
+            for (int i = 0; i < refreshCount; i++) {
+              int t = totalOf(run->seen.at(i).second);
+              if (t > 0 && refreshTotal > 0 && t != refreshTotal) {
+                fail("the Refresh step count changed");
+              }
+              if (t > 0 && refreshTotal == 0) {
+                refreshTotal = t;
+              }
+            }
+            std::fprintf(stderr, "sim: Refresh step count %d\n", refreshTotal);
             if (old) {
-              if (!has("Step 1 of 2: Updating package lists", 0, refreshCount) ||
-                  !has("Step 2 of 2: Checking for updates", 0, refreshCount)) {
-                fail("an old kpm must still show the hook's Refresh steps");
+              if (!has("Updating package lists", 0, refreshCount) || !has("Checking for updates", 0, refreshCount)) {
+                fail("an old kpm must still show the hook's Refresh text");
+              }
+              if (refreshTotal != 0) {
+                fail("an old kpm reports no step count, so the hook shows none");
               }
               if (!has("Updating all packages", refreshCount, n)) {
                 fail("an old kpm must still show the Update all text");
               }
             } else {
-              if (!has("Step 1 of 3: Updating package list kobo-registry", 0, refreshCount)) {
+              if (refreshTotal != 5) {
+                fail("the Refresh step count is not 5 (2 registries, check, download, bundle)");
+              }
+              if (!has("Step 1 of 5: Updating package list kobo-registry", 0, refreshCount)) {
                 fail("no first registry step");
               }
-              if (!has("Step 3 of 3: Checking for updates (", 0, refreshCount)) {
-                fail("no check step with its package count");
+              if (!has("Step 3 of 5: Checking for updates (", 0, refreshCount) || !has(" of 7)", 0, refreshCount)) {
+                fail("no check step with its count of 7 packages");
               }
               if (!has("Step 4 of 5: Downloading kpm v0.15.0 for firmware 6 (", 0, refreshCount)) {
                 fail("no carry-over download with its percent");
