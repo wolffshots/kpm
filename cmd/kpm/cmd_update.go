@@ -681,6 +681,9 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt && !selfRepair(p.ID, ps) {
 		return resolved{}, nil, true, "", nil // up to date
 	}
+	if selfOlder(p.ID, pin, ps.InstalledVersion, rel.Tag) {
+		return resolved{}, nil, true, "", nil // never a self downgrade
+	}
 	// A pin freezes the staged payload too: without the pin term a pinned
 	// package whose release was rebuilt would fall through and re-download
 	// (rebuildDetected covers the installed comparison above).
