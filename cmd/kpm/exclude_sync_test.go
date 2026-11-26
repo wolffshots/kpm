@@ -198,7 +198,7 @@ func TestExcludeSyncSetAndOff(t *testing.T) {
 		t.Fatalf("set exit %d", code)
 	}
 	got := readFile(t, conf)
-	line := "ExcludeSyncFolders = " + qsettingsEscape(presetDotFolders) + "\r\n"
+	line := "ExcludeSyncFolders=" + qsettingsEscape(presetDotFolders) + "\r\n"
 	want := strings.Replace(testConf, "Other=true\r\n", "Other=true\r\n"+line, 1)
 	if got != want {
 		t.Fatalf("conf after set:\n%q\nwant:\n%q", got, want)
@@ -287,7 +287,7 @@ func TestExcludeSyncNewSectionAndErrors(t *testing.T) {
 	if code := a.cmdExcludeSync([]string{"set", "dot-folders"}); code != exitOK {
 		t.Fatalf("set exit %d", code)
 	}
-	want := "[General]\nfoo=1\n[FeatureSettings]\nExcludeSyncFolders = " + qsettingsEscape(presetDotFolders) + "\n"
+	want := "[General]\nfoo=1\n\n[FeatureSettings]\nExcludeSyncFolders=" + qsettingsEscape(presetDotFolders) + "\n"
 	if got := readFile(t, conf); got != want {
 		t.Fatalf("got %q", got)
 	}

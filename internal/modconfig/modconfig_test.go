@@ -455,3 +455,29 @@ func TestSeedContentRefusesBinary(t *testing.T) {
 		t.Error("SeedContent must refuse a NUL-bearing template")
 	}
 }
+
+// TestSetKeyFollowsFileStyle: a new key copies the separator of the file's
+// keys, so a Nickel conf (Key=value) gets no spaces around "=", and a new
+// section gets a blank line before it (kpm-integ-vm test note 2, 2026-11-26).
+func TestSetKeyFollowsFileStyle(t *testing.T) {
+	cases := []struct{ name, raw, section, want string }{
+		{"new section in a Nickel conf", "[General]\nfoo=1\n", "FeatureSettings",
+			"[General]\nfoo=1\n\n[FeatureSettings]\nk=v\n"},
+		{"new key in a Nickel section, CRLF", "[General]\r\nfoo=1\r\n\r\n[FeatureSettings]\r\nOther=true\r\n", "FeatureSettings",
+			"[General]\r\nfoo=1\r\n\r\n[FeatureSettings]\r\nOther=true\r\nk=v\r\n"},
+		{"spaced file keeps spaces", "[S]\na = 1\n", "S", "[S]\na = 1\nk = v\n"},
+		{"new section after a blank line adds none", "[S]\na = 1\n\n", "T", "[S]\na = 1\n\n[T]\nk = v\n"},
+		{"comment with = does not set the style", "; x = y\n[S]\na=1\n", "S", "; x = y\n[S]\na=1\nk=v\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := SetKey([]byte(c.raw), c.section, "k", "v")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != c.want {
+				t.Errorf("\n got: %q\nwant: %q", string(out), c.want)
+			}
+		})
+	}
+}
