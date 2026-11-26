@@ -486,7 +486,7 @@ func (a *App) launcherWarnings(pkgs []*config.Package) []string {
 	return out
 }
 
-// ---- ExcludeSyncFolders: detect and tell, never write (§10) --------------
+// ---- ExcludeSyncFolders: detect and tell (§10, EXCLUDE-SYNC.md) ----------
 
 // The verdicts for the ExcludeSyncFolders key in Kobo eReader.conf.
 const (
@@ -501,10 +501,9 @@ const (
 // A value without it excludes only top-level hidden folders.
 const nestedHiddenAlternative = `[^/]*/)+`
 
-// excludeSyncVerdict classifies the device's ExcludeSyncFolders setting. It is
-// READ-ONLY, and it must stay that way: Nickel owns this file and rewrites it,
-// kpm's UI runs inside a live Nickel, and the documented recovery for a botched
-// Kobo eReader.conf is a factory reset (§10.2). Detect and tell; never write.
+// excludeSyncVerdict classifies the device's ExcludeSyncFolders setting. It
+// only reads. `kpm exclude-sync` writes the key (EXCLUDE-SYNC.md), and a value
+// that holds a kpm preset is ok.
 func excludeSyncVerdict(p device.Paths) string {
 	raw, err := os.ReadFile(p.NickelConf())
 	if err != nil {
@@ -519,7 +518,8 @@ func excludeSyncVerdict(p device.Paths) string {
 		if !strings.EqualFold(e.Section, "FeatureSettings") || !strings.EqualFold(e.Key, "ExcludeSyncFolders") {
 			continue
 		}
-		if strings.Contains(e.Value, nestedHiddenAlternative) {
+		if strings.Contains(e.Value, nestedHiddenAlternative) ||
+			strings.Contains(e.Value, qsettingsEscape(presetDotFolders)) {
 			return syncExcludeOK
 		}
 		return syncExcludeWeak
@@ -528,19 +528,13 @@ func excludeSyncVerdict(p device.Paths) string {
 }
 
 // excludeSyncAdvice is the full doctor block for a package whose files Nickel
-// would otherwise index into the library. It tells the user exactly what to add
-// AND why kpm does not add it — without that last sentence the advice reads like
-// a missing feature.
+// would otherwise index into the library. It names the kpm command that sets
+// the key.
 func excludeSyncAdvice(id, deviceFw string) string {
 	return fmt.Sprintf(`%s: firmware %s indexes hidden folders, so this app's files may
-          appear in your library. To stop that, edit .kobo/Kobo/Kobo eReader.conf
-          over USB (with the Kobo idle, not from this menu) and add:
-
-            [FeatureSettings]
-            ExcludeSyncFolders=(\\.(?!kobo|adobe).+|([^.][^/]*/)+\\..+)
-
-          kpm does not make this edit: Nickel rewrites this file and would
-          revert it.`, id, deviceFw)
+          appear in your library. To stop that, run
+          "kpm exclude-sync set dot-folders" (or use the Settings tab),
+          then restart the device.`, id, deviceFw)
 }
 
 // ---- KFMon (§8.1) --------------------------------------------------------

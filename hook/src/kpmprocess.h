@@ -26,6 +26,9 @@ public:
   // the caller shows a "busy" state and does not launch.
   static KpmProcess *search();                    // kpm search --json (no network)
   static KpmProcess *check();                      // kpm check --json (network; takes kpm's lock → serialized)
+  static KpmProcess *info(const QString &id);      // kpm info <id> --json (no network) — the detail page data
+  static KpmProcess *checkOne(const QString &id);  // kpm check <id> --json (network; takes kpm's lock → serialized)
+  static KpmProcess *doctor(const QString &id);    // kpm doctor <id> --json (no network, read only)
   static KpmProcess *registryRefresh();            // kpm registry refresh --json (network, mutating)
   static KpmProcess *install(const QString &id);   // kpm install <id> --yes --json (network, mutating)
   static KpmProcess *update(const QString &id);    // kpm update <id> --json (network, mutating; update has no --yes)
@@ -46,6 +49,12 @@ public:
   static KpmProcess *sshEnable();  // kpm ssh enable
   static KpmProcess *sshDisable(); // kpm ssh disable
   static KpmProcess *sshRestart(); // kpm ssh restart
+
+  // The Settings tab row for ExcludeSyncFolders (EXCLUDE-SYNC.md section 5).
+  // The read takes no lock. set and off are mutating, with no network.
+  static KpmProcess *excludeSync();                         // kpm exclude-sync --json
+  static KpmProcess *excludeSyncSet(const QString &preset); // kpm exclude-sync set <preset> --json
+  static KpmProcess *excludeSyncOff();                      // kpm exclude-sync off --json
 
   // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
   // are read-only offline reads (no lock, no network); set is mutating (rides the
