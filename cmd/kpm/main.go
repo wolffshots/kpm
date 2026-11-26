@@ -627,10 +627,18 @@ func (a *App) settleStaged() (promos []state.Promotion, warnings []string, chang
 // will record. Read-only commands skip reconcile (B1), but the UI opens with
 // `kpm search --json`: without this view it showed "reboot pending" after the
 // boot that installed the package. It runs settleStaged in memory only and
-// writes nothing. After a firmware change it does nothing, because the staged
-// slot can move with the firmware line (firmware.go). An error keeps the
-// stored state.
+// writes nothing. After a firmware change it does not settle the staging,
+// because the staged slot can move with the firmware line (firmware.go). An
+// error keeps the stored state. It always shows the running binary as kpm's
+// own version, as seedSelf records it after any firmware change: a manual
+// KoboRoot.tgz install has no staging to settle.
 func (a *App) viewStaged() {
+	if _, err := os.Stat(a.paths.PackageFile(selfID)); err == nil && version.Version != "dev" {
+		if ps := a.state.Get(selfID); ps.InstalledVersion != "" && !tagsEqual(ps.InstalledVersion, version.Version) {
+			ps.InstalledVersion = version.Version
+			a.viewChanged = true
+		}
+	}
 	cur, ok := a.paths.Firmware()
 	if ok && cur != a.state.Firmware && (a.state.Firmware != "" || device.LineOf(cur) == device.Line6) {
 		return
@@ -640,7 +648,7 @@ func (a *App) viewStaged() {
 		fmt.Fprintln(os.Stderr, "kpm:", err)
 		return
 	}
-	a.viewChanged = changed
+	a.viewChanged = a.viewChanged || changed
 }
 
 // reverifyMissing re-runs manifest verification for every package that currently
