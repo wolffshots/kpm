@@ -108,19 +108,31 @@ func loadExcludeSyncRecord(p device.Paths) (*excludeSyncRecord, error) {
 }
 
 // qsettingsEscape writes a string the way QSettings reads it back: each
-// backslash doubles. The caller makes sure the value needs no quotes.
-func qsettingsEscape(s string) string { return strings.ReplaceAll(s, `\`, `\\`) }
+// backslash doubles. A string with ";", "," or a quote goes in quotes: outside
+// quotes QSettings reads ";" as the start of a comment and "," as a list
+// separator (seen on the Libra Colour: an unquoted "custom;preset" came back
+// as "custom").
+func qsettingsEscape(s string) string {
+	e := strings.ReplaceAll(s, `\`, `\\`)
+	if strings.ContainsAny(s, `;,"`) {
+		e = `"` + strings.ReplaceAll(e, `"`, `\"`) + `"`
+	}
+	return e
+}
 
 // qsettingsUnescape returns the string that QSettings reads from raw file
-// text. ok is false for text that this small reader does not cover: an escape
-// other than \\ and \", or a "," outside quotes (QSettings then reads a list,
-// and Nickel's toString() gives an empty string).
+// text. An unquoted ";" ends the value (a comment). ok is false for text that
+// this small reader does not cover: an escape other than \\ and \", or a ","
+// outside quotes (QSettings then reads a list, and Nickel's toString() gives
+// an empty string).
 func qsettingsUnescape(raw string) (string, bool) {
 	var b strings.Builder
 	quoted := false
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		switch {
+		case c == ';' && !quoted:
+			return strings.TrimSpace(b.String()), true
 		case c == '"':
 			quoted = !quoted
 		case c == '\\':

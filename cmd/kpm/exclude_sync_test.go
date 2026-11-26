@@ -130,9 +130,22 @@ func TestQSettingsEscape(t *testing.T) {
 	if !ok || v != presetDotFolders {
 		t.Fatalf("round trip: %q %v", v, ok)
 	}
+	// A value with ";" must go in quotes: QSettings reads an unquoted ";" as
+	// the start of a comment (the Libra Colour kept only "custom" of an
+	// unquoted "custom;preset").
+	merged := `(\.x);` + presetDotFolders
+	esc := qsettingsEscape(merged)
+	if esc[0] != '"' || esc[len(esc)-1] != '"' {
+		t.Errorf("a value with ; is not quoted: %s", esc)
+	}
+	if v, ok := qsettingsUnescape(esc); !ok || v != merged {
+		t.Errorf("quoted round trip: %q %v", v, ok)
+	}
 	for raw, want := range map[string]string{
 		`(\\.(?!kobo|adobe).+)`: `(\.(?!kobo|adobe).+)`,
 		`"a\"b"`:                `a"b`,
+		`a\\.b;c\\.d`:           `a\.b`, // the rest is a comment
+		`"a;b" ; note`:          `a;b`,
 	} {
 		if got, ok := qsettingsUnescape(raw); !ok || got != want {
 			t.Errorf("%s: got %q %v, want %q", raw, got, ok, want)
