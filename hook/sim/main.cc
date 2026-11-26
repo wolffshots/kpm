@@ -53,6 +53,12 @@
 //                              ssh-address.png and ssh-running.png
 //   --exercise-morerow <dir>   offscreen: the More page row (hook/src/morerow.cc)
 //                              on a fake MoreView; writes more-row.png
+//   --exercise-progress <dir>  offscreen: with NKPM_KPM=fixture/progress-kpm.sh, tap
+//                              Refresh and Update all and assert the footer progress
+//                              text (kpm-progress.md): step numbers across Refresh's
+//                              two commands, percent, the 2 s repaint limit, no
+//                              silence over 3 s; FAKE_OLD=1 checks the fallback text;
+//                              writes progress-footer.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -67,6 +73,7 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -629,6 +636,193 @@ static void runExerciseInit() {
 // def gained the [[configs]] table and (b) a fresh `kpm search --json` reports
 // has_config=true for samplemod (exit 0 = PASS; a missing button or an un-synced
 // def fails non-zero). Mirrors the seed's sync target (fixture/seed.go).
+// ---- --exercise-progress (kpm-progress.md) ------------------------------
+//
+// Runs against fixture/progress-kpm.sh (NKPM_KPM), which answers registry
+// refresh, check and update --all with slow progress lines. It taps Refresh,
+// then Update all, and records each text of the footer progress label with its
+// time. With FAKE_OLD=1 the script acts as a kpm without progress lines, and
+// the footer must show the hook's own step text.
+
+namespace {
+struct ProgressRun {
+  QLabel *label = nullptr;
+  QLabel *refresh = nullptr;
+  QElapsedTimer clock;
+  QList<QPair<qint64, QString>> seen; // a change of the text, while it shows
+  QString last;
+  bool sawRunning = false;
+  bool buttonsHidden = true; // the buttons stayed hidden each time the label showed
+  int pagesTop = -1;
+  bool pagesMoved = false;
+  QString shotDir;
+  bool shot = false;
+};
+} // namespace
+
+static int stepOf(const QString &text) {
+  if (!text.startsWith("Step ")) {
+    return 0;
+  }
+  return text.mid(5).section(' ', 0, 0).toInt();
+}
+
+static void runExerciseProgress(const QString &dir) {
+  QDir().mkpath(dir);
+  bool old = qgetenv("FAKE_OLD") == "1";
+  ProgressRun *run = new ProgressRun();
+  run->shotDir = dir;
+  run->clock.start(); // QElapsedTimer: started here, never read before
+  waitForRows(
+      [run, old]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        run->label = browse ? browse->findChild<QLabel *>("kpmProgress") : nullptr;
+        run->refresh = findLabelByText("Refresh");
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        if (!run->label || !run->refresh || !pages) {
+          std::fprintf(stderr, "sim: FAIL - no progress label, Refresh button or list\n");
+          qApp->exit(5);
+          return;
+        }
+        run->pagesTop = pages->geometry().bottom();
+        QTimer *poll = new QTimer(qApp);
+        QObject::connect(poll, &QTimer::timeout, qApp, [run, pages]() {
+          if (!run->label->isVisible()) {
+            return;
+          }
+          run->sawRunning = true;
+          if (run->refresh->isVisible()) {
+            run->buttonsHidden = false;
+          }
+          if (pages->geometry().bottom() != run->pagesTop) {
+            run->pagesMoved = true;
+          }
+          QString t = run->label->text();
+          if (t != run->last) {
+            run->last = t;
+            run->seen.append(qMakePair(run->clock.elapsed(), t));
+            std::fprintf(stderr, "sim: %6lld ms  %s\n", static_cast<long long>(run->clock.elapsed()), qPrintable(t));
+            if (!run->shot && t.contains("%)")) {
+              run->shot = true;
+              saveGrab(run->shotDir + "/progress-footer.png");
+            }
+          }
+        });
+        poll->start(50);
+
+        std::fprintf(stderr, "sim: tapping Refresh\n");
+        sendClick(run->refresh);
+        // Wait for the end of Refresh (the buttons come back), then Update all.
+        QTimer *wait = new QTimer(qApp);
+        QObject::connect(wait, &QTimer::timeout, qApp, [run, wait, old]() {
+          if (!run->sawRunning || !run->refresh->isVisible()) {
+            return;
+          }
+          wait->stop();
+          int refreshCount = run->seen.size();
+          QLabel *all = findLabelByText("Update all");
+          std::fprintf(stderr, "sim: tapping Update all\n");
+          sendClick(all);
+          QTimer *wait2 = new QTimer(qApp);
+          QObject::connect(wait2, &QTimer::timeout, qApp, [run, wait2, old, refreshCount]() {
+            if (run->seen.size() == refreshCount || !run->refresh->isVisible()) {
+              return;
+            }
+            wait2->stop();
+            int rc = 0;
+            auto fail = [&rc](const char *why) {
+              std::fprintf(stderr, "sim: FAIL - %s\n", why);
+              rc = 8;
+            };
+            auto has = [run](const QString &part, int from, int to) {
+              for (int i = from; i < to; i++) {
+                if (run->seen.at(i).second.contains(part)) {
+                  return true;
+                }
+              }
+              return false;
+            };
+            int n = run->seen.size();
+            if (!run->buttonsHidden) {
+              fail("a footer button showed together with the progress text");
+            }
+            if (run->pagesMoved) {
+              fail("the list moved when the footer swapped");
+            }
+            if (old) {
+              if (!has("Step 1 of 2: Updating package lists", 0, refreshCount) ||
+                  !has("Step 2 of 2: Checking for updates", 0, refreshCount)) {
+                fail("an old kpm must still show the hook's Refresh steps");
+              }
+              if (!has("Updating all packages", refreshCount, n)) {
+                fail("an old kpm must still show the Update all text");
+              }
+            } else {
+              if (!has("Step 1 of 3: Updating package list kobo-registry", 0, refreshCount)) {
+                fail("no first registry step");
+              }
+              if (!has("Step 3 of 3: Checking for updates (", 0, refreshCount)) {
+                fail("no check step with its package count");
+              }
+              if (!has("Step 4 of 5: Downloading kpm v0.15.0 for firmware 6 (", 0, refreshCount)) {
+                fail("no carry-over download with its percent");
+              }
+              if (!has("Step 5 of 5: Building the firmware 6 bundle", 0, refreshCount)) {
+                fail("no bundle step");
+              }
+              if (!has("Step 1 of 2: Downloading kpm v0.15.0 (", refreshCount, n) ||
+                  !has("Step 2 of 2: Staging KoboRoot.tgz", refreshCount, n)) {
+                fail("no Update all download or staging step");
+              }
+              // The fake sends 11 download lines in 5 s. With the 2 s limit,
+              // at most 4 of them reach the label.
+              int dl = 0;
+              for (int i = 0; i < refreshCount; i++) {
+                if (run->seen.at(i).second.contains("for firmware 6 (")) {
+                  dl++;
+                }
+              }
+              std::fprintf(stderr, "sim: %d carry-over download texts reached the label\n", dl);
+              if (dl > 4) {
+                fail("the label repainted faster than once each 2 s");
+              }
+            }
+            int prevStep = 0;
+            qint64 gap = 0;
+            for (int i = 0; i < n; i++) {
+              if (i == refreshCount) {
+                prevStep = 0; // Update all starts its own count
+              }
+              int s = stepOf(run->seen.at(i).second);
+              if (s > 0 && s < prevStep) {
+                fail("a step number went back");
+              }
+              if (s > 0) {
+                prevStep = s;
+              }
+              if (i > 0 && i != refreshCount) {
+                gap = qMax(gap, run->seen.at(i).first - run->seen.at(i - 1).first);
+              }
+            }
+            std::fprintf(stderr, "sim: longest time with no new text: %lld ms\n", static_cast<long long>(gap));
+            // An old kpm sends nothing, so only its own step text shows: the
+            // silence is the old behaviour, not a fault.
+            if (!old && gap > 3000) {
+              fail("more than 3 s with no new progress text");
+            }
+            std::fprintf(stderr, "sim: %s --exercise-progress%s\n", rc == 0 ? "PASS" : "FAIL", old ? " (old kpm)" : "");
+            qApp->exit(rc);
+          });
+          wait2->start(100);
+        });
+        wait->start(100);
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(4);
+      });
+}
+
 static void runExerciseSync() {
   QString kpmRoot = QString::fromLocal8Bit(qgetenv("KPM_ROOT"));
   QString defPath = kpmRoot + "/.adds/kpm/packages.d/samplemod.toml";
@@ -2678,6 +2872,7 @@ int main(int argc, char **argv) {
   bool exerciseInit = false;
   bool exerciseBadges = false;
   bool exerciseEnroll = false;
+  QString progressDir;
   bool exerciseReload = false;
   bool exerciseRowRepaint = false;
   bool sizeGiven = false;
@@ -2726,6 +2921,8 @@ int main(int argc, char **argv) {
       exerciseBadges = true;
     } else if (a == "--exercise-enroll") {
       exerciseEnroll = true;
+    } else if (a == "--exercise-progress" && i + 1 < args.size()) {
+      progressDir = args.at(++i);
     }
   }
 
@@ -2762,6 +2959,8 @@ int main(int argc, char **argv) {
     runExerciseTabs(tabsDir);
   } else if (!sshDirArg.isEmpty()) {
     runExerciseSsh(sshDirArg);
+  } else if (!progressDir.isEmpty()) {
+    runExerciseProgress(progressDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

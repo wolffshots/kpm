@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"kpm/internal/config"
-	"kpm/internal/device"
 	"kpm/internal/forge"
 	"kpm/internal/state"
 )
@@ -49,7 +49,7 @@ func (a *App) cmdCheck(args []string) int {
 
 	// Wait for connectivity against the first configured package's forge host.
 	if host := a.firstConfiguredHost(pkgs); host != "" {
-		if !device.WaitForNetwork(a.client.HTTP(), host) {
+		if !a.waitForNetwork(host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.WriteStatus(msg)
 			a.paths.Log("CHECK", "aborted: no network")
@@ -81,6 +81,8 @@ func (a *App) cmdCheck(args []string) int {
 	}
 	// The release lookups — the only network work here — run concurrently and
 	// bounded; everything below stays exactly as it was, in pkgs order.
+	a.prog.AddSteps(1)
+	a.prog.Step("Checking for updates")
 	fetched := a.prefetchReleases(todo)
 	for i, p := range todo {
 		rel, err := fetched[i].rel, fetched[i].err
@@ -268,6 +270,7 @@ func (a *App) prefetchReleases(pkgs []*config.Package) []checkResult {
 		targets[i] = a.checkTargetFor(p)
 	}
 	out := make([]checkResult, len(pkgs))
+	var done atomic.Int32 // lookups finished, for the progress line
 	sem := make(chan struct{}, checkConcurrency)
 	var wg sync.WaitGroup
 	for i := range pkgs {
@@ -277,6 +280,7 @@ func (a *App) prefetchReleases(pkgs []*config.Package) []checkResult {
 			defer wg.Done()
 			defer func() { <-sem }()
 			out[i].rel, out[i].err = targets[i].resolve()
+			a.prog.Items(int(done.Add(1)), len(pkgs))
 		}(i)
 	}
 	wg.Wait()

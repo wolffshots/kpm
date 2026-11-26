@@ -14,6 +14,7 @@
 #include "widgets/pagedstack.h"
 
 class DetailDialog;
+class Label;
 class QVBoxLayout;
 class SettingsPage;
 class SshPage;
@@ -35,6 +36,8 @@ public Q_SLOTS:
   void onCheckDone(int exitCode, QJsonObject payload);
   void onActionDone(int exitCode, QJsonObject payload);
   void onProcessFailure(QString reason);
+  // onProgress shows one kpm progress line in the footer (kpm-progress.md).
+  void onProgress(QJsonObject line);
 
   void refresh();
   void sync();
@@ -71,6 +74,11 @@ private:
   void mergeCheck(const QJsonArray &checkPackages);
   bool registriesStale() const;
   void setActionsEnabled(bool enabled);
+  // startProgress sets the footer text an action shows before kpm reports, and
+  // how many kpm commands come after this one (Refresh: check). showProgress
+  // swaps the footer buttons for that text while an action runs.
+  void startProgress(const QString &text, int commandsAhead);
+  void showProgress(bool on);
   QList<QJsonObject> filteredPackages() const;
   // packageIndex maps id -> package object over the whole list, so a detail view can
   // describe a package it does not hold: the blocker's display name on the button,
@@ -109,6 +117,14 @@ private:
   N3ButtonLabel *refreshButton = nullptr;
   N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;
+  // The footer progress text (kpm-progress.md). running is true while it shows.
+  // stepBase is the step count of the finished commands of a chained action,
+  // stepsAhead the commands still to come, lastSteps the count of the running one.
+  Label *progressLabel = nullptr;
+  bool running = false;
+  int stepBase = 0;
+  int stepsAhead = 0;
+  int lastSteps = 0;
 
   QJsonArray allPackages;
   QJsonObject stagedSummary;

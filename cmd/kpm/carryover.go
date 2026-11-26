@@ -167,15 +167,15 @@ func (a *App) refreshCarryover(online bool) error {
 	ids := sortedKeys(defs)
 	sort.SliceStable(ids, func(i, j int) bool { return ids[j] == selfID && ids[i] != selfID })
 
+	// Keep the 6.x build of each package whose key did not change. The others
+	// need a download, each one a progress step.
 	carried := map[string]state.CarriedPackage{}
-	var sources []string
+	var fetch []string
 	for _, id := range ids {
-		src := filepath.Join(dir, id+".tgz")
 		if co != nil && co.From[id] == keys[id] {
 			if cp, ok := co.Packages[id]; ok {
-				if sum, _, err := sha256AndSize(src); err == nil && sum == cp.SHA256 {
+				if sum, _, err := sha256AndSize(filepath.Join(dir, id+".tgz")); err == nil && sum == cp.SHA256 {
 					carried[id] = cp
-					sources = append(sources, src)
 					continue
 				}
 			}
@@ -183,13 +183,22 @@ func (a *App) refreshCarryover(online bool) error {
 		if !online {
 			return fmt.Errorf("%s changed and its 6.x build needs a download; the next check or update builds the bundle", id)
 		}
-		cp, err := a.fetchFw6(defs[id], src)
+		fetch = append(fetch, id)
+	}
+	a.prog.AddSteps(len(fetch) + 1)
+	for _, id := range fetch {
+		a.prog.Step("Getting " + id + " for firmware 6")
+		cp, err := a.fetchFw6(defs[id], filepath.Join(dir, id+".tgz"))
 		if err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}
 		carried[id] = cp
-		sources = append(sources, src)
 	}
+	var sources []string
+	for _, id := range ids {
+		sources = append(sources, filepath.Join(dir, id+".tgz"))
+	}
+	a.prog.Step("Building the firmware 6 bundle")
 
 	part := a.paths.CarryoverBundle() + ".kpm-part"
 	dups, err := tgz.Merge(sources, part)

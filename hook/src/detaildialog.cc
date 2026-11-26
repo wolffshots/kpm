@@ -461,12 +461,23 @@ void DetailDialog::setBusy(bool busy, const QString &busyLabel) {
   }
 }
 
+// connectProgress shows kpm's progress lines in the busy status line
+// (kpm-progress.md). Without them the busy label stays, as before.
+void DetailDialog::connectProgress(KpmProcess *proc) {
+  QObject::connect(proc, &KpmProcess::progress, this, [this](QJsonObject line) {
+    if (busyNow && statusLabel) {
+      statusLabel->setText(KpmProcess::progressText(line));
+    }
+  });
+}
+
 void DetailDialog::run(KpmProcess *proc, const QString &busyLabel) {
   if (!proc) {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
   setBusy(true, busyLabel);
+  connectProgress(proc);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onResponse);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -482,6 +493,7 @@ void DetailDialog::install() {
     return;
   }
   setBusy(true, installBusyLabel());
+  connectProgress(proc);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onInstallRegistered);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }

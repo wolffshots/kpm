@@ -45,12 +45,34 @@ func jsonLine(v any) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
+	line := ""
 	if err := enc.Encode(v); err != nil {
-		fmt.Printf("BEGIN_JSON{\"error\":%q}\n", err.Error())
+		line = fmt.Sprintf("BEGIN_JSON{\"error\":%q}\n", err.Error())
+	} else {
+		line = "BEGIN_JSON" + strings.TrimRight(buf.String(), "\n") + "\n"
+	}
+	if heldJSON != nil {
+		*heldJSON = append(*heldJSON, line)
 		return
 	}
-	fmt.Print("BEGIN_JSON")
-	fmt.Println(strings.TrimRight(buf.String(), "\n"))
+	fmt.Print(line)
+}
+
+// heldJSON keeps the payload line while progress lines are on. run() writes it
+// after carryoverAfter, whose progress lines come after the command, so
+// BEGIN_JSON stays the last stdout line (JSON-OUTPUT.md section 1). Nil when
+// progress is off: then jsonLine writes at once, as before.
+var heldJSON *[]string
+
+// writeHeldJSON writes the held payload line and stops the hold.
+func writeHeldJSON() {
+	if heldJSON == nil {
+		return
+	}
+	for _, line := range *heldJSON {
+		fmt.Print(line)
+	}
+	heldJSON = nil
 }
 
 // jsonError emits the minimal structured-failure payload BEGIN_JSON{"error":…}

@@ -109,6 +109,14 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   QHBoxLayout *footer = new QHBoxLayout();
   footer->setContentsMargins(14, 6, 14, 6);
   footer->setSpacing(16); // gap between the action buttons
+  // The progress text takes the place of the buttons while an action runs
+  // (kpm-progress.md). It is hidden now, so the layout skips it. Ignored width:
+  // a long text clips instead of widening the footer.
+  progressLabel = new Label(Label::Small, "", this);
+  progressLabel->setObjectName("kpmProgress"); // the sim finds it by name
+  progressLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  progressLabel->hide();
+  footer->addWidget(progressLabel, 10);
   // Right-align: the leading stretch pushes the buttons to the trailing edge.
   footer->addStretch(1);
   // primaryButton: Nickel's dark-filled button style (light text on dark), the
@@ -127,6 +135,8 @@ BrowseDialog::BrowseDialog() : Dialog("Package manager") {
   updateAllButton->setProperty("primaryButton", true);
   updateAllButton->setText("Update all");
   footer->addWidget(updateAllButton);
+  // Same height as the buttons, so the swap does not move the list above it.
+  progressLabel->setMinimumHeight(refreshButton->sizeHint().height());
   layout->addLayout(footer);
   QObject::connect(refreshButton, SIGNAL(tapped(bool)), this, SLOT(refresh()));
   QObject::connect(syncButton, SIGNAL(tapped(bool)), this, SLOT(sync()));
@@ -192,6 +202,7 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
     KpmProcess *p = KpmProcess::check(); // network: latest/update badges (§5)
     if (p) {
       checkStarted = true;
+      QObject::connect(p, &KpmProcess::progress, this, &BrowseDialog::onProgress);
       QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onCheckDone);
       QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
     } else {
@@ -213,6 +224,12 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
 void BrowseDialog::onRefreshDone(int exitCode, QJsonObject payload) {
   (void)exitCode;
   (void)payload;
+  // The next command continues the step numbers (kpm-progress.md). The text is
+  // what an older kpm with no progress lines keeps showing.
+  stepBase += qMax(lastSteps, 1);
+  stepsAhead = 0;
+  lastSteps = 0;
+  progressLabel->setText(QString("Step %1 of %1: Checking for updates").arg(stepBase + 1));
   // Registry cache refreshed; reload the list, then run check to merge latest.
   loadSearch(true);
 }
@@ -374,7 +391,9 @@ void BrowseDialog::refresh() {
     return;
   }
   skipNotes.clear(); // a new gesture: the last run's skips are no longer the news
+  startProgress("Step 1 of 2: Updating package lists", 1);
   setActionsEnabled(false);
+  QObject::connect(p, &KpmProcess::progress, this, &BrowseDialog::onProgress);
   QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onRefreshDone);
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
 }
@@ -389,7 +408,9 @@ void BrowseDialog::sync() {
     return;
   }
   skipNotes.clear();
+  startProgress("Syncing package definitions", 0);
   setActionsEnabled(false);
+  QObject::connect(p, &KpmProcess::progress, this, &BrowseDialog::onProgress);
   // Reuse onActionDone: sync's payload reports staged=false/reboot_required=false,
   // so it just re-runs search to repaint rows (has_config may have changed) with
   // no reboot prompt — the same chain-back-into-search Update-all uses.
@@ -407,9 +428,41 @@ void BrowseDialog::updateAll() {
     return;
   }
   skipNotes.clear();
+  startProgress("Updating all packages", 0);
   setActionsEnabled(false);
+  QObject::connect(p, &KpmProcess::progress, this, &BrowseDialog::onProgress);
   QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onActionDone);
   QObject::connect(p, &KpmProcess::failure, this, &BrowseDialog::onProcessFailure);
+}
+
+// ---- progress (kpm-progress.md) -----------------------------------------
+
+void BrowseDialog::startProgress(const QString &text, int commandsAhead) {
+  stepBase = 0;
+  stepsAhead = commandsAhead;
+  lastSteps = 0;
+  progressLabel->setText(text); // set before it shows: one paint
+}
+
+void BrowseDialog::onProgress(QJsonObject line) {
+  lastSteps = qMax(lastSteps, line.value("steps").toInt());
+  progressLabel->setText(KpmProcess::progressText(line, stepBase, stepsAhead));
+}
+
+// showProgress swaps the footer buttons and the progress text. Only the footer
+// repaints: the label has the height of the buttons.
+void BrowseDialog::showProgress(bool on) {
+  if (running == on) {
+    return;
+  }
+  running = on;
+  bool list = sshPage->isHidden() && settingsPage->isHidden();
+  for (N3ButtonLabel *b : {refreshButton, syncButton, updateAllButton}) {
+    if (b != nullptr) {
+      b->setVisible(list && !on);
+    }
+  }
+  progressLabel->setVisible(list && on);
 }
 
 // rebootConfirm is the staged banner's button target — connected by NAME through
@@ -571,9 +624,10 @@ void BrowseDialog::showPage(QWidget *page) {
   pages->setVisible(list);
   for (N3ButtonLabel *b : {refreshButton, syncButton, updateAllButton}) {
     if (b != nullptr) {
-      b->setVisible(list);
+      b->setVisible(list && !running);
     }
   }
+  progressLabel->setVisible(list && running);
   sshPage->setVisible(page == sshPage);
   settingsPage->setVisible(page == settingsPage);
 }
@@ -714,6 +768,7 @@ void BrowseDialog::setActionsEnabled(bool enabled) {
   if (updateAllButton) {
     updateAllButton->setEnabled(enabled);
   }
+  showProgress(!enabled && !kpmMissing);
 }
 
 // repaintRowsInPlace is flash-reduction win 4 (kpm-flash-reduction-plan, deferred

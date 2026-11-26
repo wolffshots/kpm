@@ -4,9 +4,11 @@
 // kpm 0.6.0's --json mode (JSON-OUTPUT.md §1: human log lines, then a final
 // BEGIN_JSON{...} line).
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QTimer>
 
 #include <NickelHook.h>
@@ -71,6 +73,11 @@ static const int kMaxStderrBytes = 8 * 1024;
 // that is simply unreachable on screen, so eliding with "…" is more honest than
 // clipping invisibly.
 static const int kMaxDialogChars = 400;
+
+// The shortest time between two progress() signals. Each one repaints a label
+// on e-ink, so the rate stays low. kpm limits its own lines to one per second
+// in a step (kpm-progress.md, protocol v1), and the last line wins here.
+static const int kProgressIntervalMs = 2000;
 
 // ---- factories ----------------------------------------------------------
 
@@ -184,8 +191,14 @@ KpmProcess::KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, 
     QObject::connect(wm, SIGNAL(networkConnected()), this, SLOT(networkConnected()));
 
     // Yield to the caller so signals are set up before a possible synchronous
-    // connectingFailed() fires (the cli.cc singleShot-yield trick, §4).
-    QTimer::singleShot(0, this, [] {
+    // connectingFailed() fires (the cli.cc singleShot-yield trick, §4). The
+    // caller's progress() connection exists by then too.
+    QTimer::singleShot(0, this, [this] {
+      QJsonObject wifi;
+      wifi.insert("v", 1);
+      wifi.insert("step", 0);
+      wifi.insert("text", QStringLiteral("Connecting to Wi-Fi"));
+      reportProgress(wifi);
       WirelessWorkflowManager *wfm = WirelessWorkflowManager__sharedInstance();
       WirelessWorkflowManager__connectWireless(wfm, false, false);
     });
@@ -286,6 +299,12 @@ void KpmProcess::networkConnected() {
   connect(watchdog, &QTimer::timeout, this, &KpmProcess::watchdogExpired);
   watchdog->start(mutating ? kMutatingWatchdogMs : kReadWatchdogMs);
 
+  // Ask kpm for progress lines (kpm-progress.md, protocol v1). An older kpm
+  // ignores the variable, and the views then show only their own step text.
+  QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+  env.insert("KPM_PROGRESS", "1");
+  process->setProcessEnvironment(env);
+
   process->start(Files::kpm, arguments);
 }
 
@@ -370,8 +389,13 @@ void KpmProcess::readStdout() {
   if (done || process == nullptr) {
     return;
   }
-  stdoutBuf += process->readAllStandardOutput();
-  if (stdoutBuf.size() <= kMaxStdoutBytes) {
+  QByteArray chunk = process->readAllStandardOutput();
+  stdoutTotal += chunk.size();
+  stdoutBuf += chunk;
+  takeProgressLines(true);
+  // The cap counts the progress lines too: they leave the buffer, but a kpm
+  // that prints them without end is a runaway all the same.
+  if (stdoutTotal <= kMaxStdoutBytes) {
     return;
   }
   done = true;
@@ -515,11 +539,14 @@ void KpmProcess::processFinished(int exitCode, QProcess::ExitStatus status) {
   // finished() before its last readyReadStandardOutput), then re-check the cap:
   // that final chunk is the one path that can cross it without readStdout ever
   // running. The process is already gone here, so there is nothing to kill.
-  stdoutBuf += proc->readAllStandardOutput();
-  if (stdoutBuf.size() > kMaxStdoutBytes) {
+  QByteArray tail = proc->readAllStandardOutput();
+  stdoutTotal += tail.size();
+  stdoutBuf += tail;
+  if (stdoutTotal > kMaxStdoutBytes) {
     reportStdoutOverflow();
     return;
   }
+  takeProgressLines(true); // the run is over: the last one waits in pendingProgress
 
   const QByteArray &out = stdoutBuf;
   int index = out.indexOf("BEGIN_JSON");
@@ -549,6 +576,14 @@ void KpmProcess::processFinished(int exitCode, QProcess::ExitStatus status) {
   // the whole result. Exit 2 is still an error there — that is the panic code.
   bool ok = haveMarker ? (exitCode == 0 || exitCode == 2) : (!expectsPayload && exitCode == 0);
   if (ok) {
+    // Deliver the line the rate limit still holds, in the same event-loop turn
+    // as the response, so it costs no extra paint. A view that chains commands
+    // reads the step count of the finished command from it.
+    if (!pendingProgress.isEmpty()) {
+      QJsonObject last = pendingProgress;
+      pendingProgress = QJsonObject();
+      progress(last);
+    }
     response(exitCode, payload);
     finish();
     return;
@@ -596,4 +631,102 @@ void KpmProcess::processFinished(int exitCode, QProcess::ExitStatus status) {
   ConfirmationDialogFactory__showErrorDialog("kpm", message);
   failure(message);
   finish();
+}
+
+// ---- progress lines (kpm-progress.md, protocol v1) -----------------------
+
+// takeProgressLines cuts each complete `PROGRESS {...}` line out of stdoutBuf.
+// kpm writes them before BEGIN_JSON, so what stays is the old contract: log
+// lines, then the payload. Only complete lines are taken: a line that is still
+// arriving waits for the next read.
+void KpmProcess::takeProgressLines(bool report) {
+  static const QByteArray prefix("PROGRESS ");
+  int from = scanned;
+  for (;;) {
+    int nl = stdoutBuf.indexOf('\n', from);
+    if (nl < 0) {
+      break;
+    }
+    if (stdoutBuf.mid(from, prefix.size()) != prefix) {
+      from = nl + 1;
+      continue;
+    }
+    QByteArray json = stdoutBuf.mid(from + prefix.size(), nl - from - prefix.size());
+    stdoutBuf.remove(from, nl - from + 1);
+    if (report) {
+      QJsonObject line = QJsonDocument::fromJson(json).object();
+      if (line.isEmpty()) {
+        // a line that does not parse is skipped
+      } else if (done) {
+        pendingProgress = line; // the tail of a finished run: see processFinished
+      } else {
+        reportProgress(line);
+      }
+    }
+  }
+  scanned = from;
+}
+
+// reportProgress keeps the run alive and passes the line on, at most once each
+// kProgressIntervalMs. A run that reports progress restarts the watchdog: a
+// large download on slow Wi-Fi can take longer than the watchdog window, and
+// kpm stops a stalled download itself after 60 s.
+void KpmProcess::reportProgress(const QJsonObject &line) {
+  if (done) {
+    return;
+  }
+  if (watchdog != nullptr && watchdog->isActive()) {
+    watchdog->start();
+  }
+  pendingProgress = line;
+  qint64 now = QDateTime::currentMSecsSinceEpoch();
+  if (lastProgressMs < 0 || now - lastProgressMs >= kProgressIntervalMs) {
+    flushProgress();
+    return;
+  }
+  if (progressTimer == nullptr) {
+    progressTimer = new QTimer(this);
+    progressTimer->setSingleShot(true);
+    connect(progressTimer, &QTimer::timeout, this, &KpmProcess::flushProgress);
+  }
+  if (!progressTimer->isActive()) {
+    progressTimer->start(static_cast<int>(kProgressIntervalMs - (now - lastProgressMs)));
+  }
+}
+
+void KpmProcess::flushProgress() {
+  if (done || pendingProgress.isEmpty()) {
+    return;
+  }
+  QJsonObject line = pendingProgress;
+  pendingProgress = QJsonObject();
+  lastProgressMs = QDateTime::currentMSecsSinceEpoch();
+  progress(line);
+}
+
+QString KpmProcess::progressText(const QJsonObject &line, int stepBase, int stepsAhead) {
+  QString text = line.value("text").toString().trimmed();
+  int step = line.value("step").toInt();
+  int steps = line.value("steps").toInt();
+  if (step > 0) {
+    if (steps < step) {
+      steps = step;
+    }
+    text = QString("Step %1 of %2: %3").arg(step + stepBase).arg(steps + stepBase + stepsAhead).arg(text);
+  }
+  QString unit = line.value("unit").toString();
+  double done = line.value("done").toDouble();
+  double total = line.value("total").toDouble();
+  if (unit == QLatin1String("bytes")) {
+    if (total > 0) {
+      int pct = static_cast<int>(done * 100 / total);
+      pct -= pct % 5; // 5 % steps: fewer repaints, and the same steps kpm uses
+      text += QString(" (%1 %)").arg(pct);
+    } else if (done > 0) {
+      text += QString(" (%1 MB)").arg(done / 1048576.0, 0, 'f', 1);
+    }
+  } else if (unit == QLatin1String("items") && total > 0) {
+    text += QString(" (%1 of %2)").arg(static_cast<qint64>(done)).arg(static_cast<qint64>(total));
+  }
+  return text;
 }
