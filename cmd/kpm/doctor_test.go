@@ -283,3 +283,51 @@ func TestDoctorLockClassification(t *testing.T) {
 		t.Errorf("doctor should proceed without the lock: %v", err)
 	}
 }
+
+// TestDoctorNoManifestFallback: a package installed before kpm kept manifests
+// (NickelClock, NickelMenu on the Libra Colour) has no manifest. Doctor finds
+// its plugin from the nh_name convention or the alias table, but only when the
+// file is on disk. With no file it still says it cannot diagnose.
+func TestDoctorNoManifestFallback(t *testing.T) {
+	cases := []struct {
+		id, name, file string
+		onDisk         bool
+		wantVerdict    string
+		wantPlugin     string
+	}{
+		{"nickelclock", "NickelClock", "usr/local/Kobo/imageformats/libnickelclock.so", true, "loaded", "/usr/local/Kobo/imageformats/libnickelclock.so"},
+		{"nickelmenu", "NickelMenu", "usr/local/Kobo/imageformats/libnm.so", true, "loaded", "/usr/local/Kobo/imageformats/libnm.so"},
+		{"nickelclock", "NickelClock", "", false, "unknown", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.id+"-"+c.wantVerdict, func(t *testing.T) {
+			a, sysroot := newUninstallApp(t)
+			if err := config.Save(a.paths.PackageFile(c.id), &config.Package{
+				Name: c.name, Source: "github.com/x/" + c.id, Forge: "github", Asset: "KoboRoot.tgz",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			ps := a.state.Get(c.id)
+			ps.InstalledVersion = "v1"
+			ps.InstalledAt = "2026-07-20T00:00:00Z"
+			if err := a.state.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if c.onDisk {
+				mkfile(t, sysroot, c.file)
+			}
+			withMaps(a, "7f00-7f10 r-xp /usr/local/Kobo/imageformats/libnickelclock.so\n7f20-7f30 r-xp /usr/local/Kobo/imageformats/libnm.so\n", true)
+
+			got := lastJSON(t, captureStdout(t, func() { a.cmdDoctor([]string{c.id, "--json"}) }))
+			if !strings.Contains(got, `"verdict":"`+c.wantVerdict+`"`) {
+				t.Errorf("verdict: want %s\n%s", c.wantVerdict, got)
+			}
+			if c.wantPlugin != "" && !strings.Contains(got, `"plugin":"`+c.wantPlugin+`"`) {
+				t.Errorf("plugin: want %s\n%s", c.wantPlugin, got)
+			}
+			if c.wantPlugin == "" && (!strings.Contains(got, `"plugin":null`) || !strings.Contains(got, "no install manifest")) {
+				t.Errorf("no file on disk: want null plugin and a no-manifest detail\n%s", got)
+			}
+		})
+	}
+}

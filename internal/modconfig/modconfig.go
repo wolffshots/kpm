@@ -314,7 +314,7 @@ func SetKey(raw []byte, section, key, value string) ([]byte, error) {
 		}
 	}
 
-	newLine := physLine{text: key + " = " + value, eol: eol}
+	newLine := physLine{text: key + iniSeparator(lines) + value, eol: eol}
 
 	if sawSection {
 		// Insert after the section's last content line; if the section is empty,
@@ -332,10 +332,35 @@ func SetKey(raw []byte, section, key, value string) ([]byte, error) {
 		return joinLines(lines), nil
 	}
 
-	// Section absent: create the header at EOF, then the key under it.
+	// Section absent: create the header at EOF, then the key under it. A blank
+	// line separates it from the content above, as in a Nickel conf.
 	ensureFinalEol(lines, eol)
+	if n := len(lines); n > 0 && strings.TrimSpace(lines[n-1].text) != "" {
+		lines = append(lines, physLine{text: "", eol: eol})
+	}
 	lines = append(lines, physLine{text: "[" + section + "]", eol: eol}, newLine)
 	return joinLines(lines), nil
+}
+
+// iniSeparator returns the "=" style of the first key line in the file: "="
+// when it has no space around "=" (Nickel's Key=value), else " = ". A file
+// with no key line gets " = ".
+func iniSeparator(lines []physLine) string {
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln.text)
+		if t == "" || isComment(t) || isSectionHeader(t) {
+			continue
+		}
+		eq := strings.IndexByte(t, '=')
+		if eq <= 0 {
+			continue
+		}
+		if t[eq-1] != ' ' && t[eq-1] != '\t' && (eq+1 == len(t) || (t[eq+1] != ' ' && t[eq+1] != '\t')) {
+			return "="
+		}
+		return " = "
+	}
+	return " = "
 }
 
 // sectionInsertStart returns the index just after the header of the named
