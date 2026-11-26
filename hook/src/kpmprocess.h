@@ -26,6 +26,9 @@ public:
   // the caller shows a "busy" state and does not launch.
   static KpmProcess *search();                    // kpm search --json (no network)
   static KpmProcess *check();                      // kpm check --json (network; takes kpm's lock → serialized)
+  static KpmProcess *info(const QString &id);      // kpm info <id> --json (no network) — the detail page data
+  static KpmProcess *checkOne(const QString &id);  // kpm check <id> --json (network; takes kpm's lock → serialized)
+  static KpmProcess *doctor(const QString &id);    // kpm doctor <id> --json (no network, read only)
   static KpmProcess *registryRefresh();            // kpm registry refresh --json (network, mutating)
   static KpmProcess *install(const QString &id);   // kpm install <id> --yes --json (network, mutating)
   static KpmProcess *update(const QString &id);    // kpm update <id> --json (network, mutating; update has no --yes)
@@ -47,6 +50,12 @@ public:
   static KpmProcess *sshDisable(); // kpm ssh disable
   static KpmProcess *sshRestart(); // kpm ssh restart
 
+  // The Settings tab row for ExcludeSyncFolders (EXCLUDE-SYNC.md section 5).
+  // The read takes no lock. set and off are mutating, with no network.
+  static KpmProcess *excludeSync();                         // kpm exclude-sync --json
+  static KpmProcess *excludeSyncSet(const QString &preset); // kpm exclude-sync set <preset> --json
+  static KpmProcess *excludeSyncOff();                      // kpm exclude-sync off --json
+
   // Config editing (CONFIG.md §3.2, contract uicontract blocks 8-10). list/show
   // are read-only offline reads (no lock, no network); set is mutating (rides the
   // single-instance lock) but never touches the network — configs are local files.
@@ -66,6 +75,12 @@ public:
   // busy reports whether a mutating kpm is currently running (§4).
   static bool busy();
 
+  // progressText words one progress line (protocol v1, kpm-progress.md) for the
+  // UI: "Step 2 of 3: Downloading kpm v0.15.0 (45 %)". stepBase is added to the
+  // step and the count, and stepsAhead to the count only: a view that chains
+  // kpm commands (Refresh) numbers their steps as one action.
+  static QString progressText(const QJsonObject &line, int stepBase = 0, int stepsAhead = 0);
+
 Q_SIGNALS:
   // response carries the parsed BEGIN_JSON payload with kpm's exit code
   // (0 ok, 2 partial). The caller treats the exit code as authoritative and the
@@ -75,6 +90,10 @@ Q_SIGNALS:
   // with no payload, process error, or timeout). KpmProcess shows the error
   // dialog itself before emitting, so the caller only needs to re-enable UI.
   void failure(QString reason);
+  // progress carries one kpm progress line (protocol v1, kpm-progress.md), at
+  // most one each kProgressIntervalMs so an e-ink label repaints rarely. The
+  // last line wins. KpmProcess also emits its own line while Wi-Fi connects.
+  void progress(QJsonObject line);
 
 public Q_SLOTS:
   void networkConnected();
@@ -90,12 +109,18 @@ public Q_SLOTS:
   // readStderr drains kpm's stderr as it arrives, retaining only a bounded head.
   // Same accumulation hazard as stdout, one channel over; see kpmprocess.cc.
   void readStderr();
+  // flushProgress emits the held progress line (see progress()).
+  void flushProgress();
 
 private:
-  KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload, QObject *parent = nullptr);
+  KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload, QString progressNext,
+             QObject *parent = nullptr);
   ~KpmProcess();
 
-  static KpmProcess *start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload = true);
+  // progressNext names the kpm command the caller runs after this one
+  // (KPM_PROGRESS_NEXT), so kpm counts its steps in the progress lines.
+  static KpmProcess *start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload = true,
+                           QString progressNext = QString());
 
   void showIcon(const char *path);
   void finish();
@@ -110,6 +135,11 @@ private:
   // turn, so a nested dialog loop is never entered from inside a live QProcess
   // emission. See kpmprocess.cc.
   void reportLater(const QString &dialogText, const QString &reason);
+  // takeProgressLines removes the complete PROGRESS lines from stdoutBuf, so
+  // they reach neither the log nor the payload parse, and reports each one
+  // when report is true.
+  void takeProgressLines(bool report);
+  void reportProgress(const QJsonObject &line);
 
   QStringList arguments;
   bool needsNetwork;
@@ -118,6 +148,7 @@ private:
   // there, exit 0 with no BEGIN_JSON marker is success rather than a protocol
   // violation. True for all fourteen --json commands, which keep the strict rule.
   bool expectsPayload;
+  QString progressNext;
 
   QLabel *icon = nullptr;
   QTimer *timer = nullptr;    // Wi-Fi connect timeout
@@ -127,6 +158,15 @@ private:
   // Accumulated stdout, drained incrementally by readStdout() so the size cap is
   // enforced while kpm runs rather than after it has already ballooned.
   QByteArray stdoutBuf;
+  // scanned is the length of the stdoutBuf head with no PROGRESS line left in
+  // it. stdoutTotal counts every stdout byte, progress lines included, for the
+  // kMaxStdoutBytes cap.
+  int scanned = 0;
+  qint64 stdoutTotal = 0;
+  // The progress rate limit: the line waiting for its turn, and its timer.
+  QJsonObject pendingProgress;
+  QTimer *progressTimer = nullptr;
+  qint64 lastProgressMs = -1;
   // Accumulated stderr, capped to its head by appendStderr(). Bounds not just the
   // buffer but everything derived from it — including the string handed to a Nickel
   // error dialog.

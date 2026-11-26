@@ -262,3 +262,68 @@ func TestSSHStatusForceWifi(t *testing.T) {
 		t.Errorf("status changed Kobo eReader.conf: %q", b)
 	}
 }
+
+// procNetFixture writes tcp and tcp6 tables in the /proc/net format to a temp
+// folder and points procNetDir at it. An empty table is left out.
+func procNetFixture(t *testing.T, tcp, tcp6 string) {
+	t.Helper()
+	dir := t.TempDir()
+	const head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	if tcp != "" {
+		os.WriteFile(filepath.Join(dir, "tcp"), []byte(head+tcp), 0o644)
+	}
+	if tcp6 != "" {
+		os.WriteFile(filepath.Join(dir, "tcp6"), []byte(head+tcp6), 0o644)
+	}
+	old := procNetDir
+	procNetDir = dir
+	t.Cleanup(func() { procNetDir = old })
+}
+
+// The Libra Colour (device finding 4 of 2026-11-26): kpm ssh listens on
+// :::22 and lo is down, so a dial to 127.0.0.1 fails. The listener table in
+// /proc/net shows the port.
+func TestProcNetListening(t *testing.T) {
+	const (
+		listen6 = "   0: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4711 1 00000000 100 0 0 10 0\n"
+		estab6  = "   1: 0000000000000000FFFF00008458A8C0:0016 0000000000000000FFFF00006458A8C0:D431 01 00000000:00000000 02:000A7A2C 00000000     0        0 4712 4 00000000 20 4 30 10 -1\n"
+		listen4 = "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4713 1 00000000 100 0 0 10 0\n"
+		estab4  = "   1: 8458A8C0:0016 6458A8C0:D431 01 00000000:00000000 02:000A7A2C 00000000     0        0 4714 4 00000000 20 4 30 10 -1\n"
+	)
+	cases := []struct {
+		name, tcp, tcp6 string
+		port            int
+		open, known     bool
+	}{
+		{"tcp6 listener", listen4, listen6 + estab6, 22, true, true},
+		{"tcp listener", listen4, "", 8080, true, true},
+		{"only an established connection", estab4, estab6, 22, false, true},
+		{"other port", listen4, listen6, 2222, false, true},
+		{"no tables", "", "", 22, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			procNetFixture(t, c.tcp, c.tcp6)
+			open, known := procNetListening(c.port)
+			if open != c.open || known != c.known {
+				t.Errorf("procNetListening(%d) = %v, %v; want %v, %v", c.port, open, known, c.open, c.known)
+			}
+		})
+	}
+}
+
+// The doctor ssh row reads the listener from /proc/net and does not dial when
+// the table is there.
+func TestDoctorSSHRowProcNet(t *testing.T) {
+	a := newTestApp(t)
+	f := sshFiles(a.paths)
+	os.MkdirAll(f.Dir, 0o755)
+	sshd.SaveConfig(f.Config(), sshd.Config{Enabled: false, Port: 22, Listen: sshd.DefaultListen})
+	procNetFixture(t, "", "   0: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4711 1 00000000 100 0 0 10 0\n")
+
+	m := decodeJSON(t, lastJSON(t, captureStdout(t, func() { a.cmdDoctor([]string{"--json"}) })))
+	row, _ := m["ssh"].(map[string]any)
+	if row["port_open"] != true {
+		t.Errorf("port_open: want true from /proc/net/tcp6, row %v", row)
+	}
+}

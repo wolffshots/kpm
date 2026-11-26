@@ -43,7 +43,7 @@ Run it against the newest firmware before a release. If a required symbol is mis
 
 ## Machine-readable output
 
-These commands accept `--json`: `status`, `list`, `search`, `check`, `install`, `update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`, `config list`, `config show`, `config set`, `config init`, `doctor`, `adopt-self`, `ssh status` and `version`.
+These commands accept `--json`: `status`, `list`, `search`, `check`, `install`, `update`, `uninstall`, `sync`, `unstage`, `registry list`, `registry refresh`, `config list`, `config show`, `config set`, `config init`, `doctor`, `adopt-self`, `ssh status`, `exclude-sync` and `version`.
 
 Human and progress output streams as usual. The last stdout line is the marker `BEGIN_JSON` followed by one compact JSON object. The UI reads this object. Scripts can use it too.
 

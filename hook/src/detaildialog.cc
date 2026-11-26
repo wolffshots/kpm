@@ -1,5 +1,6 @@
 // NICKEL-UI.md §6 — DetailDialog + action flow.
 
+#include <QDateTime>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
@@ -36,8 +37,9 @@ static QStringList jsonStrings(const QJsonArray &array) {
   return out;
 }
 
-DetailDialog *DetailDialog::show(QJsonObject package, const QHash<QString, QJsonObject> &packages) {
-  return new DetailDialog(package, packages);
+DetailDialog *DetailDialog::show(QJsonObject package, const QHash<QString, QJsonObject> &packages,
+                                 const QJsonObject &info) {
+  return new DetailDialog(package, packages, info);
 }
 
 // displayName resolves a package id to the name the rest of the UI shows
@@ -65,10 +67,11 @@ bool DetailDialog::blockerStagedOnly(const QString &packageId) const {
   return blocker.value("installed").toString().isEmpty() && blocker.value("staged").toBool();
 }
 
-DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject> &packages)
+DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject> &packages,
+                           const QJsonObject &infoPayload)
     : Dialog(package.value("name").toString().isEmpty() ? package.value("id").toString()
                                                         : package.value("name").toString()),
-      pkg(package), id(package.value("id").toString()), packageIndex(packages) {
+      pkg(package), info(infoPayload), id(package.value("id").toString()), packageIndex(packages) {
   // Guard against a null parent (see BrowseDialog): a deref here would crash
   // Nickel the moment a package detail is opened.
   if (QWidget *parent = parentWidget()) {
@@ -148,15 +151,19 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   }
 
   QString latest = pkg.value("latest").toString();
-  addInfo("Source", pkg.value("source").toString());
-  addInfo("Registry", pkg.value("registry").toString());
-  addInfo("Installed", installed);
-  addInfo("Latest", latest);
-  addInfo("Pinned", pkg.value("pinned").toString());
-  // §4.6 disclosure line: mirrors the `conflicts <id>` line printInstallDef adds to
-  // `kpm install`'s def review, so a user reading this page sees the declaration
-  // even when nothing on the device is currently blocking.
-  addInfo("Conflicts", declaredConflicts.join(", "));
+  if (info.isEmpty()) {
+    addInfo("Source", pkg.value("source").toString());
+    addInfo("Registry", pkg.value("registry").toString());
+    addInfo("Installed", installed);
+    addInfo("Latest", latest);
+    addInfo("Pinned", pkg.value("pinned").toString());
+    // §4.6 disclosure line: mirrors the `conflicts <id>` line printInstallDef adds to
+    // `kpm install`'s def review, so a user reading this page sees the declaration
+    // even when nothing on the device is currently blocking.
+    addInfo("Conflicts", declaredConflicts.join(", "));
+  } else {
+    addInfoGroups(layout); // the same facts and more, from `kpm info` (kpm-pkg-details)
+  }
   if (!installed.isEmpty() && !uninstallable && !isKpm) {
     addInfo("Uninstall", "not available for this package");
   }
@@ -311,6 +318,30 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
     layout->addWidget(selfWarn);
   }
 
+  // Check and Doctor (kpm-pkg-details) read and change nothing on the device, so
+  // they sit in their own row of bordered buttons, apart from the footer actions.
+  // Check needs a packages.d def; Doctor needs an installed one.
+  bool registered = info.value("registered").toBool();
+  if (registered) {
+    QHBoxLayout *tools = new QHBoxLayout();
+    tools->setSpacing(16);
+    auto addTool = [&](const QString &text, const char *slot) {
+      N3ButtonLabel *button = construct_N3ButtonLabel(this);
+      button->setProperty("borderedButton", true);
+      button->setText(text);
+      tools->addWidget(button);
+      QObject::connect(button, SIGNAL(tapped(bool)), this, slot);
+      buttons.append(button);
+    };
+    addTool("Check for update", SLOT(checkOne()));
+    if (!installed.isEmpty()) {
+      addTool("Run doctor", SLOT(runDoctor()));
+    }
+    tools->addStretch(1);
+    layout->addSpacing(16);
+    layout->addLayout(tools);
+  }
+
   layout->addSpacing(16);
 
   statusLabel = new Label(Label::Small, "");
@@ -366,6 +397,8 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   } else if (installed.isEmpty()) {
     addActionButton(actionLabel("Install"), SLOT(install()));
   } else {
+    canOfferUpdate = true;
+    hasUpdateButton = updateAvailable;
     if (updateAvailable) {
       addActionButton(actionLabel("Update"), SLOT(update()));
     }
@@ -461,12 +494,23 @@ void DetailDialog::setBusy(bool busy, const QString &busyLabel) {
   }
 }
 
+// connectProgress shows kpm's progress lines in the busy status line
+// (kpm-progress.md). Without them the busy label stays, as before.
+void DetailDialog::connectProgress(KpmProcess *proc) {
+  QObject::connect(proc, &KpmProcess::progress, this, [this](QJsonObject line) {
+    if (busyNow && statusLabel) {
+      statusLabel->setText(KpmProcess::progressText(line));
+    }
+  });
+}
+
 void DetailDialog::run(KpmProcess *proc, const QString &busyLabel) {
   if (!proc) {
     ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
     return;
   }
   setBusy(true, busyLabel);
+  connectProgress(proc);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onResponse);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -482,6 +526,7 @@ void DetailDialog::install() {
     return;
   }
   setBusy(true, installBusyLabel());
+  connectProgress(proc);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onInstallRegistered);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -698,4 +743,275 @@ void DetailDialog::promptReboot() {
   QObject::connect(d, &QDialog::accepted, d, &QDialog::deleteLater);
   QObject::connect(d, &QDialog::rejected, d, &QDialog::deleteLater);
   d->open();
+}
+
+// ---- kpm-pkg-details: the info groups, Check and Doctor ---------------------
+//
+// Every string below comes from `kpm info --json` or `kpm doctor --json`. Registry
+// values are third-party text: Label and ElidedLabel render plain text only.
+
+// checksumText words the checksum state of the installed version (cmd_info.go).
+static QString checksumText(const QString &state) {
+  if (state == QStringLiteral("declared")) {
+    return QStringLiteral("sha256 in the def");
+  }
+  if (state == QStringLiteral("none-for-tag")) {
+    return QStringLiteral("no sha256 for this tag");
+  }
+  if (state == QStringLiteral("none")) {
+    return QStringLiteral("no sha256 in the def");
+  }
+  return QString();
+}
+
+// shortTime turns kpm's RFC 3339 UTC time into local "yyyy-MM-dd HH:mm".
+static QString shortTime(const QString &rfc3339) {
+  QDateTime t = QDateTime::fromString(rfc3339, Qt::ISODate);
+  return t.isValid() ? t.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) : rfc3339;
+}
+
+// carryText words the carry-over state of `kpm info` (cmd_info.go carryoverInfo).
+static QString carryText(const QJsonObject &carry) {
+  if (carry.value("state").toString() == QStringLiteral("in-bundle")) {
+    return "Carry-over to 6.x: in the bundle (" + carry.value("version").toString() + ")";
+  }
+  return "Carry-over to 6.x: not in the bundle — " + carry.value("reason").toString();
+}
+
+QString DetailDialog::latestText(const QString &latest, const QString &checkedAt) const {
+  QString text = "Latest: " + (latest.isEmpty() ? QStringLiteral("not checked yet") : latest);
+  if (!checkedAt.isEmpty()) {
+    text += " · checked " + shortTime(checkedAt);
+  }
+  return text;
+}
+
+void DetailDialog::addInfoGroups(QVBoxLayout *layout) {
+  auto heading = [&](const QString &text) {
+    layout->addSpacing(8);
+    Label *h = new Label(Label::Small, text);
+    h->setStyleSheet(h->styleSheet() + "\nLabel { font-weight: bold; }");
+    layout->addWidget(h);
+  };
+  // line adds one elided row: a long source or path must never push the footer
+  // off the screen.
+  auto line = [&](const QString &text) { layout->addWidget(new ElidedLabel(Label::Small, text)); };
+  auto wrapped = [&](const QString &text) {
+    Label *l = new Label(Label::Small, text);
+    l->setWordWrap(true);
+    layout->addWidget(l);
+  };
+  auto str = [](const QJsonObject &o, const char *key) { return o.value(QLatin1String(key)).toString(); };
+
+  QJsonObject def = info.value("def").toObject();
+  int deviceLine = info.value("line").toInt();
+
+  // Version.
+  heading("Version");
+  QString installed = str(info, "installed");
+  if (!installed.isEmpty()) {
+    QString sum = checksumText(str(info, "checksum"));
+    line("Installed: " + installed + (sum.isEmpty() ? QString() : " · " + sum));
+  } else {
+    line(QStringLiteral("Installed: no"));
+  }
+  if (!str(info, "staged").isEmpty()) {
+    line("Staged: " + str(info, "staged") + " (installs at the next reboot)");
+  }
+  // The check merge of the browse list is newer than latest_seen when present.
+  QString latest = pkg.value("latest").toString();
+  if (latest.isEmpty()) {
+    latest = str(info, "latest_seen");
+  }
+  // A Label, not an ElidedLabel: Check rewrites it, and a failed check's sentence
+  // wraps rather than losing its end.
+  Label *latestLine = new Label(Label::Small, latestText(latest, str(info, "last_checked")));
+  latestLine->setWordWrap(true);
+  layout->addWidget(latestLine);
+  latestLabel = latestLine;
+  if (!str(info, "pinned").isEmpty()) {
+    line("Pinned: " + str(info, "pinned"));
+  }
+
+  // Definition: the registry def when there is one (the upstream def).
+  heading(str(def, "from") == QStringLiteral("registry") ? "Definition (registry " + str(def, "registry") + ")"
+                                                         : QStringLiteral("Definition (local, no registry)"));
+  QString source = str(def, "source");
+  QString forge = str(def, "forge");
+  line("Source: " + (source.isEmpty() ? QStringLiteral("none") : source) +
+       (forge.isEmpty() || forge == QStringLiteral("github") ? QString() : " · " + forge));
+  auto mark = [&](int lineNo) { return deviceLine == lineNo ? QStringLiteral(" · this device") : QString(); };
+  QString fw4 = "Firmware 4.x: " + str(def, "asset");
+  if (!str(def, "tested_fw").isEmpty()) {
+    fw4 += " · tested on " + str(def, "tested_fw");
+  }
+  line(fw4 + mark(4));
+  QString fw6;
+  QJsonObject t6 = def.value("fw6").toObject();
+  QString method = str(def, "install_method");
+  if (!str(def, "builtin_fw6").isEmpty()) {
+    fw6 = "built in: " + str(def, "builtin_fw6");
+  } else if (!t6.isEmpty()) {
+    fw6 = str(t6, "asset");
+    if (!str(t6, "source").isEmpty()) {
+      fw6 += " from " + str(t6, "source");
+    }
+    if (!str(t6, "tested_fw").isEmpty()) {
+      fw6 += " · tested on " + str(t6, "tested_fw");
+    }
+  } else if (!method.isEmpty() && method != QStringLiteral("tgz")) {
+    fw6 = QStringLiteral("same files as 4.x");
+  } else {
+    fw6 = QStringLiteral("no build");
+  }
+  line("Firmware 6.x: " + fw6 + mark(6));
+  QStringList extra;
+  QStringList conflicts = jsonStrings(def.value("conflicts").toArray());
+  if (!conflicts.isEmpty()) {
+    extra << "Conflicts: " + conflicts.join(", ");
+  }
+  if (!str(def, "min_kpm").isEmpty()) {
+    extra << "Min kpm: " + str(def, "min_kpm");
+  }
+  if (str(def, "update_check") == QStringLiteral("rolling")) {
+    extra << QStringLiteral("Rolling release");
+  }
+  if (!extra.isEmpty()) {
+    line(extra.join(" · "));
+  }
+  if (info.value("def_differs").toBool()) {
+    wrapped(QStringLiteral("The local copy of the def differs from the registry. Sync updates it."));
+  }
+
+  // On this device.
+  heading("On this device");
+  QString deviceFw = str(info, "device_fw");
+  if (!deviceFw.isEmpty()) {
+    line("Firmware: " + deviceFw + (deviceLine == 6 ? QStringLiteral(" (6.x)") : QStringLiteral(" (4.x)")));
+  }
+  int total = info.value("files_total").toInt();
+  QJsonArray files = info.value("files").toArray();
+  if (total > 0) {
+    line("Files: " + QString::number(total) +
+         (total > files.size() ? " (first " + QString::number(files.size()) + " below)" : QString()));
+    for (const QJsonValue &f : files) {
+      line("    " + f.toString());
+    }
+  }
+  QStringList configs = jsonStrings(info.value("configs").toArray());
+  if (!configs.isEmpty()) {
+    line("Config files: " + configs.join(", "));
+  }
+  // Always in the layout, hidden when info has no carry-over: Check rebuilds the
+  // bundle and then rewrites or shows this line in place (showChecked).
+  QJsonObject carry = info.value("carryover").toObject();
+  Label *carryLine = new Label(Label::Small, carryText(carry));
+  carryLine->setWordWrap(true);
+  carryLine->setVisible(!carry.isEmpty());
+  layout->addWidget(carryLine);
+  carryLabel = carryLine;
+  // The Doctor line shows after the first Run doctor. It is in the layout now, so
+  // the result needs no new widget, only show().
+  Label *doctor = new Label(Label::Small, "");
+  doctor->setWordWrap(true);
+  doctor->hide();
+  layout->addWidget(doctor);
+  doctorLabel = doctor;
+}
+
+void DetailDialog::checkOne() {
+  KpmProcess *proc = KpmProcess::checkOne(id);
+  if (!proc) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
+    return;
+  }
+  setBusy(true, QStringLiteral("Checking for an update…"));
+  connectProgress(proc); // kpm check <id> also reports the carry-over step
+  QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onChecked);
+  QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
+}
+
+// onChecked reads `kpm info` again before it changes the page: `kpm check <id>`
+// also rebuilds the 6.x bundle, so the Carry-over line can change. The page stays
+// busy until info answers, so all its lines change in one e-ink update. kpm sends
+// the check payload after the bundle step and the response comes at exit, so info
+// reads the new bundle.
+void DetailDialog::onChecked(int exitCode, QJsonObject payload) {
+  (void)exitCode; // exit 2 carries the failed row; its error goes on the line
+  KpmProcess *proc = carryLabel != nullptr ? KpmProcess::info(id) : nullptr;
+  if (proc == nullptr) {
+    showChecked(payload, QJsonObject());
+    return;
+  }
+  QObject::connect(proc, &KpmProcess::response, this, [this, payload](int code, QJsonObject fresh) {
+    showChecked(payload, code == 0 ? fresh : QJsonObject());
+  });
+  QObject::connect(proc, &KpmProcess::failure, this, [this, payload](QString) { showChecked(payload, QJsonObject()); });
+}
+
+// showChecked rewrites the Latest and Carry-over lines in place and, when the check
+// found an update on an installed package, adds the Update button. The page stays
+// open: a check changes no files, so only the browse badge needs the result
+// (checked()).
+void DetailDialog::showChecked(const QJsonObject &payload, const QJsonObject &fresh) {
+  setBusy(false);
+  if (!fresh.isEmpty() && carryLabel != nullptr) {
+    info = fresh;
+    QJsonObject carry = fresh.value("carryover").toObject();
+    carryLabel->setText(carryText(carry));
+    carryLabel->setVisible(!carry.isEmpty());
+  }
+  QJsonArray rows = payload.value("packages").toArray();
+  QJsonObject row;
+  for (const QJsonValue &v : rows) {
+    if (v.toObject().value("id").toString() == id) {
+      row = v.toObject();
+    }
+  }
+  if (row.isEmpty()) {
+    latestLabel->setText(QStringLiteral("Latest: not checked (no update source for this firmware)"));
+    return;
+  }
+  if (!row.value("error").toString().isEmpty()) {
+    latestLabel->setText("Latest: check failed — " + row.value("error").toString());
+    return;
+  }
+  latestLabel->setText(
+      latestText(row.value("latest").toString(), QDateTime::currentDateTimeUtc().toString(Qt::ISODate)));
+  checked(rows);
+  if (row.value("update").toBool() && canOfferUpdate && !hasUpdateButton) {
+    hasUpdateButton = true;
+    addActionButton(actionLabel("Update"), SLOT(update()));
+  }
+}
+
+void DetailDialog::runDoctor() {
+  KpmProcess *proc = KpmProcess::doctor(id);
+  if (!proc) {
+    ConfirmationDialogFactory__showErrorDialog("kpm", "kpm is busy — try again in a moment.");
+    return;
+  }
+  setBusy(true, QStringLiteral("Running doctor…"));
+  connectProgress(proc);
+  QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onDoctor);
+  QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
+}
+
+// onDoctor shows the verdict in the Doctor line. "loaded" proves only that the
+// plugin is mapped into Nickel (DOCTOR.md); kpm's detail sentence says so.
+void DetailDialog::onDoctor(int exitCode, QJsonObject payload) {
+  (void)exitCode;
+  setBusy(false);
+  QString text = QStringLiteral("Doctor: no result");
+  for (const QJsonValue &v : payload.value("packages").toArray()) {
+    QJsonObject o = v.toObject();
+    if (o.value("id").toString() == id) {
+      text = "Doctor: " + o.value("verdict").toString();
+      if (!o.value("detail").toString().isEmpty()) {
+        text += " — " + o.value("detail").toString();
+      }
+    }
+  }
+  doctorLabel->setText(text);
+  doctorLabel->show(); // shown by hand: a layout shows a new child one pass late
 }

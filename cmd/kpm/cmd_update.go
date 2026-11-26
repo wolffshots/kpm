@@ -131,7 +131,7 @@ func (a *App) cmdUpdate(args []string) int {
 	// Wait for connectivity before resolving (like check), but only if any
 	// selected package is actually configured to resolve (D3/F7).
 	if host := a.firstConfiguredHost(pkgs); host != "" {
-		if !device.WaitForNetwork(a.client.HTTP(), host) {
+		if !a.waitForNetwork(host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.WriteStatus(msg)
 			a.paths.Log("UPDATE", "aborted: no network")
@@ -169,7 +169,22 @@ func (a *App) cmdUpdate(args []string) int {
 	// merged KoboRoot.tgz — the normal new-device "Update all" sequence, which
 	// defeated feature B entirely.
 	staging := map[string]bool{}
+	// The progress plan, counted before the first step so the total does not
+	// change while the run goes: a step per package, one install step when a
+	// package installs live, one staging step when a package is a tgz, and the
+	// bundle refresh after the run. An install or staging step that the run
+	// does not need is passed over (kpm-progress.md, "Steps per command").
+	installStep, stageStep := 0, 0
 	for _, p := range pkgs {
+		if p.ForLine(a.paths.Line()).InstallsLive() {
+			installStep = 1
+		} else {
+			stageStep = 1
+		}
+	}
+	a.prog.AddSteps(len(pkgs) + installStep + stageStep + a.carryoverSteps("update", ""))
+	for _, p := range pkgs {
+		a.prog.Step("Checking " + p.ID)
 		r, app, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
 		if err != nil {
 			failed++
@@ -217,6 +232,11 @@ func (a *App) cmdUpdate(args []string) int {
 	appPartial := false
 	if len(appTargets) > 0 {
 		var appFailures []jsonFailure
+		if len(appTargets) == 1 {
+			a.prog.Step("Installing " + appTargets[0].pkg.ID)
+		} else {
+			a.prog.Step(fmt.Sprintf("Installing %d packages", len(appTargets)))
+		}
 		appChanged, appFailures, appPartial = a.installAppTrees(appTargets, *forceLauncher)
 		failed += len(appFailures)
 		failures = append(failures, appFailures...)
@@ -355,6 +375,10 @@ func (a *App) cmdUpdate(args []string) int {
 		a.paths.WriteStatus("kpm: refusing to stage — " + err.Error())
 		return exitError
 	}
+	if installStep == 1 && len(appTargets) == 0 {
+		a.prog.Skip()
+	}
+	a.prog.Step("Staging KoboRoot.tgz")
 	part, sum, size, dups, err := a.mergeStaged(targets)
 	if err != nil {
 		stageFailed("stage: " + err.Error())
@@ -671,6 +695,9 @@ func (a *App) resolveAndDownload(p *config.Package, conflicts map[string][]strin
 	if tagsEqual(ps.InstalledVersion, rel.Tag) && !rebuilt && !selfRepair(p.ID, ps) {
 		return resolved{}, nil, true, "", nil // up to date
 	}
+	if selfOlder(p.ID, pin, ps.InstalledVersion, rel.Tag) {
+		return resolved{}, nil, true, "", nil // never a self downgrade
+	}
 	// A pin freezes the staged payload too: without the pin term a pinned
 	// package whose release was rebuilt would fall through and re-download
 	// (rebuildDetected covers the installed comparison above).
@@ -837,6 +864,7 @@ func (a *App) downloadFor(line int, id, tag, wantSHA string, declaredForTag, has
 	if err != nil {
 		return "", nil, err
 	}
+	a.prog.Note("Verifying " + id)
 	// The asset may be a zip wrapping the real KoboRoot.tgz (e.g. NickelClock's
 	// NickelClock-<tag>.zip). Detection is by content, not filename: unwrap the
 	// single inner tgz over `final` so the cache path and everything downstream
@@ -910,6 +938,15 @@ func (a *App) fetchAsset(id, tag, ext, wantSHA string, declaredForTag, hasChecks
 		return "", "", err
 	}
 	ctx := context.Background()
+	if a.prog != nil {
+		// The build of another line carries ".fw<line>" in ext (downloadFor).
+		label := "Downloading " + id + " " + tag
+		if strings.HasPrefix(ext, ".fw") {
+			label += " for firmware " + strings.TrimPrefix(strings.SplitN(ext, ".", 3)[1], "fw")
+		}
+		a.prog.Note(label)
+		ctx = forge.WithProgress(ctx, a.prog.BytesFunc(asset.Size))
+	}
 	_, derr := a.client.Download(ctx, asset.DownloadURL, f)
 	if derr == nil {
 		derr = f.Sync() // durable before the rename to the final name (B3)

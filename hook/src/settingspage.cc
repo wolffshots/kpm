@@ -11,6 +11,7 @@
 
 #include <NickelHook.h>
 
+#include "kpmprocess.h"
 #include "morerow.h"
 #include "settingspage.h"
 #include "widgets/label.h"
@@ -77,12 +78,33 @@ SettingsPage::SettingsPage(QWidget *parent) : QWidget(parent) {
   grid->addLayout(hide, 2, 1);
   hideNote = noteLabel("");
   grid->addWidget(hideNote, 3, 1);
+
+  syncName = nameLabel("Hide in library");
+  grid->addWidget(syncName, 4, 0, Qt::AlignLeft | Qt::AlignVCenter);
+  QHBoxLayout *sync = new QHBoxLayout();
+  sync->setContentsMargins(0, 0, 0, 0);
+  sync->setSpacing(16);
+  dotButton = construct_N3ButtonLabel(this);
+  dotButton->setObjectName("settingsDotFolders");
+  dotButton->setText("Dot folders");
+  sync->addWidget(dotButton);
+  syncOffButton = construct_N3ButtonLabel(this);
+  syncOffButton->setObjectName("settingsSyncOff");
+  syncOffButton->setText("Off");
+  sync->addWidget(syncOffButton);
+  sync->addStretch(1);
+  grid->addLayout(sync, 4, 1);
+  syncNote = noteLabel("");
+  syncNote->setObjectName("settingsSyncNote");
+  grid->addWidget(syncNote, 5, 1);
   v->addLayout(grid);
   v->addStretch(1);
 
   QObject::connect(moreButton, SIGNAL(tapped(bool)), this, SLOT(chooseMoreRow()));
   QObject::connect(nmButton, SIGNAL(tapped(bool)), this, SLOT(chooseNickelMenu()));
   QObject::connect(hideButton, SIGNAL(tapped(bool)), this, SLOT(toggleHide()));
+  QObject::connect(dotButton, SIGNAL(tapped(bool)), this, SLOT(chooseDotFolders()));
+  QObject::connect(syncOffButton, SIGNAL(tapped(bool)), this, SLOT(chooseSyncOff()));
   load();
 }
 
@@ -121,6 +143,8 @@ void SettingsPage::load() {
                             : QString("Hides the NickelMenu button in the bottom bar of the home screen. "
                                       "Only available when kpm opens from the row on the More screen. "
                                       "Restart the device after you change this setting."));
+
+  loadSync();
 }
 
 void SettingsPage::save(struct nkpm_launch const &next) {
@@ -160,4 +184,83 @@ void SettingsPage::toggleHide() {
   struct nkpm_launch next = settings;
   next.hide_nm_button = !next.hide_nm_button;
   save(next);
+}
+
+// ---- Hide in library (EXCLUDE-SYNC.md section 5) --------------------------
+
+void SettingsPage::loadSync() {
+  if (syncBusy) {
+    return;
+  }
+  KpmProcess *p = KpmProcess::excludeSync();
+  if (p == nullptr) {
+    return; // start() refuses only mutating commands; the read is not one
+  }
+  setSyncBusy(true);
+  QObject::connect(p, &KpmProcess::response, this, [this](int, QJsonObject payload) {
+    setSyncBusy(false);
+    applySync(payload);
+  });
+  QObject::connect(p, &KpmProcess::failure, this, [this](QString) { setSyncBusy(false); });
+}
+
+void SettingsPage::applySync(const QJsonObject &payload) {
+  syncSource = payload.value("source").toString();
+  bool const fromKpm = syncSource == "kpm" || syncSource == "kpm+custom";
+  markActive(dotButton, fromKpm);
+  markActive(syncOffButton, syncSource == "none");
+  setSyncBusy(false); // kpm leaves a value that it did not write: Off cannot remove it
+
+  QString text;
+  if (syncSource == "none") {
+    text = "Nickel adds books and images from folders whose name starts with a dot, for example .adds, "
+           "to the library.";
+  } else if (syncSource == "custom") {
+    text = "Kobo eReader.conf has its own ExcludeSyncFolders value. Dot folders adds the kpm preset to it.";
+  } else {
+    text = "Nickel skips folders whose name starts with a dot, except .kobo and .adobe-digital-editions.";
+    if (syncSource == "kpm+custom") {
+      text += " Your own value stays.";
+    }
+  }
+  text += syncChanged ? QString(" Restart the device to apply the change.")
+                      : QString(" Restart the device after you change this setting.");
+  syncNote->setText(text);
+}
+
+void SettingsPage::setSyncBusy(bool busy) {
+  syncBusy = busy;
+  dotButton->setEnabled(!busy);
+  syncOffButton->setEnabled(!busy && syncSource != "custom");
+}
+
+void SettingsPage::runSync(KpmProcess *p) {
+  if (p == nullptr) {
+    return; // another mutating kpm runs
+  }
+  setSyncBusy(true);
+  QObject::connect(p, &KpmProcess::response, this, [this](int, QJsonObject) {
+    syncChanged = true;
+    setSyncBusy(false);
+    loadSync();
+  });
+  // KpmProcess shows the error. Read the row again: the file may have changed.
+  QObject::connect(p, &KpmProcess::failure, this, [this](QString) {
+    setSyncBusy(false);
+    loadSync();
+  });
+}
+
+void SettingsPage::chooseDotFolders() {
+  if (syncBusy || syncSource == "kpm" || syncSource == "kpm+custom") {
+    return;
+  }
+  runSync(KpmProcess::excludeSyncSet("dot-folders"));
+}
+
+void SettingsPage::chooseSyncOff() {
+  if (syncBusy || syncSource == "none" || syncSource == "custom") {
+    return;
+  }
+  runSync(KpmProcess::excludeSyncOff());
 }

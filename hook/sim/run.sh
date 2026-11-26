@@ -12,12 +12,18 @@
 #   ./run.sh --exercise-apptree out           offscreen: drive the app-tree copy (APP-TREE.md §11.3)
 #   ./run.sh --exercise-tabs out              offscreen: drive the Mods/Fonts/Dictionaries tabs (fonts plan §3.8)
 #   ./run.sh --exercise-ssh out               offscreen: drive the SSH tab (SSH.md section 7)
+#   ./run.sh --exercise-settings out          offscreen: drive the Hide in library row (EXCLUDE-SYNC.md section 5)
+#   ./run.sh --exercise-tabwidth out          offscreen: tab widths equal and fixed at each switch
+#   ./run.sh --exercise-detailcarry out       offscreen: the details Carry-over line after Check (fake check)
+#   ./run.sh --exercise-pagesize out          offscreen: Mods rows per page stay the same after tab switches
 #   ./run.sh --exercise-init         offscreen: drive the "Create from example" flow (nickelnote pin)
 #   ./run.sh --exercise-sync         offscreen: drive the Sync flow (samplemod)
 #   ./run.sh --exercise-enroll       offscreen: drive the Enable-self-update flow (kpm)
 #   ./run.sh --exercise-rowrepaint   offscreen: drive the win-4 in-place row repaint
 #   ./run.sh --exercise-wake         offscreen: drive the sleep/wake chrome guard
 #   ./run.sh --exercise-badges       offscreen: assert the files-missing + firmware badges
+#   ./run.sh --exercise-details out           offscreen: the detail info groups, Run doctor, Check for update
+#   ./run.sh --exercise-progress d   offscreen: the footer progress text (FAKE_OLD=1: old kpm)
 #   ./run.sh --size 600x800          override the Kobo-portrait window size
 #
 # Env: SANDBOX (default /tmp/kpm-sim-sandbox), RESEED=0 to keep an existing
@@ -69,6 +75,10 @@ echo "== building nkpm-sim (Qt5) =="
 make -s -C "$SIM"
 
 # ---- seed the sandbox ---------------------------------------------------
+# --exercise-pagesize needs a Mods list of more than one page.
+case " $* " in
+  *" --exercise-pagesize "*) export SEED_EXTRA_MODS="${SEED_EXTRA_MODS:-12}" ;;
+esac
 if [ "${RESEED:-1}" = "1" ]; then
   rm -rf "$SANDBOX"
 fi
@@ -77,10 +87,16 @@ mkdir -p "$SYSROOT"
 
 # ---- run ----------------------------------------------------------------
 export NKPM_KPM="$BUILD/kpm"
+# --exercise-progress runs a kpm that sends slow progress lines and passes the
+# other commands to the real one (fixture/progress-kpm.sh).
+case " $* " in
+  *" --exercise-progress "*) export REAL_KPM="$BUILD/kpm" NKPM_KPM="$SIM/fixture/progress-kpm.sh" ;;
+  *" --exercise-detailcarry "*) export REAL_KPM="$BUILD/kpm" NKPM_KPM="$SIM/fixture/carry-kpm.sh" ;;
+esac
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-ssh "*|*" --exercise-rowrepaint "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-tabwidth "*|*" --exercise-ssh "*|*" --exercise-settings "*|*" --exercise-rowrepaint "*|*" --exercise-details "*|*" --exercise-progress "*|*" --exercise-pagesize "*|*" --exercise-detailcarry "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="

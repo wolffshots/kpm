@@ -274,7 +274,7 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 
 	// Network wait (the sole network path for registries, §9.2), gated like check.
 	if host := firstRegistryHost(targets); host != "" {
-		if !device.WaitForNetwork(a.client.HTTP(), host) {
+		if !a.waitForNetwork(host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.Log("REFRESH", "aborted: no network")
 			if jsonMode {
@@ -288,7 +288,10 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	failed := 0
 	refreshed := []jsonRefreshed{}
 	regFailed := []jsonRegFailure{}
+	a.prog.AddSteps(len(targets))
+	a.prog.SetNext(a.progressNextSteps())
 	for _, r := range targets {
+		a.prog.Step("Updating package list " + r.Name)
 		if err := a.refreshOne(r); err != nil {
 			failed++
 			regFailed = append(regFailed, jsonRegFailure{Name: r.Name, Error: err.Error()})

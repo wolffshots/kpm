@@ -203,11 +203,6 @@ func (a *App) diagnose(p *config.Package, entries map[string]*registry.Entry, de
 	if p.ID == selfID {
 		plugins = appendMissing(plugins, selfHooks...)
 	}
-	if len(plugins) == 0 {
-		res.detail = "not a Nickel plugin — not diagnosable"
-		return res
-	}
-	res.plugin = plugins[0]
 
 	// nh_name: the registry field, else the display name with spaces stripped.
 	nhName := ""
@@ -217,6 +212,26 @@ func (a *App) diagnose(p *config.Package, entries map[string]*registry.Entry, de
 	if nhName == "" {
 		nhName = strings.ReplaceAll(p.Name, " ", "")
 	}
+
+	// A package installed before kpm kept manifests has none (device finding 3
+	// of 2026-11-26: NickelClock, NickelMenu). Look for its plugin by name, and
+	// take only a file that is on disk.
+	noManifest := len(ps.Manifest) == 0
+	if noManifest && len(plugins) == 0 {
+		for _, abs := range guessPluginSOs(p.ID, nhName) {
+			if _, err := os.Lstat(a.paths.HostPath(abs)); err == nil {
+				plugins = append(plugins, abs)
+			}
+		}
+	}
+	if len(plugins) == 0 {
+		res.detail = "not a Nickel plugin — not diagnosable"
+		if noManifest {
+			res.detail = "no install manifest and no known plugin file — not diagnosable"
+		}
+		return res
+	}
+	res.plugin = plugins[0]
 
 	res.fwUntested = registry.FirmwareUntested(deviceFw, res.testedFw)
 
@@ -276,6 +291,30 @@ func appendCause(res *doctorResult, deviceFw string) {
 var selfHooks = []string{
 	"/usr/local/Kobo/imageformats/libnkpm.so",
 	"/usr/local/Kobo/imageformats/libnkpm-qt6.so",
+}
+
+// pluginAliases names the plugin files of mods whose file name does not follow
+// lib<nh_name>.so, by package id.
+// ponytail: a fixed list for the mods known to predate manifests. A registry
+// field for the plugin file would cover every mod.
+var pluginAliases = map[string][]string{
+	"nickelmenu": {"libnm.so"},
+	"nickeldbus": {"libndb.so"},
+}
+
+// guessPluginSOs returns the plugin paths a package with no manifest may have:
+// the alias files, then lib<nh_name>.so and its Qt 6 build, all in lower case.
+func guessPluginSOs(id, nhName string) []string {
+	const dir = "/usr/local/Kobo/imageformats/"
+	var out []string
+	for _, f := range pluginAliases[id] {
+		out = append(out, dir+f)
+	}
+	if nhName != "" {
+		base := "lib" + strings.ToLower(nhName)
+		out = appendMissing(out, dir+base+".so", dir+base+"-qt6.so")
+	}
+	return out
 }
 
 // appendMissing appends each item of add that list does not have.

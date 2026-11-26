@@ -131,6 +131,9 @@ func (a *App) cmdUninstall(args []string) int {
 		}
 	}
 
+	// The plan counts the bundle refresh that follows the removal.
+	a.prog.AddSteps(1 + a.carryoverSteps("uninstall", id))
+	a.prog.Step("Removing " + id)
 	res := uninstall.Execute(a.paths, plan)
 
 	// run_after: non-fatal (§3).

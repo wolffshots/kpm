@@ -33,6 +33,8 @@
 //   --exercise-badges          offscreen: assert the "files missing" browse badge
 //                              (samplemod) and the "Untested on your firmware"
 //                              detail warning (nickelnote) render (A + D)
+//   --exercise-details <dir>   offscreen: the detail page info groups, Run doctor and
+//                              Check for update (kpm-pkg-details)
 //   --exercise-apptree <dir>   offscreen: drive the app-tree copy (APP-TREE.md §11.3):
 //                              the "(no reboot)" action suffix, the "Installing…"
 //                              busy label, an uninstall that promises no reboot, and
@@ -51,8 +53,19 @@
 //                              (a real `kpm ssh serve` on 127.0.0.1), Disable, the
 //                              hidden address and its eye; writes ssh-nokey.png,
 //                              ssh-address.png and ssh-running.png
+//   --exercise-settings <dir>  offscreen: the "Hide in library" row of the
+//                              Settings tab (EXCLUDE-SYNC.md section 5) against
+//                              the real kpm: Off, Dot folders, Off again, with
+//                              the Kobo eReader.conf bytes checked after each tap;
+//                              writes settings-sync-off.png and settings-sync-dot.png
 //   --exercise-morerow <dir>   offscreen: the More page row (hook/src/morerow.cc)
 //                              on a fake MoreView; writes more-row.png
+//   --exercise-progress <dir>  offscreen: with NKPM_KPM=fixture/progress-kpm.sh, tap
+//                              Refresh and Update all and assert the footer progress
+//                              text (kpm-progress.md): step numbers across Refresh's
+//                              two commands, percent, the 2 s repaint limit, no
+//                              silence over 3 s; FAKE_OLD=1 checks the fallback text;
+//                              writes progress-footer.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
 //                              status bar + MainNavView are hidden, simulate a
 //                              sleep/wake re-show, assert the ChromeGuard re-hid
@@ -67,6 +80,7 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -89,6 +103,7 @@
 #include "nickelstub.h"
 #include "forcewifi.h"
 #include "morerow.h"
+#include "settingspage.h"
 #include "sshpage.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
@@ -629,6 +644,219 @@ static void runExerciseInit() {
 // def gained the [[configs]] table and (b) a fresh `kpm search --json` reports
 // has_config=true for samplemod (exit 0 = PASS; a missing button or an un-synced
 // def fails non-zero). Mirrors the seed's sync target (fixture/seed.go).
+// ---- --exercise-progress (kpm-progress.md) ------------------------------
+//
+// Runs against fixture/progress-kpm.sh (NKPM_KPM), which answers registry
+// refresh, check and update --all with slow progress lines. It taps Refresh,
+// then Update all, and records each text of the footer progress label with its
+// time. With FAKE_OLD=1 the script acts as a kpm without progress lines, and
+// the footer must show the hook's own step text.
+
+namespace {
+struct ProgressRun {
+  QLabel *label = nullptr;
+  QLabel *refresh = nullptr;
+  QElapsedTimer clock;
+  QList<QPair<qint64, QString>> seen; // a change of the text, while it shows
+  QString last;
+  bool sawRunning = false;
+  bool buttonsHidden = true; // the buttons stayed hidden each time the label showed
+  int pagesTop = -1;
+  bool pagesMoved = false;
+  QString shotDir;
+  bool shot = false;
+};
+} // namespace
+
+static int stepOf(const QString &text) {
+  if (!text.startsWith("Step ")) {
+    return 0;
+  }
+  return text.mid(5).section(' ', 0, 0).toInt();
+}
+
+// totalOf returns the step count of a "Step 2 of 5: ..." text, 0 for none.
+static int totalOf(const QString &text) {
+  if (!text.startsWith("Step ")) {
+    return 0;
+  }
+  return text.section(' ', 3, 3).section(':', 0, 0).toInt();
+}
+
+static void runExerciseProgress(const QString &dir) {
+  QDir().mkpath(dir);
+  bool old = qgetenv("FAKE_OLD") == "1";
+  ProgressRun *run = new ProgressRun();
+  run->shotDir = dir;
+  run->clock.start(); // QElapsedTimer: started here, never read before
+  waitForRows(
+      [run, old]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        run->label = browse ? browse->findChild<QLabel *>("kpmProgress") : nullptr;
+        run->refresh = findLabelByText("Refresh");
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        if (!run->label || !run->refresh || !pages) {
+          std::fprintf(stderr, "sim: FAIL - no progress label, Refresh button or list\n");
+          qApp->exit(5);
+          return;
+        }
+        run->pagesTop = pages->geometry().bottom();
+        QTimer *poll = new QTimer(qApp);
+        QObject::connect(poll, &QTimer::timeout, qApp, [run, pages]() {
+          if (!run->label->isVisible()) {
+            return;
+          }
+          run->sawRunning = true;
+          if (run->refresh->isVisible()) {
+            run->buttonsHidden = false;
+          }
+          if (pages->geometry().bottom() != run->pagesTop) {
+            run->pagesMoved = true;
+          }
+          QString t = run->label->text();
+          if (t != run->last) {
+            run->last = t;
+            run->seen.append(qMakePair(run->clock.elapsed(), t));
+            std::fprintf(stderr, "sim: %6lld ms  %s\n", static_cast<long long>(run->clock.elapsed()), qPrintable(t));
+            if (!run->shot && t.contains("%)")) {
+              run->shot = true;
+              saveGrab(run->shotDir + "/progress-footer.png");
+            }
+          }
+        });
+        poll->start(50);
+
+        std::fprintf(stderr, "sim: tapping Refresh\n");
+        sendClick(run->refresh);
+        // Wait for the end of Refresh (the buttons come back), then Update all.
+        QTimer *wait = new QTimer(qApp);
+        QObject::connect(wait, &QTimer::timeout, qApp, [run, wait, old]() {
+          if (!run->sawRunning || !run->refresh->isVisible()) {
+            return;
+          }
+          wait->stop();
+          int refreshCount = run->seen.size();
+          QLabel *all = findLabelByText("Update all");
+          std::fprintf(stderr, "sim: tapping Update all\n");
+          sendClick(all);
+          QTimer *wait2 = new QTimer(qApp);
+          QObject::connect(wait2, &QTimer::timeout, qApp, [run, wait2, old, refreshCount]() {
+            if (run->seen.size() == refreshCount || !run->refresh->isVisible()) {
+              return;
+            }
+            wait2->stop();
+            int rc = 0;
+            auto fail = [&rc](const char *why) {
+              std::fprintf(stderr, "sim: FAIL - %s\n", why);
+              rc = 8;
+            };
+            auto has = [run](const QString &part, int from, int to) {
+              for (int i = from; i < to; i++) {
+                if (run->seen.at(i).second.contains(part)) {
+                  return true;
+                }
+              }
+              return false;
+            };
+            int n = run->seen.size();
+            if (!run->buttonsHidden) {
+              fail("a footer button showed together with the progress text");
+            }
+            if (run->pagesMoved) {
+              fail("the list moved when the footer swapped");
+            }
+            // One step count for the whole Refresh (finding 5 of the
+            // 0.16.0-rc2 device test showed "of 2", "of 3", then "of 5").
+            int refreshTotal = 0;
+            for (int i = 0; i < refreshCount; i++) {
+              int t = totalOf(run->seen.at(i).second);
+              if (t > 0 && refreshTotal > 0 && t != refreshTotal) {
+                fail("the Refresh step count changed");
+              }
+              if (t > 0 && refreshTotal == 0) {
+                refreshTotal = t;
+              }
+            }
+            std::fprintf(stderr, "sim: Refresh step count %d\n", refreshTotal);
+            if (old) {
+              if (!has("Updating package lists", 0, refreshCount) || !has("Checking for updates", 0, refreshCount)) {
+                fail("an old kpm must still show the hook's Refresh text");
+              }
+              if (refreshTotal != 0) {
+                fail("an old kpm reports no step count, so the hook shows none");
+              }
+              if (!has("Updating all packages", refreshCount, n)) {
+                fail("an old kpm must still show the Update all text");
+              }
+            } else {
+              if (refreshTotal != 5) {
+                fail("the Refresh step count is not 5 (2 registries, check, download, bundle)");
+              }
+              if (!has("Step 1 of 5: Updating package list kobo-registry", 0, refreshCount)) {
+                fail("no first registry step");
+              }
+              if (!has("Step 3 of 5: Checking for updates (", 0, refreshCount) || !has(" of 7)", 0, refreshCount)) {
+                fail("no check step with its count of 7 packages");
+              }
+              if (!has("Step 4 of 5: Downloading kpm v0.15.0 for firmware 6 (", 0, refreshCount)) {
+                fail("no carry-over download with its percent");
+              }
+              if (!has("Step 5 of 5: Building the firmware 6 bundle", 0, refreshCount)) {
+                fail("no bundle step");
+              }
+              if (!has("Step 1 of 2: Downloading kpm v0.15.0 (", refreshCount, n) ||
+                  !has("Step 2 of 2: Staging KoboRoot.tgz", refreshCount, n)) {
+                fail("no Update all download or staging step");
+              }
+              // The fake sends 11 download lines in 5 s. With the 2 s limit,
+              // at most 4 of them reach the label.
+              int dl = 0;
+              for (int i = 0; i < refreshCount; i++) {
+                if (run->seen.at(i).second.contains("for firmware 6 (")) {
+                  dl++;
+                }
+              }
+              std::fprintf(stderr, "sim: %d carry-over download texts reached the label\n", dl);
+              if (dl > 4) {
+                fail("the label repainted faster than once each 2 s");
+              }
+            }
+            int prevStep = 0;
+            qint64 gap = 0;
+            for (int i = 0; i < n; i++) {
+              if (i == refreshCount) {
+                prevStep = 0; // Update all starts its own count
+              }
+              int s = stepOf(run->seen.at(i).second);
+              if (s > 0 && s < prevStep) {
+                fail("a step number went back");
+              }
+              if (s > 0) {
+                prevStep = s;
+              }
+              if (i > 0 && i != refreshCount) {
+                gap = qMax(gap, run->seen.at(i).first - run->seen.at(i - 1).first);
+              }
+            }
+            std::fprintf(stderr, "sim: longest time with no new text: %lld ms\n", static_cast<long long>(gap));
+            // An old kpm sends nothing, so only its own step text shows: the
+            // silence is the old behaviour, not a fault.
+            if (!old && gap > 3000) {
+              fail("more than 3 s with no new progress text");
+            }
+            std::fprintf(stderr, "sim: %s --exercise-progress%s\n", rc == 0 ? "PASS" : "FAIL", old ? " (old kpm)" : "");
+            qApp->exit(rc);
+          });
+          wait2->start(100);
+        });
+        wait->start(100);
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(4);
+      });
+}
+
 static void runExerciseSync() {
   QString kpmRoot = QString::fromLocal8Bit(qgetenv("KPM_ROOT"));
   QString defPath = kpmRoot + "/.adds/kpm/packages.d/samplemod.toml";
@@ -1993,6 +2221,155 @@ static void waitUntil(std::function<bool()> cond, int ms, std::function<void()> 
   timer->start(100);
 }
 
+// ---- --exercise-details <dir> (kpm-pkg-details) ---------------------------
+//
+// Opens nickelnote's detail page, which BrowseDialog now builds from `kpm info`,
+// and asserts the three groups. Then taps Run doctor and Check for update and
+// asserts that each rewrites its line in place and leaves the page open. Check
+// needs the network: offline it ends on the error line or kpm's error dialog,
+// and the run still asserts that the page left its busy state. Screenshots:
+// detail-info.png, detail-doctor.png, detail-check.png. Exit 0 = PASS.
+static void detailsFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim details: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+static void runExerciseDetails(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+        waitUntil([]() { return currentDetail() != nullptr && labelContaining(currentDetail(), "On this device"); },
+                  10000,
+                  [dir]() {
+                    DetailDialog *d = currentDetail();
+                    // Only Label lines: the elided rows are ElidedLabel frames,
+                    // which findChildren<QLabel> cannot read. The screenshot
+                    // shows them.
+                    for (const char *want : {"Version", "Definition (registry", "On this device", "Latest: "}) {
+                      if (!labelContaining(d, want)) {
+                        detailsFail(5, QString("no line with '%1'").arg(want));
+                        return;
+                      }
+                    }
+                    std::fprintf(stderr, "sim details: PASS — info groups shown\n");
+                    saveGrab(dir + "/detail-info.png");
+                    QLabel *doctor = findLabelByText("Run doctor");
+                    if (!doctor) {
+                      detailsFail(6, "no Run doctor button");
+                      return;
+                    }
+                    sendClick(doctor);
+                    waitUntil(
+                        []() {
+                          QLabel *l = labelContaining(currentDetail(), "Doctor: ");
+                          return l != nullptr && l->isVisible();
+                        },
+                        15000,
+                        [dir]() {
+                          std::fprintf(stderr, "sim details: PASS — %s\n",
+                                       qPrintable(labelContaining(currentDetail(), "Doctor: ")->text()));
+                          saveGrab(dir + "/detail-doctor.png");
+                          QLabel *check = findLabelByText("Check for update");
+                          if (!check) {
+                            detailsFail(7, "no Check for update button");
+                            return;
+                          }
+                          QString before = labelContaining(currentDetail(), "Latest: ")->text();
+                          sendClick(check);
+                          // The busy line shows while kpm runs; the check is done
+                          // when it is gone again.
+                          QTimer::singleShot(300, qApp, [dir, before]() {
+                            waitUntil([]() { return !labelContaining(currentDetail(), "Checking for an update"); },
+                                      120000,
+                                      [dir, before]() {
+                                        DetailDialog *d = currentDetail();
+                                        if (d == nullptr) {
+                                          detailsFail(9, "the check closed the detail page");
+                                          return;
+                                        }
+                                        QString after = labelContaining(d, "Latest: ")->text();
+                                        std::fprintf(stderr, "sim details: check done — '%s' -> '%s'\n",
+                                                     qPrintable(before), qPrintable(after));
+                                        saveGrab(dir + "/detail-check.png");
+                                        std::fprintf(stderr, "sim details: PASS\n");
+                                        qApp->exit(0);
+                                      },
+                                      []() { detailsFail(8, "check did not finish"); });
+                          });
+                        },
+                        []() { detailsFail(6, "no Doctor line after Run doctor"); });
+                  },
+                  []() { detailsFail(4, "detail page with info groups did not open"); });
+      },
+      []() { detailsFail(3, "timed out waiting for packages"); });
+}
+
+// ---- --exercise-detailcarry <dir> (round 2, test note 1) -----------------
+//
+// Combined test note 1: after Check for update the details page still said
+// "Carry-over to 6.x: not in the bundle", although the check built the bundle.
+// Runs with NKPM_KPM=fixture/carry-kpm.sh (run.sh): its check marks the bundle as
+// built, and its info then reports nickelnote in the bundle, 1.5 s late. Asserts
+// that the page shows the new Carry-over and Latest lines after Check, and that
+// it never shows the check result without them (one e-ink update). Exit 0 = PASS.
+static bool visibleLabelContaining(QWidget *root, const QString &text) {
+  if (root == nullptr) return false;
+  for (QLabel *l : root->findChildren<QLabel *>()) {
+    if (l->isVisible() && l->text().contains(text)) return true;
+  }
+  return false;
+}
+
+static void runExerciseDetailCarry(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+        waitUntil([]() { return currentDetail() != nullptr && labelContaining(currentDetail(), "On this device"); },
+                  10000,
+                  [dir]() {
+                    if (!visibleLabelContaining(currentDetail(), "Carry-over to 6.x: not in the bundle")) {
+                      detailsFail(5, "no 'not in the bundle' line at open");
+                      return;
+                    }
+                    saveGrab(dir + "/carry-open.png");
+                    QLabel *check = findLabelByText("Check for update");
+                    if (!check) {
+                      detailsFail(7, "no Check for update button");
+                      return;
+                    }
+                    sendClick(check);
+                    // Poll until the busy line goes. The first frame without it must
+                    // already carry the new lines.
+                    waitUntil([]() { return !visibleLabelContaining(currentDetail(), "Checking for an update"); }, 20000,
+                              [dir]() {
+                                DetailDialog *d = currentDetail();
+                                QString why;
+                                if (!visibleLabelContaining(d, "Carry-over to 6.x: in the bundle (v1.0.0)")) {
+                                  why += "no 'in the bundle (v1.0.0)' line; ";
+                                }
+                                if (visibleLabelContaining(d, "Carry-over to 6.x: not in the bundle")) {
+                                  why += "the old 'not in the bundle' line still shows; ";
+                                }
+                                if (!visibleLabelContaining(d, "Latest: v9.9.9")) why += "Latest is not v9.9.9; ";
+                                saveGrab(dir + "/carry-after-check.png");
+                                if (!why.isEmpty()) {
+                                  detailsFail(10, "after Check: " + why);
+                                  return;
+                                }
+                                std::fprintf(stderr, "sim detailcarry: PASS\n");
+                                qApp->exit(0);
+                              },
+                              []() { detailsFail(8, "check did not finish"); });
+                  },
+                  []() { detailsFail(4, "detail page with info groups did not open"); });
+      },
+      []() { detailsFail(3, "timed out waiting for packages"); });
+}
+
 static const char *kSimSSHPort = "52222";
 static const char *kSimSSHKey =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXjRvBuW0k5dGi1PmtqmH3A7quTrNfnBdqUmND7STII sim\n";
@@ -2207,6 +2584,174 @@ static void runExerciseSsh(const QString &dir) {
                   []() { sshFail(15, "the SSH page did not show"); });
       },
       []() { sshFail(3, "no rows"); });
+}
+
+// ---- --exercise-settings (EXCLUDE-SYNC.md section 5) ---------------------
+//
+// The "Hide in library" row against the real kpm. The sandbox gets a CRLF
+// Kobo eReader.conf without the key. Off is active; a tap on Dot folders runs
+// `kpm exclude-sync set dot-folders` and adds the key; a tap on Off runs
+// `kpm exclude-sync off` and gives back the exact first bytes.
+
+static const char *kSimNickelConf = "[General]\r\nfoo=1\r\n\r\n[FeatureSettings]\r\nOther=true\r\n";
+
+static QString simNickelConfPath() {
+  return QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.kobo/Kobo/Kobo eReader.conf";
+}
+
+static QByteArray readSandboxFile(const QString &path) {
+  QFile f(path);
+  if (!f.open(QIODevice::ReadOnly)) return QByteArray();
+  return f.readAll();
+}
+
+static void settingsFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim settings: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+static void runExerciseSettings(const QString &dir) {
+  QDir().mkpath(dir);
+  writeSandboxFile(simNickelConfPath(), QByteArray(kSimNickelConf));
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        SettingsPage *page = browse ? browse->findChild<SettingsPage *>() : nullptr;
+        QLabel *tab = browse ? labelIn(browse, "Settings") : nullptr;
+        if (!page || !tab) {
+          settingsFail(4, "no BrowseDialog, SettingsPage or Settings tab");
+          return;
+        }
+        QLabel *dot = page->findChild<QLabel *>("settingsDotFolders");
+        QLabel *off = page->findChild<QLabel *>("settingsSyncOff");
+        QLabel *note = page->findChild<QLabel *>("settingsSyncNote");
+        if (!dot || !off || !note) {
+          settingsFail(5, "no Hide in library row");
+          return;
+        }
+        sendClick(tab);
+        // Step 1: no key, so Off is active.
+        waitUntil([page, off]() { return page->isVisible() && tabActive(off); }, 10000,
+                  [page, dot, off, note, dir]() {
+                    QString why;
+                    if (tabActive(dot)) why += "Dot folders is active with no key; ";
+                    if (!note->text().contains("for example .adds")) why += "the note is not the Off text; ";
+                    if (!why.isEmpty()) {
+                      settingsFail(6, why);
+                      return;
+                    }
+                    saveGrab(dir + "/settings-sync-off.png");
+                    sendClick(dot);
+                    // Step 2: kpm writes the key; the row reads it back.
+                    waitUntil([dot, note]() { return tabActive(dot) && note->text().contains("apply the change"); }, 15000,
+                              [dot, off, note, dir]() {
+                                QByteArray conf = readSandboxFile(simNickelConfPath());
+                                QString why;
+                                if (!conf.contains("Other=true\r\nExcludeSyncFolders=((\\\\.(k|ko|")) {
+                                  why += "the conf has no preset line after Other=true: " + QString::fromUtf8(conf) + "; ";
+                                }
+                                if (tabActive(off)) why += "Off is still active; ";
+                                if (!note->text().contains("except .kobo")) why += "the note is not the preset text; ";
+                                if (!why.isEmpty()) {
+                                  settingsFail(7, why);
+                                  return;
+                                }
+                                saveGrab(dir + "/settings-sync-dot.png");
+                                sendClick(off);
+                                // Step 3: off gives back the first bytes.
+                                waitUntil([off]() { return tabActive(off); }, 15000,
+                                          [dot]() {
+                                            QByteArray conf = readSandboxFile(simNickelConfPath());
+                                            if (conf != QByteArray(kSimNickelConf) || tabActive(dot)) {
+                                              settingsFail(8, "Off did not give back the first conf: " +
+                                                                  QString::fromUtf8(conf));
+                                              return;
+                                            }
+                                            std::fprintf(stderr, "sim settings: PASS\n");
+                                            qApp->exit(0);
+                                          },
+                                          []() { settingsFail(9, "Off did not become active"); });
+                              },
+                              [note]() { settingsFail(10, "Dot folders did not become active: " + note->text()); });
+                  },
+                  []() { settingsFail(11, "the Settings page did not show with Off active"); });
+      },
+      []() { settingsFail(3, "no rows"); });
+}
+
+// ---- --exercise-tabwidth ------------------------------------------------
+//
+// Nickel gives a primaryButton a min-width (nickelstub.cc models it), so a short tab
+// label grew when it was the active tab. Its alignment rule also made a tab shrink the
+// first time it was active (left-aligned labels carry an indent). This taps each tab
+// in turn and asserts that no tab moves or resizes at a switch.
+static const char *const kTabNames[] = {"Mods", "Fonts", "Dictionaries", "SSH", "Settings"};
+
+// A failed step is recorded and the tour goes on, so one run measures every tab.
+static bool tabWidthFailed = false;
+
+static QString tabGeometry(BrowseDialog *browse) {
+  QString out;
+  for (const char *name : kTabNames) {
+    QLabel *t = labelIn(browse, name);
+    out += QStringLiteral("%1@%2+%3 ").arg(name).arg(t ? t->x() : -1).arg(t ? t->width() : -1);
+  }
+  return out.trimmed();
+}
+
+static void tabWidthStep(BrowseDialog *browse, const QString &dir, const QString &baseline, int step) {
+  // Mods last again: back to the tab the view opened on.
+  const char *name = step < 5 ? kTabNames[step] : "Mods";
+  QLabel *tab = labelIn(browse, name);
+  if (tab == nullptr) {
+    std::fprintf(stderr, "sim: FAIL - no %s tab\n", name);
+    qApp->exit(5);
+    return;
+  }
+  sendClick(tab);
+  waitUntil([tab]() { return tabActive(tab); }, 10000,
+            [browse, dir, baseline, step, name]() {
+              QTimer::singleShot(300, qApp, [browse, dir, baseline, step, name]() {
+                QString geo = tabGeometry(browse);
+                std::fprintf(stderr, "sim: %s active: %s\n", name, qPrintable(geo));
+                saveGrab(QStringLiteral("%1/tab-%2-%3.png").arg(dir).arg(step).arg(QString(name).toLower()));
+                if (geo != baseline) {
+                  std::fprintf(stderr, "sim: FAIL - the tabs moved or resized when %s became active\n", name);
+                  tabWidthFailed = true;
+                }
+                if (step < 5) {
+                  tabWidthStep(browse, dir, baseline, step + 1);
+                  return;
+                }
+                std::fprintf(stderr, "sim: %s --exercise-tabwidth\n", tabWidthFailed ? "FAIL" : "PASS");
+                qApp->exit(tabWidthFailed ? 6 : 0);
+              });
+            },
+            [name]() {
+              std::fprintf(stderr, "sim: FAIL - the %s tab did not become active\n", name);
+              qApp->exit(7);
+            });
+}
+
+static void runExerciseTabWidth(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        if (browse == nullptr) {
+          std::fprintf(stderr, "sim: FAIL - no BrowseDialog\n");
+          qApp->exit(4);
+          return;
+        }
+        QString baseline = tabGeometry(browse);
+        std::fprintf(stderr, "sim: on open (Mods active): %s\n", qPrintable(baseline));
+        saveGrab(dir + "/tab-0-mods.png");
+        tabWidthStep(browse, dir, baseline, 1);
+      },
+      []() {
+        std::fprintf(stderr, "sim: timed out waiting for packages\n");
+        qApp->exit(3);
+      });
 }
 
 // ---- --exercise-wake ----------------------------------------------------
@@ -2498,6 +3043,137 @@ static void runExerciseReload() {
       });
 }
 
+// ---- --exercise-pagesize (round 2, finding 2) ----------------------------
+//
+// Device finding (0.16.0-rc2): after a switch from the Settings or SSH page to a
+// list tab, the Mods list showed about 3 rows per page with empty space below.
+// Seeded with SEED_EXTRA_MODS (run.sh), so Mods spans more pages. Opens on Mods,
+// walks every page for the ids, then switches tabs in the order that reaches the
+// list from a page (Settings or SSH) with a different list kind active. After each
+// return to Mods: page 1 has the rows and the page total of the open state, and a
+// walk of all pages shows each id once. Exit 0 = PASS.
+static QList<PackageRow *> visibleRows(PagedStack *pages) {
+  QList<PackageRow *> out;
+  for (PackageRow *r : pages->findChildren<PackageRow *>()) {
+    if (r->isVisible()) out.append(r);
+  }
+  return out;
+}
+
+static void pageSizeFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim pagesize: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+// walkPages pages from page 1 to the last page and collects the ids it shows. It
+// calls done with the ids in page order, or with an empty list on a page fault.
+static void walkPages(PagedStack *pages, QStringList ids, std::function<void(QStringList)> done) {
+  for (PackageRow *r : visibleRows(pages)) ids.append(r->packageId());
+  QString lbl = pageLabelText(pages);
+  int at = lbl.indexOf(QStringLiteral(" of "));
+  int cur = at < 0 ? 1 : lbl.mid(5, at - 5).toInt();
+  if (at < 0 || cur >= totalFromLabel(lbl)) {
+    done(ids);
+    return;
+  }
+  QMetaObject::invokeMethod(pages, "next");
+  QTimer::singleShot(200, qApp, [pages, ids, done]() { walkPages(pages, ids, done); });
+}
+
+struct PageSizeBase {
+  int rows = 0;
+  QString label;
+  QStringList ids;
+};
+
+static void pageSizeStep(BrowseDialog *browse, PagedStack *pages, PageSizeBase base, int step) {
+  // Tab order: Settings -> Mods and SSH -> Mods with Fonts as the last list tab, and
+  // Settings -> Mods with Mods as the last list tab (no render).
+  static const char *const kSteps[] = {"Fonts", "Settings", "Mods", "Fonts", "SSH", "Mods", "Settings", "Mods"};
+  if (step >= int(sizeof(kSteps) / sizeof(kSteps[0]))) {
+    std::fprintf(stderr, "sim pagesize: PASS\n");
+    qApp->exit(0);
+    return;
+  }
+  const QString name = kSteps[step];
+  QLabel *tab = labelIn(browse, name);
+  if (tab == nullptr) {
+    pageSizeFail(4, "no tab " + name);
+    return;
+  }
+  sendClick(tab);
+  waitUntil([tab]() { return tabActive(tab); }, 10000,
+            [browse, pages, base, step, name]() {
+              QTimer::singleShot(300, qApp, [browse, pages, base, step, name]() {
+                if (name != "Mods") {
+                  pageSizeStep(browse, pages, base, step + 1);
+                  return;
+                }
+                // Settings -> Mods with Mods the last list tab does not render, so
+                // the list stays on the page of the last walk: go back to page 1.
+                while (!pageLabelText(pages).startsWith(QStringLiteral("Page 1 "))) {
+                  QString was = pageLabelText(pages);
+                  QMetaObject::invokeMethod(pages, "prev");
+                  if (pageLabelText(pages) == was) break;
+                }
+                int rows = visibleRows(pages).size();
+                QString lbl = pageLabelText(pages);
+                std::fprintf(stderr, "sim pagesize: step %d back on Mods: %d rows, '%s' (open: %d rows, '%s')\n",
+                             step, rows, qPrintable(lbl), base.rows, qPrintable(base.label));
+                saveGrab(QStringLiteral("%1/pagesize-step%2.png").arg(qgetenv("PAGESIZE_DIR").constData()).arg(step));
+                if (rows != base.rows || lbl != base.label) {
+                  pageSizeFail(5, QString("step %1: page 1 shows %2 rows '%3', the open state %4 rows '%5'")
+                                      .arg(step).arg(rows).arg(lbl).arg(base.rows).arg(base.label));
+                  return;
+                }
+                walkPages(pages, QStringList(), [browse, pages, base, step](QStringList ids) {
+                  if (ids != base.ids) {
+                    pageSizeFail(6, QString("step %1: the pages show %2 ids, the open state %3: %4")
+                                        .arg(step).arg(ids.size()).arg(base.ids.size()).arg(ids.join(",")));
+                    return;
+                  }
+                  pageSizeStep(browse, pages, base, step + 1);
+                });
+              });
+            },
+            [name]() { pageSizeFail(7, "the tab " + name + " did not become active"); });
+}
+
+static void runExercisePageSize(const QString &dir) {
+  QDir().mkpath(dir);
+  qputenv("PAGESIZE_DIR", dir.toLocal8Bit());
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        if (pages == nullptr) {
+          pageSizeFail(3, "no PagedStack");
+          return;
+        }
+        QTimer::singleShot(300, qApp, [browse, pages, dir]() {
+          PageSizeBase base;
+          base.rows = visibleRows(pages).size();
+          base.label = pageLabelText(pages);
+          saveGrab(dir + "/pagesize-open.png");
+          if (totalFromLabel(base.label) < 2) {
+            pageSizeFail(8, "need 2 or more Mods pages, got '" + base.label + "' (set SEED_EXTRA_MODS)");
+            return;
+          }
+          walkPages(pages, QStringList(), [browse, pages, base](QStringList ids) mutable {
+            base.ids = ids;
+            if (QSet<QString>(ids.begin(), ids.end()).size() != ids.size()) {
+              pageSizeFail(9, "an id shows twice at open: " + ids.join(","));
+              return;
+            }
+            std::fprintf(stderr, "sim pagesize: open: %d rows on page 1, '%s', %d mods\n", base.rows,
+                         qPrintable(base.label), int(ids.size()));
+            pageSizeStep(browse, pages, base, 0);
+          });
+        });
+      },
+      []() { pageSizeFail(3, "timed out waiting for packages"); });
+}
+
 // ---- --exercise-morerow -------------------------------------------------
 //
 // The More page row (hook/src/morerow.cc). A fake MoreView copies the shape of
@@ -2670,14 +3346,20 @@ int main(int argc, char **argv) {
   QString orphanDir;
   QString appTreeDir;
   QString tabsDir;
+  QString tabWidthDir;
   QString sshDirArg;
+  QString detailsDir;
   QString moreRowDir;
+  QString settingsDirArg;
+  QString pageSizeDir;
+  QString detailCarryDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
   bool exerciseInit = false;
   bool exerciseBadges = false;
   bool exerciseEnroll = false;
+  QString progressDir;
   bool exerciseReload = false;
   bool exerciseRowRepaint = false;
   bool sizeGiven = false;
@@ -2710,8 +3392,18 @@ int main(int argc, char **argv) {
       appTreeDir = args.at(++i);
     } else if (a == "--exercise-tabs" && i + 1 < args.size()) {
       tabsDir = args.at(++i);
+    } else if (a == "--exercise-tabwidth" && i + 1 < args.size()) {
+      tabWidthDir = args.at(++i);
     } else if (a == "--exercise-ssh" && i + 1 < args.size()) {
       sshDirArg = args.at(++i);
+    } else if (a == "--exercise-settings" && i + 1 < args.size()) {
+      settingsDirArg = args.at(++i);
+    } else if (a == "--exercise-details" && i + 1 < args.size()) {
+      detailsDir = args.at(++i);
+    } else if (a == "--exercise-detailcarry" && i + 1 < args.size()) {
+      detailCarryDir = args.at(++i);
+    } else if (a == "--exercise-pagesize" && i + 1 < args.size()) {
+      pageSizeDir = args.at(++i);
     } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
       moreRowDir = args.at(++i);
     } else if (a == "--exercise-sync") {
@@ -2726,6 +3418,8 @@ int main(int argc, char **argv) {
       exerciseBadges = true;
     } else if (a == "--exercise-enroll") {
       exerciseEnroll = true;
+    } else if (a == "--exercise-progress" && i + 1 < args.size()) {
+      progressDir = args.at(++i);
     }
   }
 
@@ -2760,8 +3454,20 @@ int main(int argc, char **argv) {
     runExerciseAppTree(appTreeDir);
   } else if (!tabsDir.isEmpty()) {
     runExerciseTabs(tabsDir);
+  } else if (!tabWidthDir.isEmpty()) {
+    runExerciseTabWidth(tabWidthDir);
   } else if (!sshDirArg.isEmpty()) {
     runExerciseSsh(sshDirArg);
+  } else if (!settingsDirArg.isEmpty()) {
+    runExerciseSettings(settingsDirArg);
+  } else if (!detailsDir.isEmpty()) {
+    runExerciseDetails(detailsDir);
+  } else if (!progressDir.isEmpty()) {
+    runExerciseProgress(progressDir);
+  } else if (!detailCarryDir.isEmpty()) {
+    runExerciseDetailCarry(detailCarryDir);
+  } else if (!pageSizeDir.isEmpty()) {
+    runExercisePageSize(pageSizeDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

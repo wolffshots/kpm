@@ -318,10 +318,13 @@ func MinKpmSatisfied(running, required string) bool {
 	if strings.TrimSpace(required) == "" {
 		return true
 	}
-	return compareVersions(running, required) >= 0
+	return CompareVersions(running, required) >= 0
 }
 
-func compareVersions(a, b string) int {
+// CompareVersions compares two dotted-numeric versions (section 9.8): -1, 0
+// or 1. A single leading "v" is stripped and a non-numeric segment counts as
+// 0, so "0.16.0-rc2" and "0.16.0" compare equal.
+func CompareVersions(a, b string) int {
 	as, bs := versionParts(a), versionParts(b)
 	n := len(as)
 	if len(bs) > n {
