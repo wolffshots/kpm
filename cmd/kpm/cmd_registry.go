@@ -289,6 +289,7 @@ func (a *App) cmdRegistryRefresh(args []string) int {
 	refreshed := []jsonRefreshed{}
 	regFailed := []jsonRegFailure{}
 	a.prog.AddSteps(len(targets))
+	a.prog.SetNext(a.progressNextSteps())
 	for _, r := range targets {
 		a.prog.Step("Updating package list " + r.Name)
 		if err := a.refreshOne(r); err != nil {

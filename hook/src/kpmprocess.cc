@@ -91,7 +91,9 @@ KpmProcess *KpmProcess::check() { return start({"check", "--json"}, true, true);
 KpmProcess *KpmProcess::info(const QString &id) { return start({"info", id, "--json"}, false, false); }
 KpmProcess *KpmProcess::checkOne(const QString &id) { return start({"check", id, "--json"}, true, true); }
 KpmProcess *KpmProcess::doctor(const QString &id) { return start({"doctor", id, "--json"}, false, false); }
-KpmProcess *KpmProcess::registryRefresh() { return start({"registry", "refresh", "--json"}, true, true); }
+// Refresh runs check after it: kpm counts the check steps in "next", so the
+// view shows one step count for both runs (kpm-progress.md).
+KpmProcess *KpmProcess::registryRefresh() { return start({"registry", "refresh", "--json"}, true, true, true, "check"); }
 KpmProcess *KpmProcess::install(const QString &id) { return start({"install", id, "--yes", "--json"}, true, true); }
 // NICKEL-UI.md §6: `kpm update` is already non-interactive and has no --yes flag,
 // so we pass only --json (passing --yes would be an "unknown flag" error).
@@ -169,19 +171,21 @@ KpmProcess *KpmProcess::configDeleteLine(const QString &id, const QString &selec
 
 bool KpmProcess::busy() { return s_mutatingInFlight; }
 
-KpmProcess *KpmProcess::start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload) {
+KpmProcess *KpmProcess::start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload,
+                              QString progressNext) {
   if (mutating && s_mutatingInFlight) {
     nh_log("KpmProcess: refusing to start a second mutating command");
     return nullptr;
   }
-  return new KpmProcess(arguments, needsNetwork, mutating, expectsPayload);
+  return new KpmProcess(arguments, needsNetwork, mutating, expectsPayload, progressNext);
 }
 
 // ---- lifecycle + Wi-Fi gate (copied from cli.cc) ------------------------
 
-KpmProcess::KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload, QObject *parent)
+KpmProcess::KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload,
+                       QString progressNext, QObject *parent)
     : QObject(parent), arguments(arguments), needsNetwork(needsNetwork), mutating(mutating),
-      expectsPayload(expectsPayload) {
+      expectsPayload(expectsPayload), progressNext(progressNext) {
   if (mutating) {
     s_mutatingInFlight = true;
   }
@@ -316,6 +320,9 @@ void KpmProcess::networkConnected() {
   // ignores the variable, and the views then show only their own step text.
   QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
   env.insert("KPM_PROGRESS", "1");
+  if (!progressNext.isEmpty()) {
+    env.insert("KPM_PROGRESS_NEXT", progressNext);
+  }
   process->setProcessEnvironment(env);
 
   process->start(Files::kpm, arguments);

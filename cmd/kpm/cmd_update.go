@@ -169,7 +169,20 @@ func (a *App) cmdUpdate(args []string) int {
 	// merged KoboRoot.tgz — the normal new-device "Update all" sequence, which
 	// defeated feature B entirely.
 	staging := map[string]bool{}
-	a.prog.AddSteps(len(pkgs))
+	// The progress plan, counted before the first step so the total does not
+	// change while the run goes: a step per package, one install step when a
+	// package installs live, one staging step when a package is a tgz, and the
+	// bundle refresh after the run. An install or staging step that the run
+	// does not need is passed over (kpm-progress.md, "Steps per command").
+	installStep, stageStep := 0, 0
+	for _, p := range pkgs {
+		if p.ForLine(a.paths.Line()).InstallsLive() {
+			installStep = 1
+		} else {
+			stageStep = 1
+		}
+	}
+	a.prog.AddSteps(len(pkgs) + installStep + stageStep + a.carryoverSteps("update", ""))
 	for _, p := range pkgs {
 		a.prog.Step("Checking " + p.ID)
 		r, app, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
@@ -219,7 +232,6 @@ func (a *App) cmdUpdate(args []string) int {
 	appPartial := false
 	if len(appTargets) > 0 {
 		var appFailures []jsonFailure
-		a.prog.AddSteps(1)
 		if len(appTargets) == 1 {
 			a.prog.Step("Installing " + appTargets[0].pkg.ID)
 		} else {
@@ -363,7 +375,9 @@ func (a *App) cmdUpdate(args []string) int {
 		a.paths.WriteStatus("kpm: refusing to stage — " + err.Error())
 		return exitError
 	}
-	a.prog.AddSteps(1)
+	if installStep == 1 && len(appTargets) == 0 {
+		a.prog.Skip()
+	}
 	a.prog.Step("Staging KoboRoot.tgz")
 	part, sum, size, dups, err := a.mergeStaged(targets)
 	if err != nil {

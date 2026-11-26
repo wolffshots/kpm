@@ -113,10 +113,14 @@ public Q_SLOTS:
   void flushProgress();
 
 private:
-  KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload, QObject *parent = nullptr);
+  KpmProcess(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload, QString progressNext,
+             QObject *parent = nullptr);
   ~KpmProcess();
 
-  static KpmProcess *start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload = true);
+  // progressNext names the kpm command the caller runs after this one
+  // (KPM_PROGRESS_NEXT), so kpm counts its steps in the progress lines.
+  static KpmProcess *start(QStringList arguments, bool needsNetwork, bool mutating, bool expectsPayload = true,
+                           QString progressNext = QString());
 
   void showIcon(const char *path);
   void finish();
@@ -144,6 +148,7 @@ private:
   // there, exit 0 with no BEGIN_JSON marker is success rather than a protocol
   // violation. True for all fourteen --json commands, which keep the strict rule.
   bool expectsPayload;
+  QString progressNext;
 
   QLabel *icon = nullptr;
   QTimer *timer = nullptr;    // Wi-Fi connect timeout

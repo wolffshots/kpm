@@ -41,6 +41,10 @@ type progressLine struct {
 	Done  int64  `json:"done"`
 	Total int64  `json:"total"`
 	Unit  string `json:"unit"`
+	// Next is the step count of the commands the caller runs after this one
+	// (KPM_PROGRESS_NEXT), so a chained action shows one total from its first
+	// line. Absent when the caller named no next command.
+	Next int `json:"next,omitempty"`
 }
 
 // newProgress returns the progress writer of this run, or nil when the caller
@@ -52,7 +56,9 @@ func newProgress() *progress {
 	return &progress{w: os.Stdout, now: time.Now, shown: -1}
 }
 
-// AddSteps adds n steps to the step count. The count never gets smaller.
+// AddSteps adds n steps to the step count. The count never gets smaller. A
+// command adds its whole plan before its first step, so the count it shows
+// does not change while it runs (kpm-progress.md, "Steps per command").
 func (p *progress) AddSteps(n int) {
 	if p == nil {
 		return
@@ -60,6 +66,43 @@ func (p *progress) AddSteps(n int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.line.Steps += n
+}
+
+// Skip passes over a planned step that the run does not need, with no line.
+func (p *progress) Skip() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.line.Step++
+}
+
+// Tail starts the last n steps of the plan: the next Step is number
+// steps-n+1, so the planned steps that the run did not need are passed over.
+// When the plan has fewer than n steps left (a command that did not plan
+// them), the count grows to fit.
+func (p *progress) Tail(n int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.line.Steps-p.line.Step >= n {
+		p.line.Step = p.line.Steps - n
+	} else {
+		p.line.Steps = p.line.Step + n
+	}
+}
+
+// SetNext sets the step count of the commands that come after this one.
+func (p *progress) SetNext(n int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.line.Next = n
 }
 
 // Step starts the next step with its text.
@@ -173,6 +216,27 @@ func (a *App) waitForNetwork(host string) bool {
 	mu.Unlock()
 	t.Stop()
 	return ok
+}
+
+// checkSteps is the progress plan of check: its own step and the steps of the
+// bundle refresh after it.
+func (a *App) checkSteps() int {
+	return 1 + a.carryoverSteps("check", "")
+}
+
+// progressNextSteps returns the step count of the command that the caller
+// runs after this one, from KPM_PROGRESS_NEXT. The hook's Refresh runs
+// `registry refresh` with KPM_PROGRESS_NEXT=check, and then check. 0 when the
+// variable names no command that kpm knows.
+func (a *App) progressNextSteps() int {
+	if a.prog == nil {
+		return 0
+	}
+	switch os.Getenv("KPM_PROGRESS_NEXT") {
+	case "check":
+		return a.checkSteps()
+	}
+	return 0
 }
 
 // networkNoteAfter is how long a network wait runs before kpm reports it.

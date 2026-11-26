@@ -123,7 +123,8 @@ private:
   N3ButtonLabel *updateAllButton = nullptr;
   // The footer progress text (kpm-progress.md). running is true while it shows.
   // stepBase is the step count of the finished commands of a chained action,
-  // stepsAhead the commands still to come, lastSteps the count of the running one.
+  // stepsAhead the steps still to come after the running command (kpm "next",
+  // else 1 per command), lastSteps the count of the running one.
   Label *progressLabel = nullptr;
   bool running = false;
   int stepBase = 0;

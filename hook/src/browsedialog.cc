@@ -233,12 +233,19 @@ void BrowseDialog::onSearch(int exitCode, QJsonObject payload) {
 void BrowseDialog::onRefreshDone(int exitCode, QJsonObject payload) {
   (void)exitCode;
   (void)payload;
-  // The next command continues the step numbers (kpm-progress.md). The text is
-  // what an older kpm with no progress lines keeps showing.
-  stepBase += qMax(lastSteps, 1);
+  // The next command continues the step numbers (kpm-progress.md). The text
+  // shows until check reports. stepsAhead is the check plan that registry
+  // refresh reported in "next", so the count stays. A kpm with no progress
+  // lines gets no step numbers, and a kpm with no "next" keeps the count it
+  // showed (1 step ahead).
+  QString text = QStringLiteral("Checking for updates");
+  if (lastSteps > 0) {
+    stepBase += lastSteps;
+    text = QString("Step %1 of %2: %3").arg(stepBase + 1).arg(stepBase + qMax(stepsAhead, 1)).arg(text);
+  }
   stepsAhead = 0;
   lastSteps = 0;
-  progressLabel->setText(QString("Step %1 of %1: Checking for updates").arg(stepBase + 1));
+  progressLabel->setText(text);
   // Registry cache refreshed; reload the list, then run check to merge latest.
   loadSearch(true);
 }
@@ -400,7 +407,9 @@ void BrowseDialog::refresh() {
     return;
   }
   skipNotes.clear(); // a new gesture: the last run's skips are no longer the news
-  startProgress("Step 1 of 2: Updating package lists", 1);
+  // No step count before kpm reports it: registry refresh counts its own
+  // steps and the check steps after it.
+  startProgress("Updating package lists", 1);
   setActionsEnabled(false);
   QObject::connect(p, &KpmProcess::progress, this, &BrowseDialog::onProgress);
   QObject::connect(p, &KpmProcess::response, this, &BrowseDialog::onRefreshDone);
@@ -455,6 +464,9 @@ void BrowseDialog::startProgress(const QString &text, int commandsAhead) {
 
 void BrowseDialog::onProgress(QJsonObject line) {
   lastSteps = qMax(lastSteps, line.value("steps").toInt());
+  if (line.contains("next")) {
+    stepsAhead = line.value("next").toInt(); // the steps of the next command
+  }
   progressLabel->setText(KpmProcess::progressText(line, stepBase, stepsAhead));
 }
 

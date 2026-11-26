@@ -103,7 +103,7 @@ func (a *App) cmdCheck(args []string) int {
 	}
 	// The release lookups — the only network work here — run concurrently and
 	// bounded; everything below stays exactly as it was, in pkgs order.
-	a.prog.AddSteps(1)
+	a.prog.AddSteps(a.checkSteps())
 	a.prog.Step("Checking for updates")
 	fetched := a.prefetchReleases(todo)
 	for i, p := range todo {
