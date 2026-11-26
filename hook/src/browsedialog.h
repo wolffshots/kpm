@@ -14,6 +14,7 @@
 #include "widgets/pagedstack.h"
 
 class DetailDialog;
+class Label;
 class QVBoxLayout;
 class SettingsPage;
 class SshPage;
@@ -35,6 +36,8 @@ public Q_SLOTS:
   void onCheckDone(int exitCode, QJsonObject payload);
   void onActionDone(int exitCode, QJsonObject payload);
   void onProcessFailure(QString reason);
+  // onProgress shows one kpm progress line in the footer (kpm-progress.md).
+  void onProgress(QJsonObject line);
 
   void refresh();
   void sync();
@@ -63,6 +66,10 @@ private:
   // miss rather than no-oping, and closing the source view only when the route
   // actually went somewhere (INTEGRITY.md §4 — see browsedialog.cc).
   void openConflictPackage(DetailDialog *from, const QString &id);
+  // openDetailFrom loads `kpm info` and then opens the detail view (showDetail),
+  // closing `from` after it when set (kpm-pkg-details).
+  void openDetailFrom(const QString &id, DetailDialog *from);
+  void showDetail(const QString &id, const QJsonObject &info);
   void loadSearch(bool thenCheck);
   // allowInPlace enables flash-reduction win 4 (repaint only the changed rows).
   // Passed true only by the callers whose data is a fresh kpm payload.
@@ -71,6 +78,11 @@ private:
   void mergeCheck(const QJsonArray &checkPackages);
   bool registriesStale() const;
   void setActionsEnabled(bool enabled);
+  // startProgress sets the footer text an action shows before kpm reports, and
+  // how many kpm commands come after this one (Refresh: check). showProgress
+  // swaps the footer buttons for that text while an action runs.
+  void startProgress(const QString &text, int commandsAhead);
+  void showProgress(bool on);
   QList<QJsonObject> filteredPackages() const;
   // packageIndex maps id -> package object over the whole list, so a detail view can
   // describe a package it does not hold: the blocker's display name on the button,
@@ -109,6 +121,14 @@ private:
   N3ButtonLabel *refreshButton = nullptr;
   N3ButtonLabel *syncButton = nullptr;
   N3ButtonLabel *updateAllButton = nullptr;
+  // The footer progress text (kpm-progress.md). running is true while it shows.
+  // stepBase is the step count of the finished commands of a chained action,
+  // stepsAhead the commands still to come, lastSteps the count of the running one.
+  Label *progressLabel = nullptr;
+  bool running = false;
+  int stepBase = 0;
+  int stepsAhead = 0;
+  int lastSteps = 0;
 
   QJsonArray allPackages;
   QJsonObject stagedSummary;
@@ -132,6 +152,9 @@ private:
   bool kpmMissing = false;
   bool dataReady = false;
   bool laidOut = false;
+  // detailPending is true while `kpm info` runs for a tapped row, so a second
+  // tap does not open a second detail view (openDetailFrom).
+  bool detailPending = false;
   bool pendingCheck = false;
   // The page-1 banner/hint states the last render actually drew (win 4): a flip in
   // either can only be applied by rebuilding page 1, so the in-place path checks

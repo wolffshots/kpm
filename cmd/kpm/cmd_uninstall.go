@@ -131,6 +131,8 @@ func (a *App) cmdUninstall(args []string) int {
 		}
 	}
 
+	a.prog.AddSteps(1)
+	a.prog.Step("Removing " + id)
 	res := uninstall.Execute(a.paths, plan)
 
 	// run_after: non-fatal (§3).

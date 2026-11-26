@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"kpm/internal/config"
-	"kpm/internal/device"
 	"kpm/internal/forge"
 	"kpm/internal/state"
 )
@@ -22,8 +22,8 @@ func (a *App) cmdCheck(args []string) int {
 	if err := fs.Parse(flags); err != nil {
 		return exitError
 	}
-	if len(pos) > 0 {
-		fmt.Fprintln(os.Stderr, "usage: kpm check [--notify] [--json]")
+	if len(pos) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: kpm check [<id>] [--notify] [--json]")
 		return exitError
 	}
 	n := notifier{on: *notify}
@@ -45,11 +45,33 @@ func (a *App) cmdCheck(args []string) int {
 		return exitOK
 	}
 
+	// An id checks that package only (the Check button of the UI detail page).
+	// The status file still describes every package, so only the checked set
+	// is narrowed.
+	checkSet := pkgs
+	if len(pos) == 1 {
+		checkSet = nil
+		for _, p := range pkgs {
+			if p.ID == pos[0] {
+				checkSet = []*config.Package{p}
+				break
+			}
+		}
+		if checkSet == nil {
+			msg := fmt.Sprintf("package %q not registered", pos[0])
+			if jsonMode {
+				jsonError(msg)
+			}
+			fmt.Fprintln(os.Stderr, "kpm check:", msg)
+			return exitError
+		}
+	}
+
 	n.toast("kpm: checking for updates…")
 
 	// Wait for connectivity against the first configured package's forge host.
-	if host := a.firstConfiguredHost(pkgs); host != "" {
-		if !device.WaitForNetwork(a.client.HTTP(), host) {
+	if host := a.firstConfiguredHost(checkSet); host != "" {
+		if !a.waitForNetwork(host) {
 			msg := "kpm: no network — check Wi-Fi and retry"
 			a.paths.WriteStatus(msg)
 			a.paths.Log("CHECK", "aborted: no network")
@@ -72,8 +94,8 @@ func (a *App) cmdCheck(args []string) int {
 	// are checked with the source, forge and asset of the line
 	// (QT6-FIRMWARE6.md section 3c).
 	line := a.paths.Line()
-	todo := make([]*config.Package, 0, len(pkgs))
-	for _, p := range pkgs {
+	todo := make([]*config.Package, 0, len(checkSet))
+	for _, p := range checkSet {
 		if a.configured(p) && p.AvailableOn(line) {
 			lp := p.ForLine(line)
 			todo = append(todo, &lp)
@@ -81,6 +103,8 @@ func (a *App) cmdCheck(args []string) int {
 	}
 	// The release lookups — the only network work here — run concurrently and
 	// bounded; everything below stays exactly as it was, in pkgs order.
+	a.prog.AddSteps(1)
+	a.prog.Step("Checking for updates")
 	fetched := a.prefetchReleases(todo)
 	for i, p := range todo {
 		rel, err := fetched[i].rel, fetched[i].err
@@ -135,7 +159,11 @@ func (a *App) cmdCheck(args []string) int {
 			Update: avail, Pinned: ptr(pin), Error: nil,
 		})
 	}
-	a.state.LastCheck = now
+	// last_check means "all packages were checked". A one-package check sets
+	// only the last_checked of that package (above).
+	if len(pos) == 0 {
+		a.state.LastCheck = now
+	}
 	if err := a.state.Save(); err != nil {
 		if jsonMode {
 			jsonError("state: " + err.Error())
@@ -268,6 +296,7 @@ func (a *App) prefetchReleases(pkgs []*config.Package) []checkResult {
 		targets[i] = a.checkTargetFor(p)
 	}
 	out := make([]checkResult, len(pkgs))
+	var done atomic.Int32 // lookups finished, for the progress line
 	sem := make(chan struct{}, checkConcurrency)
 	var wg sync.WaitGroup
 	for i := range pkgs {
@@ -277,6 +306,7 @@ func (a *App) prefetchReleases(pkgs []*config.Package) []checkResult {
 			defer wg.Done()
 			defer func() { <-sem }()
 			out[i].rel, out[i].err = targets[i].resolve()
+			a.prog.Items(int(done.Add(1)), len(pkgs))
 		}(i)
 	}
 	wg.Wait()
