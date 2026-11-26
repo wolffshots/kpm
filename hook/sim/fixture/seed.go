@@ -82,6 +82,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"kpm/internal/config"
@@ -427,6 +428,16 @@ func main() {
 	// Registry config + cache (the registered, browsable packages).
 	must(os.WriteFile(p.ConfigFile(), []byte(registryConfig), 0o644))
 	must(os.WriteFile(p.RegistryCache("main"), []byte(registryCache), 0o644))
+	// SEED_EXTRA_MODS=N adds N plain, not installed mods to the registry, so the
+	// Mods list spans more than one page at the default size (--exercise-pagesize).
+	if n, _ := strconv.Atoi(os.Getenv("SEED_EXTRA_MODS")); n > 0 {
+		extra := ""
+		for i := 1; i <= n; i++ {
+			extra += fmt.Sprintf("\n[packages.extramod-%02d]\nname = \"Extra mod %02d\"\nsource = \"github.com/o/extramod-%02d\"\n"+
+				"forge = \"github\"\nasset = \"KoboRoot.tgz\"\ndescription = \"A filler mod for the page size check.\"\n", i, i, i)
+		}
+		appendRaw(p.RegistryCache("main"), extra)
+	}
 
 	// samplemod: an installed, manifest-uninstallable package (the uninstall
 	// target). Written as a packages.d def + state manifest + a real file under
@@ -630,7 +641,14 @@ func main() {
 	}
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
-	sm.Manifest = []string{manifestPath}
+	// The missing files are in the manifest too, as on a device: read-only
+	// commands verify MissingFiles against the manifest (reverifyMissing), and
+	// a path outside it would clear the badge.
+	sm.Manifest = []string{
+		manifestPath,
+		"usr/local/Kobo/imageformats/libsamplemod.so",
+		"usr/local/samplemod/data.bin",
+	}
 	sm.SyncedDefSHA256 = oldSampleHash
 	// MissingFiles (A): seeded DIRECTLY — on-device kpm computes this at the
 	// staged->installed flip, but the sim never boots rcS, so seed the field the
