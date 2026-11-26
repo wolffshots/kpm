@@ -3,16 +3,22 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"kpm/internal/device"
 )
 
-// wikiHides is the KOReader wiki value (\.(?!kobo|adobe).+|([^.][^/]*/)+\..+)
-// written out by hand, because Go's regexp has no lookahead. p is the folder
-// path after /mnt/onboard/.
-func wikiHides(p string) bool {
-	if len(p) > 1 && p[0] == '.' && !strings.HasPrefix(p[1:], "kobo") && !strings.HasPrefix(p[1:], "adobe") {
-		return true
+// wikiFull is the KOReader wiki value (\.(?!kobo|adobe).+|([^.][^/]*/)+\..+)
+// as a full match of p, case-insensitive, written out by hand because Go's
+// regexp has no lookahead. p is the folder path after /mnt/onboard/.
+func wikiFull(p string) bool {
+	if len(p) > 1 && p[0] == '.' {
+		rest := strings.ToLower(p[1:])
+		if !strings.HasPrefix(rest, "kobo") && !strings.HasPrefix(rest, "adobe") {
+			return true
+		}
 	}
 	// ([^.][^/]*/)+ then \..+ : one or more visible components, then a rest
 	// that starts with a dot and has one more character at least.
@@ -30,17 +36,37 @@ func wikiHides(p string) bool {
 	return false
 }
 
-// TestPresetDotFoldersMatchesWiki: on each folder that Nickel visits (no
-// parent folder is hidden), the kpm preset hides exactly what the wiki value
-// hides.
-func TestPresetDotFoldersMatchesWiki(t *testing.T) {
-	re, err := nickelMatcher(presetDotFolders)
-	if err != nil {
-		t.Fatal(err)
+// wikiHides applies the wiki value with Nickel's template (nickelTemplate):
+// on line 4 the value may match the path up to a "/", on line 6 it must match
+// the whole path.
+func wikiHides(p string, line int) bool {
+	if line == device.Line6 {
+		return wikiFull(p)
 	}
+	comps := strings.Split(p, "/")
+	for i := 1; i <= len(comps); i++ {
+		if wikiFull(strings.Join(comps[:i], "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func presetMatcher(t *testing.T, line int) *regexp.Regexp {
+	t.Helper()
+	res, bad := nickelMatchers(presetDotFolders, line)
+	if len(res) != 1 || bad != 0 {
+		t.Fatalf("preset: %d patterns, %d untestable", len(res), bad)
+	}
+	return res[0]
+}
+
+// TestPresetDotFoldersMatchesWiki: with Nickel's template of each firmware
+// line, the kpm preset hides exactly the folders that the wiki value hides.
+func TestPresetDotFoldersMatchesWiki(t *testing.T) {
 	names := []string{"Books", "x.y", "a", "k", ".adds", ".kobo", ".kobo-images", ".kobox", ".kob", ".kobx",
 		".k", ".ko", ".kx", ".adobe", ".adobe-digital-editions", ".adob", ".adobx", ".a", ".ad", ".x",
-		".calibre", ".Kobo", "..", ".a.b"}
+		".calibre", ".Kobo", ".ADOBE", ".K", "..", ".a.b", "kpm"}
 	var paths []string
 	for _, a := range names {
 		paths = append(paths, a)
@@ -51,48 +77,51 @@ func TestPresetDotFoldersMatchesWiki(t *testing.T) {
 			}
 		}
 	}
-	checked := 0
-	for _, p := range paths {
-		visited := true
-		comps := strings.Split(p, "/")
-		for i := 1; i < len(comps); i++ {
-			if wikiHides(strings.Join(comps[:i], "/")) {
-				visited = false
-				break
+	for _, line := range []int{device.Line4, device.Line6} {
+		re := presetMatcher(t, line)
+		for _, p := range paths {
+			if got, want := re.MatchString(nickelMountPrefix+p), wikiHides(p, line); got != want {
+				t.Errorf("line %d, %s: preset hides=%v, wiki hides=%v", line, p, got, want)
 			}
 		}
-		if !visited {
-			continue
-		}
-		checked++
-		if got, want := re.MatchString(nickelMountPrefix+p), wikiHides(p); got != want {
-			t.Errorf("%s: preset hides=%v, wiki hides=%v", p, got, want)
-		}
-	}
-	if checked < 1000 {
-		t.Fatalf("only %d paths checked", checked)
 	}
 }
 
 // TestPresetDotFoldersCases names the folders that matter on a real device.
 func TestPresetDotFoldersCases(t *testing.T) {
-	re, err := nickelMatcher(presetDotFolders)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for p, hidden := range map[string]bool{
-		".adds": true, ".calibre": true, "Books/.covers": true, "Books/a/.x": true,
-		".kobo": false, ".kobo-images": false, ".adobe-digital-editions": false,
-		"Books": false, "Books/a": false, "fonts": false, "Books/a.b": false,
-	} {
-		if got := re.MatchString(nickelMountPrefix + p); got != hidden {
-			t.Errorf("%s: hidden=%v, want %v", p, got, hidden)
+	for _, line := range []int{device.Line4, device.Line6} {
+		re := presetMatcher(t, line)
+		for p, hidden := range map[string]bool{
+			".adds": true, ".adds/kpm": true, ".adds/kpm/cache": true, ".calibre": true,
+			"Books/.covers": true, "Books/a/.x": true, "Books/.covers/x": true,
+			".kobo": false, ".kobo/kepub": false, ".kobo-images": false, ".adobe-digital-editions": false,
+			".Kobo": false, ".KOBO/kepub": false, ".ADDS": true, "Books/.Covers": true, "Books": false, "Books/a": false, "fonts": false, "Books/a.b": false,
+		} {
+			if got := re.MatchString(nickelMountPrefix + p); got != hidden {
+				t.Errorf("line %d, %s: hidden=%v, want %v", line, p, got, hidden)
+			}
 		}
 	}
-	// QSettings reads a "," outside quotes as a list separator, and the value
-	// must not need quotes.
+	// Nickel splits the value on ";", QSettings reads a "," outside quotes as a
+	// list separator, and the value must not need quotes.
 	if strings.ContainsAny(presetDotFolders, `,;"`) {
-		t.Error("the preset holds a character that needs QSettings quotes")
+		t.Error("the preset holds a character that breaks the value")
+	}
+}
+
+// TestNickelMatchersSplit: each ";" item is its own pattern, and an item that
+// Go cannot compile is counted, not dropped in silence.
+func TestNickelMatchersSplit(t *testing.T) {
+	res, bad := nickelMatchers(`\.calibre;;(?!x)y;Books/old`, device.Line4)
+	if len(res) != 2 || bad != 1 {
+		t.Fatalf("%d patterns, %d untestable", len(res), bad)
+	}
+	if !res[0].MatchString("/mnt/onboard/.Calibre/x") || res[0].MatchString("/mnt/onboard/a/.calibre") {
+		t.Error("line 4: the item matches from the root, up to a folder boundary, case-insensitive")
+	}
+	res6, _ := nickelMatchers(`\.calibre`, device.Line6)
+	if res6[0].MatchString("/mnt/onboard/.calibre/x") || !res6[0].MatchString("/mnt/onboard/.calibre") {
+		t.Error("line 6: the item must match the whole path")
 	}
 }
 
@@ -217,7 +246,7 @@ func TestExcludeSyncMergesCustom(t *testing.T) {
 	if code := a.cmdExcludeSync([]string{"set", "dot-folders"}); code != exitOK {
 		t.Fatalf("set exit %d", code)
 	}
-	merged := qsettingsEscape(`((\.(?!kobo|adobe).+)|` + presetDotFolders + `)`)
+	merged := qsettingsEscape(`(\.(?!kobo|adobe).+);` + presetDotFolders)
 	if !strings.Contains(readFile(t, conf), "ExcludeSyncFolders="+merged+"\r\n") {
 		t.Fatalf("merged conf:\n%s", readFile(t, conf))
 	}

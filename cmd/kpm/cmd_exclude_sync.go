@@ -32,26 +32,40 @@ const (
 	excludeSyncKey     = "ExcludeSyncFolders"
 )
 
-// presetDotFolders hides each folder whose name starts with a dot, except a
-// top-level folder whose name starts with ".kobo" or ".adobe" (purchased books
-// are in .kobo/kepub). It has the scope of the KOReader wiki value
-// (\.(?!kobo|adobe).+|([^.][^/]*/)+\..+), but without lookahead, so Go's
-// regexp evaluates it exactly as Nickel's PCRE does. Nickel matches the value
-// against the folder path after "/mnt/onboard/", anchored at both ends.
+// presetDotFolders hides each folder whose name starts with a dot, and all
+// folders below it, except a top-level folder whose name starts with ".kobo"
+// or ".adobe" (purchased books are in .kobo/kepub). It has the scope of the
+// KOReader wiki value (\.(?!kobo|adobe).+|([^.][^/]*/)+\..+), but without
+// lookahead, so Go's regexp evaluates it exactly as Nickel's PCRE does.
 //
 // The first alternative is a top-level dot folder: the name after the dot is
 // a strict prefix of "kobo" or "adobe", or it differs from both prefixes at
 // some letter. The second is a dot folder below a visible top-level folder.
-// The value has no ",", ";" or quote, so QSettings needs no quotes for it.
-const presetDotFolders = `(\.(k|ko|kob|a|ad|ado|adob|[^ka/][^/]*|k[^o/][^/]*|ko[^b/][^/]*|kob[^o/][^/]*|a[^d/][^/]*|ad[^o/][^/]*|ado[^b/][^/]*|adob[^e/][^/]*)|[^./][^/]*/([^/]*/)*\.[^/]+)`
+// The tail "(/.*)?" covers the folders below, because firmware 5.x and 6.x
+// match the whole path (nickelTemplate). The value has no ",", ";" or quote:
+// Nickel splits the value on ";", and QSettings needs no quotes for it.
+const presetDotFolders = `((\.(k|ko|kob|a|ad|ado|adob|[^ka/][^/]*|k[^o/][^/]*|ko[^b/][^/]*|kob[^o/][^/]*|a[^d/][^/]*|ad[^o/][^/]*|ado[^b/][^/]*|adob[^e/][^/]*)|[^./][^/]*/([^/]*/)*\.[^/]+)(/.*)?)`
 
 // excludeSyncPresets maps a preset name to its regular expression (unescaped).
 var excludeSyncPresets = map[string]string{
 	"dot-folders": presetDotFolders,
 }
 
-// nickelMountPrefix is the path Nickel puts in front of the value.
+// nickelMountPrefix is the folder path of the user partition. kpm tests
+// folder paths with it.
 const nickelMountPrefix = "/mnt/onboard/"
+
+// nickelTemplate is the pattern that Nickel builds for each ";" item of the
+// value, from SyncFileSystemCommand::findFilesToParse (EXCLUDE-SYNC.md section
+// 2): "^/mnt/(sd|onboard)/%1(/|$)" on firmware 4.46, "^/mnt/(sd|onboard)/%1$"
+// on 5.18 and 6.0. Nickel sets the case-insensitive option.
+func nickelTemplate(item string, line int) string {
+	tail := "(/|$)"
+	if line == device.Line6 {
+		tail = "$"
+	}
+	return "(?i)^/mnt/(sd|onboard)/" + item + tail
+}
 
 // The sources of the current value.
 const (
@@ -127,10 +141,22 @@ func qsettingsUnescape(raw string) (string, bool) {
 	return b.String(), true
 }
 
-// nickelMatcher compiles a value the way Nickel applies it. It fails for a
-// value that Go's regexp cannot compile, for example one with lookahead.
-func nickelMatcher(value string) (*regexp.Regexp, error) {
-	return regexp.Compile("^" + regexp.QuoteMeta(nickelMountPrefix) + "(?:" + value + ")$")
+// nickelMatchers compiles a value the way Nickel applies it: one pattern for
+// each non-empty ";" item. untestable counts the items that Go's regexp cannot
+// compile, for example an item with lookahead.
+func nickelMatchers(value string, line int) (res []*regexp.Regexp, untestable int) {
+	for _, item := range strings.Split(value, ";") {
+		if item == "" {
+			continue
+		}
+		re, err := regexp.Compile(nickelTemplate(item, line))
+		if err != nil {
+			untestable++
+			continue
+		}
+		res = append(res, re)
+	}
+	return res, untestable
 }
 
 // excludeSyncConf is the state of the key in the file.
@@ -225,20 +251,29 @@ type jsonExcludeSync struct {
 // excludeSyncReport builds the folder list for a raw value ("" for none).
 func excludeSyncReport(p device.Paths, raw, source string) jsonExcludeSync {
 	rep := jsonExcludeSync{Source: source, Presets: []string{"dot-folders"}, Folders: []jsonExcludeFolder{}}
-	var re *regexp.Regexp
-	if raw == "" {
-		rep.Testable = true
-	} else if v, ok := qsettingsUnescape(raw); ok {
-		rep.Value = &v
-		if m, err := nickelMatcher(v); err == nil {
-			re, rep.Testable = m, true
+	var res []*regexp.Regexp
+	readable, untestable := true, 0
+	if raw != "" {
+		v, ok := qsettingsUnescape(raw)
+		readable = ok
+		if ok {
+			rep.Value = &v
+			res, untestable = nickelMatchers(v, p.Line())
 		}
 	}
+	rep.Testable = readable && untestable == 0
 	dirs, _ := scanDotFolders(p.Root)
 	for _, d := range dirs {
 		f := jsonExcludeFolder{Path: d}
-		if rep.Testable {
-			hidden := re != nil && re.MatchString(nickelMountPrefix+d)
+		hidden := false
+		for _, re := range res {
+			if re.MatchString(nickelMountPrefix + d) {
+				hidden = true
+				break
+			}
+		}
+		// A folder that a testable item hides is hidden, whatever the others do.
+		if hidden || rep.Testable {
 			f.Hidden = &hidden
 		}
 		rep.Folders = append(rep.Folders, f)
@@ -257,7 +292,7 @@ func printExcludeSync(rep jsonExcludeSync) {
 	}
 	fmt.Println("source:", rep.Source)
 	if !rep.Testable {
-		fmt.Println("kpm cannot test this value (for example lookahead), so the folder list has no result.")
+		fmt.Println("kpm cannot test all of this value (for example lookahead): \"?\" means only that part could hide the folder.")
 	}
 	if len(rep.Folders) == 0 {
 		fmt.Println("no dot folders on the user partition")
@@ -348,7 +383,8 @@ func (a *App) cmdExcludeSync(args []string) int {
 			if !ok {
 				return fail("kpm cannot read the current value, so it cannot merge the preset with it. Edit Kobo eReader.conf by hand.")
 			}
-			v = qsettingsEscape("(" + prev + "|" + preset + ")")
+			// Nickel splits the value on ";" and tests each item on its own.
+			v = qsettingsEscape(prev + ";" + preset)
 			newSource = excludeSourceKpmCustom
 		}
 		newValue = &v
