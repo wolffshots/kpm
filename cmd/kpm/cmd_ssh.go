@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -554,14 +555,21 @@ func sshDoctor(f sshd.Files) *jsonDoctorSSH {
 	pid, running := sshd.ProbePid(f.PidFile())
 	d.Running = running
 	d.PidAlive = pid > 0 && sshd.PidAlive(pid)
-	host := cfg.Listen
-	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
-		host = "127.0.0.1"
+	// The Kobo has lo down, so a dial to 127.0.0.1 fails while kpm ssh serves
+	// on :::22 (device finding 4 of 2026-11-26). The listener table in
+	// /proc/net comes first. The dial is the fallback where it is missing.
+	open, known := procNetListening(cfg.Port)
+	if !known {
+		host := cfg.Listen
+		if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
+			host = "127.0.0.1"
+		}
+		if c, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(cfg.Port)), time.Second); err == nil {
+			c.Close()
+			open = true
+		}
 	}
-	if c, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(cfg.Port)), time.Second); err == nil {
-		c.Close()
-		d.PortOpen = true
-	}
+	d.PortOpen = open
 	var problems []string
 	switch {
 	case cfg.Enabled && !running:
@@ -580,4 +588,32 @@ func sshDoctor(f sshd.Files) *jsonDoctorSSH {
 	}
 	d.Detail = strings.Join(problems, "; ")
 	return d
+}
+
+// procNetDir holds the kernel socket tables. Tests point it at a fixture.
+var procNetDir = "/proc/net"
+
+// procNetListening reports whether a TCP or TCP6 socket listens on port, from
+// the tcp and tcp6 tables in procNetDir. known is false when neither table can
+// be read (not Linux). A row is "sl local_address rem_address st ...": the
+// local port is the hex after the last colon, and state 0A is LISTEN.
+func procNetListening(port int) (open, known bool) {
+	want := fmt.Sprintf(":%04X", port)
+	for _, name := range []string{"tcp", "tcp6"} {
+		raw, err := os.ReadFile(filepath.Join(procNetDir, name))
+		if err != nil {
+			continue
+		}
+		known = true
+		for _, line := range strings.Split(string(raw), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[3] != "0A" {
+				continue
+			}
+			if strings.HasSuffix(fields[1], want) {
+				return true, true
+			}
+		}
+	}
+	return false, known
 }
