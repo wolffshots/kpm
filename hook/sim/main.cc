@@ -2280,6 +2280,70 @@ static void runExerciseDetails(const QString &dir) {
       []() { detailsFail(3, "timed out waiting for packages"); });
 }
 
+// ---- --exercise-detailcarry <dir> (round 2, test note 1) -----------------
+//
+// Combined test note 1: after Check for update the details page still said
+// "Carry-over to 6.x: not in the bundle", although the check built the bundle.
+// Runs with NKPM_KPM=fixture/carry-kpm.sh (run.sh): its check marks the bundle as
+// built, and its info then reports nickelnote in the bundle, 1.5 s late. Asserts
+// that the page shows the new Carry-over and Latest lines after Check, and that
+// it never shows the check result without them (one e-ink update). Exit 0 = PASS.
+static bool visibleLabelContaining(QWidget *root, const QString &text) {
+  if (root == nullptr) return false;
+  for (QLabel *l : root->findChildren<QLabel *>()) {
+    if (l->isVisible() && l->text().contains(text)) return true;
+  }
+  return false;
+}
+
+static void runExerciseDetailCarry(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+        waitUntil([]() { return currentDetail() != nullptr && labelContaining(currentDetail(), "On this device"); },
+                  10000,
+                  [dir]() {
+                    if (!visibleLabelContaining(currentDetail(), "Carry-over to 6.x: not in the bundle")) {
+                      detailsFail(5, "no 'not in the bundle' line at open");
+                      return;
+                    }
+                    saveGrab(dir + "/carry-open.png");
+                    QLabel *check = findLabelByText("Check for update");
+                    if (!check) {
+                      detailsFail(7, "no Check for update button");
+                      return;
+                    }
+                    sendClick(check);
+                    // Poll until the busy line goes. The first frame without it must
+                    // already carry the new lines.
+                    waitUntil([]() { return !visibleLabelContaining(currentDetail(), "Checking for an update"); }, 20000,
+                              [dir]() {
+                                DetailDialog *d = currentDetail();
+                                QString why;
+                                if (!visibleLabelContaining(d, "Carry-over to 6.x: in the bundle (v1.0.0)")) {
+                                  why += "no 'in the bundle (v1.0.0)' line; ";
+                                }
+                                if (visibleLabelContaining(d, "Carry-over to 6.x: not in the bundle")) {
+                                  why += "the old 'not in the bundle' line still shows; ";
+                                }
+                                if (!visibleLabelContaining(d, "Latest: v9.9.9")) why += "Latest is not v9.9.9; ";
+                                saveGrab(dir + "/carry-after-check.png");
+                                if (!why.isEmpty()) {
+                                  detailsFail(10, "after Check: " + why);
+                                  return;
+                                }
+                                std::fprintf(stderr, "sim detailcarry: PASS\n");
+                                qApp->exit(0);
+                              },
+                              []() { detailsFail(8, "check did not finish"); });
+                  },
+                  []() { detailsFail(4, "detail page with info groups did not open"); });
+      },
+      []() { detailsFail(3, "timed out waiting for packages"); });
+}
+
 static const char *kSimSSHPort = "52222";
 static const char *kSimSSHKey =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXjRvBuW0k5dGi1PmtqmH3A7quTrNfnBdqUmND7STII sim\n";
@@ -2953,6 +3017,137 @@ static void runExerciseReload() {
       });
 }
 
+// ---- --exercise-pagesize (round 2, finding 2) ----------------------------
+//
+// Device finding (0.16.0-rc2): after a switch from the Settings or SSH page to a
+// list tab, the Mods list showed about 3 rows per page with empty space below.
+// Seeded with SEED_EXTRA_MODS (run.sh), so Mods spans more pages. Opens on Mods,
+// walks every page for the ids, then switches tabs in the order that reaches the
+// list from a page (Settings or SSH) with a different list kind active. After each
+// return to Mods: page 1 has the rows and the page total of the open state, and a
+// walk of all pages shows each id once. Exit 0 = PASS.
+static QList<PackageRow *> visibleRows(PagedStack *pages) {
+  QList<PackageRow *> out;
+  for (PackageRow *r : pages->findChildren<PackageRow *>()) {
+    if (r->isVisible()) out.append(r);
+  }
+  return out;
+}
+
+static void pageSizeFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim pagesize: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+// walkPages pages from page 1 to the last page and collects the ids it shows. It
+// calls done with the ids in page order, or with an empty list on a page fault.
+static void walkPages(PagedStack *pages, QStringList ids, std::function<void(QStringList)> done) {
+  for (PackageRow *r : visibleRows(pages)) ids.append(r->packageId());
+  QString lbl = pageLabelText(pages);
+  int at = lbl.indexOf(QStringLiteral(" of "));
+  int cur = at < 0 ? 1 : lbl.mid(5, at - 5).toInt();
+  if (at < 0 || cur >= totalFromLabel(lbl)) {
+    done(ids);
+    return;
+  }
+  QMetaObject::invokeMethod(pages, "next");
+  QTimer::singleShot(200, qApp, [pages, ids, done]() { walkPages(pages, ids, done); });
+}
+
+struct PageSizeBase {
+  int rows = 0;
+  QString label;
+  QStringList ids;
+};
+
+static void pageSizeStep(BrowseDialog *browse, PagedStack *pages, PageSizeBase base, int step) {
+  // Tab order: Settings -> Mods and SSH -> Mods with Fonts as the last list tab, and
+  // Settings -> Mods with Mods as the last list tab (no render).
+  static const char *const kSteps[] = {"Fonts", "Settings", "Mods", "Fonts", "SSH", "Mods", "Settings", "Mods"};
+  if (step >= int(sizeof(kSteps) / sizeof(kSteps[0]))) {
+    std::fprintf(stderr, "sim pagesize: PASS\n");
+    qApp->exit(0);
+    return;
+  }
+  const QString name = kSteps[step];
+  QLabel *tab = labelIn(browse, name);
+  if (tab == nullptr) {
+    pageSizeFail(4, "no tab " + name);
+    return;
+  }
+  sendClick(tab);
+  waitUntil([tab]() { return tabActive(tab); }, 10000,
+            [browse, pages, base, step, name]() {
+              QTimer::singleShot(300, qApp, [browse, pages, base, step, name]() {
+                if (name != "Mods") {
+                  pageSizeStep(browse, pages, base, step + 1);
+                  return;
+                }
+                // Settings -> Mods with Mods the last list tab does not render, so
+                // the list stays on the page of the last walk: go back to page 1.
+                while (!pageLabelText(pages).startsWith(QStringLiteral("Page 1 "))) {
+                  QString was = pageLabelText(pages);
+                  QMetaObject::invokeMethod(pages, "prev");
+                  if (pageLabelText(pages) == was) break;
+                }
+                int rows = visibleRows(pages).size();
+                QString lbl = pageLabelText(pages);
+                std::fprintf(stderr, "sim pagesize: step %d back on Mods: %d rows, '%s' (open: %d rows, '%s')\n",
+                             step, rows, qPrintable(lbl), base.rows, qPrintable(base.label));
+                saveGrab(QStringLiteral("%1/pagesize-step%2.png").arg(qgetenv("PAGESIZE_DIR").constData()).arg(step));
+                if (rows != base.rows || lbl != base.label) {
+                  pageSizeFail(5, QString("step %1: page 1 shows %2 rows '%3', the open state %4 rows '%5'")
+                                      .arg(step).arg(rows).arg(lbl).arg(base.rows).arg(base.label));
+                  return;
+                }
+                walkPages(pages, QStringList(), [browse, pages, base, step](QStringList ids) {
+                  if (ids != base.ids) {
+                    pageSizeFail(6, QString("step %1: the pages show %2 ids, the open state %3: %4")
+                                        .arg(step).arg(ids.size()).arg(base.ids.size()).arg(ids.join(",")));
+                    return;
+                  }
+                  pageSizeStep(browse, pages, base, step + 1);
+                });
+              });
+            },
+            [name]() { pageSizeFail(7, "the tab " + name + " did not become active"); });
+}
+
+static void runExercisePageSize(const QString &dir) {
+  QDir().mkpath(dir);
+  qputenv("PAGESIZE_DIR", dir.toLocal8Bit());
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        PagedStack *pages = browse ? browse->findChild<PagedStack *>() : nullptr;
+        if (pages == nullptr) {
+          pageSizeFail(3, "no PagedStack");
+          return;
+        }
+        QTimer::singleShot(300, qApp, [browse, pages, dir]() {
+          PageSizeBase base;
+          base.rows = visibleRows(pages).size();
+          base.label = pageLabelText(pages);
+          saveGrab(dir + "/pagesize-open.png");
+          if (totalFromLabel(base.label) < 2) {
+            pageSizeFail(8, "need 2 or more Mods pages, got '" + base.label + "' (set SEED_EXTRA_MODS)");
+            return;
+          }
+          walkPages(pages, QStringList(), [browse, pages, base](QStringList ids) mutable {
+            base.ids = ids;
+            if (QSet<QString>(ids.begin(), ids.end()).size() != ids.size()) {
+              pageSizeFail(9, "an id shows twice at open: " + ids.join(","));
+              return;
+            }
+            std::fprintf(stderr, "sim pagesize: open: %d rows on page 1, '%s', %d mods\n", base.rows,
+                         qPrintable(base.label), int(ids.size()));
+            pageSizeStep(browse, pages, base, 0);
+          });
+        });
+      },
+      []() { pageSizeFail(3, "timed out waiting for packages"); });
+}
+
 // ---- --exercise-morerow -------------------------------------------------
 //
 // The More page row (hook/src/morerow.cc). A fake MoreView copies the shape of
@@ -3130,6 +3325,8 @@ int main(int argc, char **argv) {
   QString detailsDir;
   QString moreRowDir;
   QString settingsDirArg;
+  QString pageSizeDir;
+  QString detailCarryDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -3177,6 +3374,10 @@ int main(int argc, char **argv) {
       settingsDirArg = args.at(++i);
     } else if (a == "--exercise-details" && i + 1 < args.size()) {
       detailsDir = args.at(++i);
+    } else if (a == "--exercise-detailcarry" && i + 1 < args.size()) {
+      detailCarryDir = args.at(++i);
+    } else if (a == "--exercise-pagesize" && i + 1 < args.size()) {
+      pageSizeDir = args.at(++i);
     } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
       moreRowDir = args.at(++i);
     } else if (a == "--exercise-sync") {
@@ -3237,6 +3438,10 @@ int main(int argc, char **argv) {
     runExerciseDetails(detailsDir);
   } else if (!progressDir.isEmpty()) {
     runExerciseProgress(progressDir);
+  } else if (!detailCarryDir.isEmpty()) {
+    runExerciseDetailCarry(detailCarryDir);
+  } else if (!pageSizeDir.isEmpty()) {
+    runExercisePageSize(pageSizeDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

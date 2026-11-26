@@ -120,6 +120,9 @@ private:
   // Check and Doctor buttons from `info` (kpm-pkg-details).
   void addInfoGroups(QVBoxLayout *layout);
   QString latestText(const QString &latest, const QString &checkedAt) const;
+  // showChecked writes the check result and the fresh `kpm info` (empty when the
+  // read failed) to the page in one pass.
+  void showChecked(const QJsonObject &payload, const QJsonObject &fresh);
 
   // busyLabel is the status text shown while the action runs; empty means the
   // generic "Working…" (APP-TREE.md §11.3 item 3).
@@ -163,6 +166,7 @@ private:
   // The lines the Check and Doctor buttons rewrite in place (kpm-pkg-details).
   QLabel *latestLabel = nullptr;
   QLabel *doctorLabel = nullptr;
+  QLabel *carryLabel = nullptr; // Check rebuilds the 6.x bundle (round 2, test note 1)
   // canOfferUpdate: the footer is the installed branch, where Update belongs.
   // hasUpdateButton: it already shows one, so a check does not add a second.
   bool canOfferUpdate = false;

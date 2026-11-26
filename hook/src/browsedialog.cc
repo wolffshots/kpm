@@ -677,6 +677,11 @@ void BrowseDialog::showPage(QWidget *page) {
   progressLabel->setVisible(list && running);
   sshPage->setVisible(page == sshPage);
   settingsPage->setVisible(page == settingsPage);
+  // pages->setVisible(true) lays out the dialog at once, while the old page is
+  // still visible, so the list got only part of the height. selectTab renders
+  // next and reads that height for the page size. Lay out again now, with the
+  // old page hidden (round 2 finding 2: 3 rows per page after Settings -> Mods).
+  layout()->activate();
 }
 
 // selectTab switches which `kind` the list shows. render(false) is the path a

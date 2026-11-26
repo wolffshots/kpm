@@ -770,6 +770,14 @@ static QString shortTime(const QString &rfc3339) {
   return t.isValid() ? t.toLocalTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")) : rfc3339;
 }
 
+// carryText words the carry-over state of `kpm info` (cmd_info.go carryoverInfo).
+static QString carryText(const QJsonObject &carry) {
+  if (carry.value("state").toString() == QStringLiteral("in-bundle")) {
+    return "Carry-over to 6.x: in the bundle (" + carry.value("version").toString() + ")";
+  }
+  return "Carry-over to 6.x: not in the bundle — " + carry.value("reason").toString();
+}
+
 QString DetailDialog::latestText(const QString &latest, const QString &checkedAt) const {
   QString text = "Latest: " + (latest.isEmpty() ? QStringLiteral("not checked yet") : latest);
   if (!checkedAt.isEmpty()) {
@@ -894,14 +902,14 @@ void DetailDialog::addInfoGroups(QVBoxLayout *layout) {
   if (!configs.isEmpty()) {
     line("Config files: " + configs.join(", "));
   }
+  // Always in the layout, hidden when info has no carry-over: Check rebuilds the
+  // bundle and then rewrites or shows this line in place (showChecked).
   QJsonObject carry = info.value("carryover").toObject();
-  if (!carry.isEmpty()) {
-    if (str(carry, "state") == QStringLiteral("in-bundle")) {
-      line("Carry-over to 6.x: in the bundle (" + str(carry, "version") + ")");
-    } else {
-      wrapped("Carry-over to 6.x: not in the bundle — " + str(carry, "reason"));
-    }
-  }
+  Label *carryLine = new Label(Label::Small, carryText(carry));
+  carryLine->setWordWrap(true);
+  carryLine->setVisible(!carry.isEmpty());
+  layout->addWidget(carryLine);
+  carryLabel = carryLine;
   // The Doctor line shows after the first Run doctor. It is in the layout now, so
   // the result needs no new widget, only show().
   Label *doctor = new Label(Label::Small, "");
@@ -923,12 +931,36 @@ void DetailDialog::checkOne() {
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
 
-// onChecked rewrites the Latest line in place and, when the check found an update
-// on an installed package, adds the Update button. The page stays open: a check
-// changes no files, so only the browse badge needs the result (checked()).
+// onChecked reads `kpm info` again before it changes the page: `kpm check <id>`
+// also rebuilds the 6.x bundle, so the Carry-over line can change. The page stays
+// busy until info answers, so all its lines change in one e-ink update. kpm sends
+// the check payload after the bundle step and the response comes at exit, so info
+// reads the new bundle.
 void DetailDialog::onChecked(int exitCode, QJsonObject payload) {
   (void)exitCode; // exit 2 carries the failed row; its error goes on the line
+  KpmProcess *proc = carryLabel != nullptr ? KpmProcess::info(id) : nullptr;
+  if (proc == nullptr) {
+    showChecked(payload, QJsonObject());
+    return;
+  }
+  QObject::connect(proc, &KpmProcess::response, this, [this, payload](int code, QJsonObject fresh) {
+    showChecked(payload, code == 0 ? fresh : QJsonObject());
+  });
+  QObject::connect(proc, &KpmProcess::failure, this, [this, payload](QString) { showChecked(payload, QJsonObject()); });
+}
+
+// showChecked rewrites the Latest and Carry-over lines in place and, when the check
+// found an update on an installed package, adds the Update button. The page stays
+// open: a check changes no files, so only the browse badge needs the result
+// (checked()).
+void DetailDialog::showChecked(const QJsonObject &payload, const QJsonObject &fresh) {
   setBusy(false);
+  if (!fresh.isEmpty() && carryLabel != nullptr) {
+    info = fresh;
+    QJsonObject carry = fresh.value("carryover").toObject();
+    carryLabel->setText(carryText(carry));
+    carryLabel->setVisible(!carry.isEmpty());
+  }
   QJsonArray rows = payload.value("packages").toArray();
   QJsonObject row;
   for (const QJsonValue &v : rows) {

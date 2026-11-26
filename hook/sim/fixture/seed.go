@@ -82,6 +82,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"kpm/internal/config"
@@ -427,6 +428,16 @@ func main() {
 	// Registry config + cache (the registered, browsable packages).
 	must(os.WriteFile(p.ConfigFile(), []byte(registryConfig), 0o644))
 	must(os.WriteFile(p.RegistryCache("main"), []byte(registryCache), 0o644))
+	// SEED_EXTRA_MODS=N adds N plain, not installed mods to the registry, so the
+	// Mods list spans more than one page at the default size (--exercise-pagesize).
+	if n, _ := strconv.Atoi(os.Getenv("SEED_EXTRA_MODS")); n > 0 {
+		extra := ""
+		for i := 1; i <= n; i++ {
+			extra += fmt.Sprintf("\n[packages.extramod-%02d]\nname = \"Extra mod %02d\"\nsource = \"github.com/o/extramod-%02d\"\n"+
+				"forge = \"github\"\nasset = \"KoboRoot.tgz\"\ndescription = \"A filler mod for the page size check.\"\n", i, i, i)
+		}
+		appendRaw(p.RegistryCache("main"), extra)
+	}
 
 	// samplemod: an installed, manifest-uninstallable package (the uninstall
 	// target). Written as a packages.d def + state manifest + a real file under
