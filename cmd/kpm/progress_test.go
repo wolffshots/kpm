@@ -264,3 +264,29 @@ func TestWaitForNetworkNote(t *testing.T) {
 		}
 	}
 }
+
+// check <id> (the Check button of the detail page) runs the same carry-over
+// refresh, so its download shows as a step too.
+func TestCheckOneCarryoverProgress(t *testing.T) {
+	a, _ := carryoverSetup(t)
+	a.locked = true
+	heldJSON = &[]string{}
+	t.Cleanup(func() { heldJSON = nil })
+	var code int
+	out := captureStdout(t, func() {
+		a.prog = &progress{w: os.Stdout, now: time.Now, shown: -1}
+		code = a.cmdCheck([]string{"pkg", "--json"})
+		a.carryoverAfter("check")
+		writeHeldJSON()
+	})
+	if code != exitOK {
+		t.Fatalf("check pkg = %d\n%s", code, out)
+	}
+	got := checkLines(t, out)
+	all := texts(got)
+	for _, want := range []string{"Checking for updates", "Getting kpm for firmware 6", "Building the firmware 6 bundle"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %q in %s", want, all)
+		}
+	}
+}

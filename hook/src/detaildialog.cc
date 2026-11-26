@@ -918,6 +918,7 @@ void DetailDialog::checkOne() {
     return;
   }
   setBusy(true, QStringLiteral("Checking for an update…"));
+  connectProgress(proc); // kpm check <id> also reports the carry-over step
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onChecked);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
@@ -959,6 +960,7 @@ void DetailDialog::runDoctor() {
     return;
   }
   setBusy(true, QStringLiteral("Running doctor…"));
+  connectProgress(proc);
   QObject::connect(proc, &KpmProcess::response, this, &DetailDialog::onDoctor);
   QObject::connect(proc, &KpmProcess::failure, this, &DetailDialog::onFailure);
 }
