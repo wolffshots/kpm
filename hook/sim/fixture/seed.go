@@ -641,7 +641,14 @@ func main() {
 	}
 	sm := st.Get("samplemod")
 	sm.InstalledVersion = "v1.0.0"
-	sm.Manifest = []string{manifestPath}
+	// The missing files are in the manifest too, as on a device: read-only
+	// commands verify MissingFiles against the manifest (reverifyMissing), and
+	// a path outside it would clear the badge.
+	sm.Manifest = []string{
+		manifestPath,
+		"usr/local/Kobo/imageformats/libsamplemod.so",
+		"usr/local/samplemod/data.bin",
+	}
 	sm.SyncedDefSHA256 = oldSampleHash
 	// MissingFiles (A): seeded DIRECTLY — on-device kpm computes this at the
 	// staged->installed flip, but the sim never boots rcS, so seed the field the
