@@ -998,7 +998,7 @@ func TestDoctorExcludeSyncFoldersAdvice(t *testing.T) {
 		t.Errorf("verdict = %q, want %q", v, syncExcludeAbsent)
 	}
 	got := strings.Join(a.appTreeAdvice(targets, "4.45.23697"), "\n")
-	if !strings.Contains(got, "ExcludeSyncFolders=") || !strings.Contains(got, "Nickel rewrites this file") {
+	if !strings.Contains(got, "kpm exclude-sync set dot-folders") {
 		t.Errorf("an absent key must produce the advisory:\n%s", got)
 	}
 

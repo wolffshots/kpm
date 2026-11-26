@@ -121,6 +121,14 @@ KpmProcess *KpmProcess::sshEnable() { return start({"ssh", "enable"}, false, fal
 KpmProcess *KpmProcess::sshDisable() { return start({"ssh", "disable"}, false, false, false); }
 KpmProcess *KpmProcess::sshRestart() { return start({"ssh", "restart"}, false, false, false); }
 
+// ExcludeSyncFolders (EXCLUDE-SYNC.md section 5): the Settings tab row. The read
+// takes no lock. set and off take kpm's lock and need no network.
+KpmProcess *KpmProcess::excludeSync() { return start({"exclude-sync", "--json"}, false, false); }
+KpmProcess *KpmProcess::excludeSyncSet(const QString &preset) {
+  return start({"exclude-sync", "set", preset, "--json"}, false, true);
+}
+KpmProcess *KpmProcess::excludeSyncOff() { return start({"exclude-sync", "off", "--json"}, false, true); }
+
 // Config editing (CONFIG.md §3.2). list/show are offline reads; set is mutating
 // (takes kpm's single-instance lock) but needs no network — a config edit is a
 // local file write, so needsNetwork is false for every variant.

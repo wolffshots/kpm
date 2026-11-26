@@ -53,6 +53,11 @@
 //                              (a real `kpm ssh serve` on 127.0.0.1), Disable, the
 //                              hidden address and its eye; writes ssh-nokey.png,
 //                              ssh-address.png and ssh-running.png
+//   --exercise-settings <dir>  offscreen: the "Hide in library" row of the
+//                              Settings tab (EXCLUDE-SYNC.md section 5) against
+//                              the real kpm: Off, Dot folders, Off again, with
+//                              the Kobo eReader.conf bytes checked after each tap;
+//                              writes settings-sync-off.png and settings-sync-dot.png
 //   --exercise-morerow <dir>   offscreen: the More page row (hook/src/morerow.cc)
 //                              on a fake MoreView; writes more-row.png
 //   --exercise-wake            offscreen: open browse → detail, assert the fake
@@ -91,6 +96,7 @@
 #include "nickelstub.h"
 #include "forcewifi.h"
 #include "morerow.h"
+#include "settingspage.h"
 #include "sshpage.h"
 #include "widgets/configrow.h"
 #include "widgets/packagerow.h"
@@ -2296,6 +2302,99 @@ static void runExerciseSsh(const QString &dir) {
       []() { sshFail(3, "no rows"); });
 }
 
+// ---- --exercise-settings (EXCLUDE-SYNC.md section 5) ---------------------
+//
+// The "Hide in library" row against the real kpm. The sandbox gets a CRLF
+// Kobo eReader.conf without the key. Off is active; a tap on Dot folders runs
+// `kpm exclude-sync set dot-folders` and adds the key; a tap on Off runs
+// `kpm exclude-sync off` and gives back the exact first bytes.
+
+static const char *kSimNickelConf = "[General]\r\nfoo=1\r\n\r\n[FeatureSettings]\r\nOther=true\r\n";
+
+static QString simNickelConfPath() {
+  return QString::fromLocal8Bit(qgetenv("KPM_ROOT")) + "/.kobo/Kobo/Kobo eReader.conf";
+}
+
+static QByteArray readSandboxFile(const QString &path) {
+  QFile f(path);
+  if (!f.open(QIODevice::ReadOnly)) return QByteArray();
+  return f.readAll();
+}
+
+static void settingsFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim settings: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+static void runExerciseSettings(const QString &dir) {
+  QDir().mkpath(dir);
+  writeSandboxFile(simNickelConfPath(), QByteArray(kSimNickelConf));
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        SettingsPage *page = browse ? browse->findChild<SettingsPage *>() : nullptr;
+        QLabel *tab = browse ? labelIn(browse, "Settings") : nullptr;
+        if (!page || !tab) {
+          settingsFail(4, "no BrowseDialog, SettingsPage or Settings tab");
+          return;
+        }
+        QLabel *dot = page->findChild<QLabel *>("settingsDotFolders");
+        QLabel *off = page->findChild<QLabel *>("settingsSyncOff");
+        QLabel *note = page->findChild<QLabel *>("settingsSyncNote");
+        if (!dot || !off || !note) {
+          settingsFail(5, "no Hide in library row");
+          return;
+        }
+        sendClick(tab);
+        // Step 1: no key, so Off is active.
+        waitUntil([page, off]() { return page->isVisible() && tabActive(off); }, 10000,
+                  [page, dot, off, note, dir]() {
+                    QString why;
+                    if (tabActive(dot)) why += "Dot folders is active with no key; ";
+                    if (!note->text().contains("for example .adds")) why += "the note is not the Off text; ";
+                    if (!why.isEmpty()) {
+                      settingsFail(6, why);
+                      return;
+                    }
+                    saveGrab(dir + "/settings-sync-off.png");
+                    sendClick(dot);
+                    // Step 2: kpm writes the key; the row reads it back.
+                    waitUntil([dot, note]() { return tabActive(dot) && note->text().contains("apply the change"); }, 15000,
+                              [dot, off, note, dir]() {
+                                QByteArray conf = readSandboxFile(simNickelConfPath());
+                                QString why;
+                                if (!conf.contains("Other=true\r\nExcludeSyncFolders = (\\\\.(k|ko|")) {
+                                  why += "the conf has no preset line after Other=true: " + QString::fromUtf8(conf) + "; ";
+                                }
+                                if (tabActive(off)) why += "Off is still active; ";
+                                if (!note->text().contains("except .kobo")) why += "the note is not the preset text; ";
+                                if (!why.isEmpty()) {
+                                  settingsFail(7, why);
+                                  return;
+                                }
+                                saveGrab(dir + "/settings-sync-dot.png");
+                                sendClick(off);
+                                // Step 3: off gives back the first bytes.
+                                waitUntil([off]() { return tabActive(off); }, 15000,
+                                          [dot]() {
+                                            QByteArray conf = readSandboxFile(simNickelConfPath());
+                                            if (conf != QByteArray(kSimNickelConf) || tabActive(dot)) {
+                                              settingsFail(8, "Off did not give back the first conf: " +
+                                                                  QString::fromUtf8(conf));
+                                              return;
+                                            }
+                                            std::fprintf(stderr, "sim settings: PASS\n");
+                                            qApp->exit(0);
+                                          },
+                                          []() { settingsFail(9, "Off did not become active"); });
+                              },
+                              [note]() { settingsFail(10, "Dot folders did not become active: " + note->text()); });
+                  },
+                  []() { settingsFail(11, "the Settings page did not show with Off active"); });
+      },
+      []() { settingsFail(3, "no rows"); });
+}
+
 // ---- --exercise-tabwidth ------------------------------------------------
 //
 // Nickel gives a primaryButton a min-width (nickelstub.cc models it), so a short tab
@@ -2835,6 +2934,7 @@ int main(int argc, char **argv) {
   QString sshDirArg;
   QString detailsDir;
   QString moreRowDir;
+  QString settingsDirArg;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -2877,6 +2977,8 @@ int main(int argc, char **argv) {
       tabWidthDir = args.at(++i);
     } else if (a == "--exercise-ssh" && i + 1 < args.size()) {
       sshDirArg = args.at(++i);
+    } else if (a == "--exercise-settings" && i + 1 < args.size()) {
+      settingsDirArg = args.at(++i);
     } else if (a == "--exercise-details" && i + 1 < args.size()) {
       detailsDir = args.at(++i);
     } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
@@ -2931,6 +3033,8 @@ int main(int argc, char **argv) {
     runExerciseTabWidth(tabWidthDir);
   } else if (!sshDirArg.isEmpty()) {
     runExerciseSsh(sshDirArg);
+  } else if (!settingsDirArg.isEmpty()) {
+    runExerciseSettings(settingsDirArg);
   } else if (!detailsDir.isEmpty()) {
     runExerciseDetails(detailsDir);
   } else if (exerciseSync) {
