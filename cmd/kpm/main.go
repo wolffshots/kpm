@@ -25,7 +25,7 @@ Usage:
   kpm remove <id>              (unregister only — see "kpm uninstall" to delete files)
   kpm uninstall <id> [--purge] [--dry-run] [--yes] [--force] [--keep-registration] [--reboot] [--notify]
   kpm list
-  kpm check [--notify]
+  kpm check [<id>] [--notify]
   kpm update [<id>...] [--all] [--reboot] [--notify]
   kpm unstage                  (cancel a pending staged update)
   kpm pin <id> <tag>
@@ -36,6 +36,7 @@ Usage:
   kpm registry refresh [<name>]
   kpm search [<term>]
   kpm doctor [<id>]            (diagnose whether installed Nickel plugins actually loaded)
+  kpm info <id>                (show the def, versions, files and carry-over of one package)
   kpm install <id> [--pin <tag>] [--installed <ver>] [--yes] [--adopt]
   kpm adopt-self               (enrol kpm's own self-update from a configured registry)
   kpm sync [<id>...] [--overwrite]
@@ -180,6 +181,8 @@ func (a *App) dispatch(cmd string, args []string) int {
 		return a.cmdSearch(args)
 	case "doctor":
 		return a.cmdDoctor(args)
+	case "info":
+		return a.cmdInfo(args)
 	case "install":
 		return a.cmdInstall(args)
 	case "adopt-self":

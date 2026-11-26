@@ -33,6 +33,8 @@
 //   --exercise-badges          offscreen: assert the "files missing" browse badge
 //                              (samplemod) and the "Untested on your firmware"
 //                              detail warning (nickelnote) render (A + D)
+//   --exercise-details <dir>   offscreen: the detail page info groups, Run doctor and
+//                              Check for update (kpm-pkg-details)
 //   --exercise-apptree <dir>   offscreen: drive the app-tree copy (APP-TREE.md §11.3):
 //                              the "(no reboot)" action suffix, the "Installing…"
 //                              busy label, an uninstall that promises no reboot, and
@@ -1999,6 +2001,91 @@ static void waitUntil(std::function<bool()> cond, int ms, std::function<void()> 
   timer->start(100);
 }
 
+// ---- --exercise-details <dir> (kpm-pkg-details) ---------------------------
+//
+// Opens nickelnote's detail page, which BrowseDialog now builds from `kpm info`,
+// and asserts the three groups. Then taps Run doctor and Check for update and
+// asserts that each rewrites its line in place and leaves the page open. Check
+// needs the network: offline it ends on the error line or kpm's error dialog,
+// and the run still asserts that the page left its busy state. Screenshots:
+// detail-info.png, detail-doctor.png, detail-check.png. Exit 0 = PASS.
+static void detailsFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim details: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+static void runExerciseDetails(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows(
+      [dir]() {
+        BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+        QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, QStringLiteral("nickelnote")));
+        waitUntil([]() { return currentDetail() != nullptr && labelContaining(currentDetail(), "On this device"); },
+                  10000,
+                  [dir]() {
+                    DetailDialog *d = currentDetail();
+                    // Only Label lines: the elided rows are ElidedLabel frames,
+                    // which findChildren<QLabel> cannot read. The screenshot
+                    // shows them.
+                    for (const char *want : {"Version", "Definition (registry", "On this device", "Latest: "}) {
+                      if (!labelContaining(d, want)) {
+                        detailsFail(5, QString("no line with '%1'").arg(want));
+                        return;
+                      }
+                    }
+                    std::fprintf(stderr, "sim details: PASS — info groups shown\n");
+                    saveGrab(dir + "/detail-info.png");
+                    QLabel *doctor = findLabelByText("Run doctor");
+                    if (!doctor) {
+                      detailsFail(6, "no Run doctor button");
+                      return;
+                    }
+                    sendClick(doctor);
+                    waitUntil(
+                        []() {
+                          QLabel *l = labelContaining(currentDetail(), "Doctor: ");
+                          return l != nullptr && l->isVisible();
+                        },
+                        15000,
+                        [dir]() {
+                          std::fprintf(stderr, "sim details: PASS — %s\n",
+                                       qPrintable(labelContaining(currentDetail(), "Doctor: ")->text()));
+                          saveGrab(dir + "/detail-doctor.png");
+                          QLabel *check = findLabelByText("Check for update");
+                          if (!check) {
+                            detailsFail(7, "no Check for update button");
+                            return;
+                          }
+                          QString before = labelContaining(currentDetail(), "Latest: ")->text();
+                          sendClick(check);
+                          // The busy line shows while kpm runs; the check is done
+                          // when it is gone again.
+                          QTimer::singleShot(300, qApp, [dir, before]() {
+                            waitUntil([]() { return !labelContaining(currentDetail(), "Checking for an update"); },
+                                      120000,
+                                      [dir, before]() {
+                                        DetailDialog *d = currentDetail();
+                                        if (d == nullptr) {
+                                          detailsFail(9, "the check closed the detail page");
+                                          return;
+                                        }
+                                        QString after = labelContaining(d, "Latest: ")->text();
+                                        std::fprintf(stderr, "sim details: check done — '%s' -> '%s'\n",
+                                                     qPrintable(before), qPrintable(after));
+                                        saveGrab(dir + "/detail-check.png");
+                                        std::fprintf(stderr, "sim details: PASS\n");
+                                        qApp->exit(0);
+                                      },
+                                      []() { detailsFail(8, "check did not finish"); });
+                          });
+                        },
+                        []() { detailsFail(6, "no Doctor line after Run doctor"); });
+                  },
+                  []() { detailsFail(4, "detail page with info groups did not open"); });
+      },
+      []() { detailsFail(3, "timed out waiting for packages"); });
+}
+
 static const char *kSimSSHPort = "52222";
 static const char *kSimSSHKey =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOXjRvBuW0k5dGi1PmtqmH3A7quTrNfnBdqUmND7STII sim\n";
@@ -2845,6 +2932,7 @@ int main(int argc, char **argv) {
   QString tabsDir;
   QString tabWidthDir;
   QString sshDirArg;
+  QString detailsDir;
   QString moreRowDir;
   QString settingsDirArg;
   bool exerciseSync = false;
@@ -2891,6 +2979,8 @@ int main(int argc, char **argv) {
       sshDirArg = args.at(++i);
     } else if (a == "--exercise-settings" && i + 1 < args.size()) {
       settingsDirArg = args.at(++i);
+    } else if (a == "--exercise-details" && i + 1 < args.size()) {
+      detailsDir = args.at(++i);
     } else if (a == "--exercise-morerow" && i + 1 < args.size()) {
       moreRowDir = args.at(++i);
     } else if (a == "--exercise-sync") {
@@ -2945,6 +3035,8 @@ int main(int argc, char **argv) {
     runExerciseSsh(sshDirArg);
   } else if (!settingsDirArg.isEmpty()) {
     runExerciseSettings(settingsDirArg);
+  } else if (!detailsDir.isEmpty()) {
+    runExerciseDetails(detailsDir);
   } else if (exerciseSync) {
     runExerciseSync();
   } else if (exerciseStaged) {

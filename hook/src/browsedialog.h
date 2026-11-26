@@ -63,6 +63,10 @@ private:
   // miss rather than no-oping, and closing the source view only when the route
   // actually went somewhere (INTEGRITY.md §4 — see browsedialog.cc).
   void openConflictPackage(DetailDialog *from, const QString &id);
+  // openDetailFrom loads `kpm info` and then opens the detail view (showDetail),
+  // closing `from` after it when set (kpm-pkg-details).
+  void openDetailFrom(const QString &id, DetailDialog *from);
+  void showDetail(const QString &id, const QJsonObject &info);
   void loadSearch(bool thenCheck);
   // allowInPlace enables flash-reduction win 4 (repaint only the changed rows).
   // Passed true only by the callers whose data is a fresh kpm payload.
@@ -132,6 +136,9 @@ private:
   bool kpmMissing = false;
   bool dataReady = false;
   bool laidOut = false;
+  // detailPending is true while `kpm info` runs for a tapped row, so a second
+  // tap does not open a second detail view (openDetailFrom).
+  bool detailPending = false;
   bool pendingCheck = false;
   // The page-1 banner/hint states the last render actually drew (win 4): a flip in
   // either can only be applied by rebuilding page 1, so the in-place path checks

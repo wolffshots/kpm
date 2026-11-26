@@ -20,6 +20,7 @@
 #   ./run.sh --exercise-rowrepaint   offscreen: drive the win-4 in-place row repaint
 #   ./run.sh --exercise-wake         offscreen: drive the sleep/wake chrome guard
 #   ./run.sh --exercise-badges       offscreen: assert the files-missing + firmware badges
+#   ./run.sh --exercise-details out           offscreen: the detail info groups, Run doctor, Check for update
 #   ./run.sh --size 600x800          override the Kobo-portrait window size
 #
 # Env: SANDBOX (default /tmp/kpm-sim-sandbox), RESEED=0 to keep an existing
@@ -82,7 +83,7 @@ export NKPM_KPM="$BUILD/kpm"
 
 # Offscreen modes need the offscreen QPA platform; an interactive run uses WSLg.
 case " $* " in
-  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-tabwidth "*|*" --exercise-ssh "*|*" --exercise-settings "*|*" --exercise-rowrepaint "*) export QT_QPA_PLATFORM=offscreen ;;
+  *" --screenshot "*|*" --exercise-uninstall "*|*" --exercise-config "*|*" --exercise-init "*|*" --exercise-sync "*|*" --exercise-wake "*|*" --exercise-badges "*|*" --exercise-enroll "*|*" --exercise-reload "*|*" --exercise-conflicts "*|*" --exercise-orphan "*|*" --exercise-staged "*|*" --exercise-apptree "*|*" --exercise-tabs "*|*" --exercise-tabwidth "*|*" --exercise-ssh "*|*" --exercise-settings "*|*" --exercise-rowrepaint "*|*" --exercise-details "*) export QT_QPA_PLATFORM=offscreen ;;
 esac
 
 echo "== launching sim (NKPM_KPM=$NKPM_KPM) =="
