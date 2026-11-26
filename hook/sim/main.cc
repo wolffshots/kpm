@@ -2592,8 +2592,9 @@ static void runExerciseSettings(const QString &dir) {
 // ---- --exercise-tabwidth ------------------------------------------------
 //
 // Nickel gives a primaryButton a min-width (nickelstub.cc models it), so a short tab
-// label grew when it was the active tab. This taps each tab in turn and asserts that
-// no tab moves or resizes at a switch.
+// label grew when it was the active tab. Its alignment rule also made a tab shrink the
+// first time it was active (left-aligned labels carry an indent). This taps each tab
+// in turn and asserts that no tab moves or resizes at a switch.
 static const char *const kTabNames[] = {"Mods", "Fonts", "Dictionaries", "SSH", "Settings"};
 
 // A failed step is recorded and the tour goes on, so one run measures every tab.
