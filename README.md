@@ -53,7 +53,10 @@ The binary is `/mnt/onboard/.adds/kpm/bin/kpm`. It is not on the `PATH` of the d
 export PATH="$PATH:/mnt/onboard/.adds/kpm/bin"
 ```
 
-NickelDBus (`qndb`) is optional. With it, the NickelMenu entries of kpm show toasts.
+kpm needs no other mod.
+
+- NickelMenu is optional. Without it, kpm opens from the More page. See [Open kpm](#open-kpm).
+- NickelDBus (`qndb`) is optional, and it is useful only with NickelMenu. Nothing in kpm needs it except the `--notify` toasts. The NickelMenu entries "Check for updates" and "Update all" use `--notify` to show the result. These entries are active only with "Open kpm from: NickelMenu". Without NickelDBus, read the result with "kpm - Status".
 
 ## First run
 
