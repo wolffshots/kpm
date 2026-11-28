@@ -24,6 +24,7 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 	// told the device will reboot (APP-TREE.md §6.3) — and a user whose only pending
 	// update is a font must be, because the old font renders until it does (D6).
 	availableNoReboot := 0
+	line := a.paths.Line()
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
 		installed := dash(ps.InstalledVersion)
@@ -43,6 +44,11 @@ func (a *App) buildStatus(pkgs []*config.Package) string {
 			} else {
 				fmt.Fprintf(tw, "%s\t%s -> %s\tSTAGED (reboot)\n", p.ID, installed, ps.StagedVersion)
 			}
+		case p.UnavailableReason(line) != "":
+			// No build for this firmware line, for example a 4.x-only package
+			// after the upgrade to 6.x. The latest_seen of the old line is no
+			// update here: update skips the package.
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", p.ID, installed, p.UnavailableReason(line))
 		case avail:
 			available++
 			if !rebootToApply(p) {
