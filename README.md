@@ -164,7 +164,9 @@ On 4.x, kpm keeps your mods across the upgrade to 6.x. You do not have to do any
 - kpm adds a short block to the 4.x shutdown script `/etc/init.d/rcK`. The block acts only during the upgrade, when `.kobo/updateQt5ToQt6` and `.kobo/update.tar` exist. It then copies the bundle to `.kobo/Kobo.tgz`.
 - The first 6.x boot installs the bundle, so kpm, NickelMenu and your other mods load at once. kpm records them as installed.
 
-A package with no 6.x build is not in the bundle. An update from 6.x to 6.x is not covered.
+- The bundle takes each 6.x build from the release of the installed version. If that release has no 6.x build, or the version is not released, the bundle takes the latest release, and `kpm.log` says so.
+
+A package with no 6.x build is not in the bundle, and the upgrade removes it. `kpm.log` names each such package, and `kpm carryover` lists it under "left out". If the reason is a local def with no `[fw6]` table, tap **Sync** (or run `kpm sync`) before the upgrade. An update from 6.x to 6.x is not covered.
 
 ### If kpm does not start after a firmware update
 

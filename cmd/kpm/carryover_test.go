@@ -5,7 +5,9 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -260,5 +262,128 @@ func TestCarryoverAdoptWaitsForInstall(t *testing.T) {
 	}
 	if !logContains(t, a, "kpm  not carried over to firmware 6.x") {
 		t.Error("kpm's missing files must be logged")
+	}
+}
+
+// An installed package without a 6.x build drops out of the bundle. The
+// record names it with the reason, the log warns once, and a package that
+// firmware 6.x has built in is no loss, so it is not named.
+func TestCarryoverWarnsLeftOut(t *testing.T) {
+	a, _ := carryoverSetup(t)
+	if err := a.refreshCarryover(true); err != nil {
+		t.Fatal(err)
+	}
+	lo := a.state.Carryover.LeftOut
+	if len(lo) != 1 || lo["old"] != config.Unavailable6 {
+		t.Fatalf("left out = %v, want only old", lo)
+	}
+	warn := "carry-over: old is not in the bundle and does not come back on firmware 6.x"
+	if !logContains(t, a, warn) {
+		t.Error("the left-out package must be logged")
+	}
+	if err := a.refreshCarryover(true); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(a.paths.LogFile())
+	if n := strings.Count(string(b), warn); n != 1 {
+		t.Errorf("warning logged %d times, want once", n)
+	}
+
+	// A new left-out package changes the record without a rebuild.
+	sum := a.state.Carryover.SHA256
+	p := &config.Package{Name: "old2", Source: "example.com/o/old2", Asset: "KoboRoot.tgz"}
+	if err := config.Save(a.paths.PackageFile("old2"), p); err != nil {
+		t.Fatal(err)
+	}
+	a.state.Get("old2").InstalledVersion = "v1"
+	if err := a.refreshCarryover(false); err != nil {
+		t.Fatal(err)
+	}
+	if a.state.Carryover.LeftOut["old2"] == "" || a.state.Carryover.SHA256 != sum {
+		t.Errorf("record = %+v, want old2 left out and the same bundle", a.state.Carryover)
+	}
+	if !logContains(t, a, "carry-over: old2 is not in the bundle") {
+		t.Error("the new left-out package must be logged")
+	}
+}
+
+// tagServer serves releases by tag: each tag has its own assets, and latest is
+// the latest release. A tag that is not in releases is a 404.
+func tagServer(t *testing.T, a *App, latest string, releases map[string]map[string][]byte) string {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/download/") {
+			parts := strings.SplitN(strings.TrimPrefix(path, "/download/"), "/", 2)
+			w.Write(releases[parts[0]][parts[1]])
+			return
+		}
+		tag := latest
+		if i := strings.Index(path, "/releases/tags/"); i >= 0 {
+			tag = path[i+len("/releases/tags/"):]
+		}
+		assets, ok := releases[tag]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		var list []string
+		for name, body := range assets {
+			list = append(list, fmt.Sprintf(`{"name":%q,"size":%d,"browser_download_url":%q}`,
+				name, len(body), srv.URL+"/download/"+tag+"/"+name))
+		}
+		fmt.Fprintf(w, `{"tag_name":%q,"assets":[%s]}`, tag, strings.Join(list, ","))
+	}))
+	t.Cleanup(srv.Close)
+	a.client = forge.NewClientWithHTTP(srv.Client())
+	return strings.TrimPrefix(srv.URL, "https://")
+}
+
+// The bundle carries the 6.x build of the installed version, not of the
+// latest release. kpm records its own version without the "v" of its tag.
+// When the installed release has no 6.x build, or is not released, the bundle
+// takes the latest release and the log says so.
+func TestCarryoverPinsInstalledVersion(t *testing.T) {
+	a := newTestApp(t)
+	t.Setenv("KPM_SYSROOT", t.TempDir())
+	writeFirmware(t, a, fw4)
+	build := func(name, v string) []byte {
+		return tgzBytes(t, map[string]string{"imageformats/" + name: v})
+	}
+	host := tagServer(t, a, "v3.0.0", map[string]map[string][]byte{
+		"v1.0.0": {"Kobo.tgz": build("libpkg-qt6.so", "1"), "kpm-Kobo.tgz": build("libnkpm-qt6.so", "1")},
+		"v2.0.0": {"KoboRoot.tgz": build("libold.so", "2")},
+		"v3.0.0": {"Kobo.tgz": build("libpkg-qt6.so", "3"), "kpm-Kobo.tgz": build("libnkpm-qt6.so", "3")},
+	})
+	defs := map[string]*config.Package{
+		selfID: {Name: "kpm", Source: host + "/o/kpm", Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz", Fw6: &config.Fw6{Asset: "kpm-Kobo.tgz"}},
+		"pkg":  {Name: "pkg", Source: host + "/o/pkg", Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz", Fw6: &config.Fw6{Asset: "Kobo.tgz"}},
+		"nofw": {Name: "nofw", Source: host + "/o/nofw", Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz", Fw6: &config.Fw6{Asset: "Kobo.tgz"}},
+		"dev":  {Name: "dev", Source: host + "/o/dev", Forge: config.ForgeForgejo, Asset: "KoboRoot.tgz", Fw6: &config.Fw6{Asset: "Kobo.tgz"}},
+	}
+	installed := map[string]string{selfID: "1.0.0", "pkg": "v1.0.0", "nofw": "v2.0.0", "dev": "v9.9.9"}
+	for id, p := range defs {
+		if err := config.Save(a.paths.PackageFile(id), p); err != nil {
+			t.Fatal(err)
+		}
+		a.state.Get(id).InstalledVersion = installed[id]
+	}
+	if err := a.refreshCarryover(true); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{selfID: "v1.0.0", "pkg": "v1.0.0", "nofw": "v3.0.0", "dev": "v3.0.0"}
+	for id, v := range want {
+		if got := a.state.Carryover.Packages[id].Version; got != v {
+			t.Errorf("%s carried %q, want %q", id, got, v)
+		}
+	}
+	for _, w := range []string{"carry-over: nofw v2.0.0 has no 6.x build, so the bundle carries v3.0.0", "carry-over: dev v9.9.9 has no 6.x build"} {
+		if !logContains(t, a, w) {
+			t.Errorf("log must contain %q", w)
+		}
+	}
+	if logContains(t, a, "carry-over: pkg v1.0.0 has no") {
+		t.Error("pkg must not warn")
 	}
 }

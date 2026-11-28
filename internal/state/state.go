@@ -78,6 +78,10 @@ type Carryover struct {
 	From map[string]string `json:"from"`
 	// Packages maps each package id to the 6.x build in the bundle.
 	Packages map[string]CarriedPackage `json:"packages"`
+	// LeftOut maps each installed package that the bundle leaves out, and that
+	// firmware 6.x does not keep or replace, to the reason. The upgrade
+	// removes these packages.
+	LeftOut map[string]string `json:"left_out,omitempty"`
 }
 
 // CarriedPackage is the 6.x build of one package in the carry-over bundle.
