@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"kpm/internal/config"
+	"kpm/internal/state"
 	"kpm/internal/version"
 )
 
@@ -54,8 +55,9 @@ func TestSeedSelfReconcilesStaleRecord(t *testing.T) {
 	}
 }
 
-// §3.2: normalized-equal record (v0.4.1 vs 0.4.1) -> no write, no log.
-func TestSeedSelfNormalizedEqualNoWrite(t *testing.T) {
+// §3.2: normalized-equal record (v0.4.1 vs 0.4.1) -> the running version,
+// with no log and the same InstalledAt. A self-update promotes the tag form.
+func TestSeedSelfNormalizedEqualDropsTagPrefix(t *testing.T) {
 	a := newTestApp(t)
 	registerSelf(t, a)
 	setVersion(t, "0.4.1")
@@ -65,25 +67,68 @@ func TestSeedSelfNormalizedEqualNoWrite(t *testing.T) {
 	if err := a.state.Save(); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(a.paths.StateFile())
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := a.seedSelf(); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.ReadFile(a.paths.StateFile())
-	if err != nil {
-		t.Fatal(err)
+	got := a.state.Get(selfID)
+	if got.InstalledVersion != "0.4.1" {
+		t.Errorf("installed_version = %q, want 0.4.1", got.InstalledVersion)
 	}
-	if string(before) != string(after) {
-		t.Errorf("state file changed on normalized-equal version:\nbefore=%s\nafter=%s", before, after)
+	if got.InstalledAt != "2020-01-01T00:00:00Z" {
+		t.Errorf("InstalledAt changed to %q", got.InstalledAt)
 	}
 	if log, _ := os.ReadFile(a.paths.LogFile()); strings.Contains(string(log), "self version reconciled") {
 		t.Errorf("normalized-equal must not log; log = %q", log)
 	}
-	if got := a.state.Get(selfID).InstalledVersion; got != "v0.4.1" {
-		t.Errorf("raw tag must be preserved, got %q", got)
+	// A second run is a no-op: no write.
+	before, _ := os.ReadFile(a.paths.StateFile())
+	if err := a.seedSelf(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(a.paths.StateFile())
+	if string(before) != string(after) {
+		t.Errorf("second seedSelf changed state:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+// A self-update stages the tag "v0.4.1". After the reboot, reconcile promotes
+// it and seedSelf records the running version "0.4.1". The read-only view
+// shows the same value and writes nothing.
+func TestSelfUpdatePromotionRecordsPlainVersion(t *testing.T) {
+	a := newTestApp(t)
+	registerSelf(t, a)
+	setVersion(t, "0.4.1")
+	ps := a.state.Get(selfID)
+	ps.InstalledVersion = "0.4.0"
+	ps.StagedVersion = "v0.4.1"
+	a.state.StagedCommitted = true
+	if err := a.state.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// No staged tgz on disk: the boot consumed it.
+	before, _ := os.ReadFile(a.paths.StateFile())
+	a.viewStaged()
+	if got := a.state.Get(selfID).InstalledVersion; got != "0.4.1" {
+		t.Errorf("view installed_version = %q, want 0.4.1", got)
+	}
+	after, _ := os.ReadFile(a.paths.StateFile())
+	if string(before) != string(after) {
+		t.Error("viewStaged wrote state.json")
+	}
+
+	st, err := state.Load(a.paths.StateFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &App{paths: a.paths, state: st}
+	if err := b.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.seedSelf(); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.state.Get(selfID).InstalledVersion; got != "0.4.1" {
+		t.Errorf("installed_version = %q, want 0.4.1", got)
 	}
 }
 

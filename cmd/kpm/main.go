@@ -471,8 +471,8 @@ func (a *App) refreshLock() {
 //   - Stale record: overwrite from the running binary, refresh InstalledAt,
 //     save, and log INFO — so an out-of-band update (USB sideload, manual
 //     KoboRoot.tgz) self-heals on the next mutating command. A normalized-equal
-//     record (tagsEqual, e.g. "v0.4.1" vs "0.4.1") is left untouched: no write,
-//     no log.
+//     record (tagsEqual, e.g. "v0.4.1" vs "0.4.1") gets the running version
+//     with no log and no new InstalledAt. A self-update promotes the tag form.
 //   - A "dev" binary never reconciles an existing record, so host sandboxes /
 //     `go run` against a copied device tree cannot pollute state.
 //
@@ -496,9 +496,21 @@ func (a *App) seedSelf() error {
 		}
 		return nil
 	}
-	// Existing record: a "dev" binary never overwrites it (§1.5), and a
-	// normalized-equal record is a no-op (no churn, no log).
-	if version.Version == "dev" || tagsEqual(ps.InstalledVersion, version.Version) {
+	// Existing record: a "dev" binary never overwrites it (§1.5).
+	if version.Version == "dev" {
+		return nil
+	}
+	// A normalized-equal record is the same version. A self-update promotes
+	// the release tag ("v0.16.1"), so kpm writes the running version
+	// ("0.16.1") in its place, with no log and no new InstalledAt.
+	if tagsEqual(ps.InstalledVersion, version.Version) {
+		if ps.InstalledVersion == version.Version {
+			return nil
+		}
+		ps.InstalledVersion = version.Version
+		if err := a.state.Save(); err != nil {
+			return fmt.Errorf("normalize self version: %w", err)
+		}
 		return nil
 	}
 	old := ps.InstalledVersion
@@ -683,12 +695,7 @@ func (a *App) settleStaged() (promos []state.Promotion, warnings []string, chang
 // kpm's own version, as seedSelf records it after any firmware change: a
 // manual KoboRoot.tgz install has no staging to settle.
 func (a *App) viewStaged() {
-	if _, err := os.Stat(a.paths.PackageFile(selfID)); err == nil && version.Version != "dev" {
-		if ps := a.state.Get(selfID); ps.InstalledVersion != "" && !tagsEqual(ps.InstalledVersion, version.Version) {
-			ps.InstalledVersion = version.Version
-			a.viewChanged = true
-		}
-	}
+	a.viewSelfVersion()
 	old, _, fwChanged := a.detectFirmwareChange()
 	if fwChanged && a.oldLineStaged(old) != "" {
 		a.state.RollbackStaged()
@@ -700,7 +707,22 @@ func (a *App) viewStaged() {
 		return
 	}
 	a.viewChanged = a.viewChanged || changed
+	// A promoted self-update holds the release tag. Show it as seedSelf
+	// records it.
+	a.viewSelfVersion()
 	if fwChanged && len(a.forgetWipedInstalls(true)) > 0 {
+		a.viewChanged = true
+	}
+}
+
+// viewSelfVersion shows the running binary as kpm's own version, in memory
+// only, as seedSelf records it.
+func (a *App) viewSelfVersion() {
+	if _, err := os.Stat(a.paths.PackageFile(selfID)); err != nil || version.Version == "dev" {
+		return
+	}
+	if ps := a.state.Get(selfID); ps.InstalledVersion != "" && ps.InstalledVersion != version.Version {
+		ps.InstalledVersion = version.Version
 		a.viewChanged = true
 	}
 }
