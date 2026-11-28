@@ -484,6 +484,9 @@ func (a *App) seedSelf() error {
 	if err := a.migrateSelfSource(); err != nil {
 		return err
 	}
+	if err := a.migrateSelfRegistry(); err != nil {
+		return err
+	}
 	ps := a.state.Get(selfID)
 	if ps.InstalledVersion == "" {
 		ps.InstalledVersion = version.Version
@@ -540,6 +543,50 @@ func (a *App) migrateSelfSource() error {
 		return fmt.Errorf("migrate self source: %w", err)
 	}
 	a.paths.Log("INFO", fmt.Sprintf("%s  self source migrated to state (%s)", selfID, p.Source))
+	return nil
+}
+
+// migrateSelfRegistry records an adopted kpm's registry name in state.json, so
+// it survives the self-update that overwrites kpm.toml (mirrors
+// migrateSelfSource). It handles two cases:
+//
+//  1. kpm.toml still names the registry (adopted, not yet clobbered): copy it.
+//  2. kpm.toml was already clobbered (a v0.16.0 self-update) but state holds
+//     the source: find the configured registry whose cached kpm def has that
+//     source, with the same precedence as install, and record its name.
+//
+// It never overwrites a registry already in state, reads only the local
+// cache (no network), and is a no-op under a "dev" binary.
+func (a *App) migrateSelfRegistry() error {
+	if version.Version == "dev" {
+		return nil
+	}
+	ps := a.state.Get(selfID)
+	if ps.Registry != "" {
+		return nil // already durable in state
+	}
+	name := ""
+	if p, err := a.loadPackage(selfID); err == nil && p.Registry != "" {
+		name = p.Registry
+	} else if ps.Source != "" {
+		cfg, cerr := a.loadRegistryConfig()
+		if cerr != nil {
+			return nil // no usable registry config: nothing to infer from
+		}
+		mans, _ := a.cachedManifests(cfg)
+		entries, _ := registry.Merge(mans)
+		if e, ok := entries[selfID]; ok && e.Def.Source == ps.Source {
+			name = e.Registry
+		}
+	}
+	if name == "" {
+		return nil
+	}
+	ps.Registry = name
+	if err := a.state.Save(); err != nil { // save before logging (B5)
+		return fmt.Errorf("migrate self registry: %w", err)
+	}
+	a.paths.Log("INFO", fmt.Sprintf("%s  self registry recorded in state (%s)", selfID, name))
 	return nil
 }
 

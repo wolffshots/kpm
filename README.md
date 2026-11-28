@@ -183,7 +183,7 @@ To turn it on, add a registry that offers kpm, then tap **Enable self-update** o
 kpm adopt-self
 ```
 
-kpm then updates itself like any other package. kpm stores its source and pin in `state.json`, so a self-update keeps them. On 6.x, a self-update stages the `Kobo.tgz` of the release, and the seed copies the new binary at the next boot.
+kpm then updates itself like any other package. kpm stores its source, pin and registry name in `state.json`, so a self-update keeps them. On 6.x, a self-update stages the `Kobo.tgz` of the release, and the seed copies the new binary at the next boot.
 
 ## CLI
 

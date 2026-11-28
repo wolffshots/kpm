@@ -51,6 +51,10 @@ type PackageState struct {
 	// Populated only for kpm; other packages read source/forge from their TOML.
 	Source string `json:"source,omitempty"`
 	Forge  string `json:"forge,omitempty"`
+	// Registry holds the name of the registry kpm was adopted from. It lives
+	// here for the same reason as Source/Forge: a self-update unpacks the
+	// shipped kpm.toml, which has no registry key. Populated only for kpm.
+	Registry string `json:"registry,omitempty"`
 	// SyncedDefSHA256 is the SHA-256 of the canonical registry def last written
 	// into this package's local TOML by install/sync (excluding pin/registry).
 	// It lets sync tell "up to date" from local drift (REGISTRY.md §9.7).
