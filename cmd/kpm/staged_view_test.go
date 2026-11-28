@@ -89,14 +89,24 @@ func TestReadOnlyViewKeepsPendingStaging(t *testing.T) {
 }
 
 // viewAfterFirmware stages nh on firmware from, applies the boot (consumed
-// removes the staged tgz), and moves the device to firmware to. It checks that
-// the read-only view writes nothing and shows what the next mutating run
-// records, and that the mutating run records want.
-func viewAfterFirmware(t *testing.T, from, to string, consumed bool, wantStaged, wantInstalled string) {
+// removes the staged tgz), and moves the device to firmware to. With files,
+// the rootfs file of nh survives the move. It checks that the read-only view
+// writes nothing and shows what the next mutating run records.
+func viewAfterFirmware(t *testing.T, from, to string, consumed, files bool, wantStaged, wantInstalled string) {
 	t.Helper()
+	t.Setenv("KPM_SYSROOT", t.TempDir()) // the rootfs of the device
 	a := stageOnDisk(t, from)
 	if consumed {
 		os.Remove(a.paths.StagedTgz()) // the boot installer of the old firmware ran
+	}
+	if files {
+		f := a.paths.HostPath("/usr/local/nh/file")
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("nh"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	writeFirmware(t, a, to)
 	before, _ := os.ReadFile(a.paths.StateFile())
@@ -114,33 +124,42 @@ func viewAfterFirmware(t *testing.T, from, to string, consumed bool, wantStaged,
 	if _, err := os.Stat(a.paths.StagedTgzFor(device.LineOf(from))); !consumed && err != nil {
 		t.Errorf("a read-only command removed the staged tgz: %v", err)
 	}
+	if log, _ := os.ReadFile(a.paths.LogFile()); bytes.Contains(log, []byte("firmware changed")) {
+		t.Error("a read-only command logged a firmware change")
+	}
 
 	c, err := newApp(true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.releaseLock()
-	if ps := c.state.Get("nh"); ps.StagedVersion != wantStaged {
-		t.Errorf("mutating run %s to %s: staged %q, want %q", from, to, ps.StagedVersion, wantStaged)
+	if ps := c.state.Get("nh"); ps.StagedVersion != wantStaged || ps.InstalledVersion != wantInstalled {
+		t.Errorf("mutating run %s to %s: staged %q installed %q, want %q and %q", from, to, ps.StagedVersion, ps.InstalledVersion, wantStaged, wantInstalled)
 	}
 }
 
 // The 4.x boot installed the tgz, and the next boot moved to 6.x. The view
 // must not show "reboot pending" on 6.x.
 func TestReadOnlyViewPromotesBeforeLineChange(t *testing.T) {
-	viewAfterFirmware(t, fw4, fw6, true, "", "v2")
+	viewAfterFirmware(t, fw4, fw6, true, true, "", "v2")
+}
+
+// The same, but the 6.x rootfs has no file of nh. The view shows nh as not
+// installed, as the next mutating run records it (forgetWipedInstalls).
+func TestReadOnlyViewForgetsWipedInstall(t *testing.T) {
+	viewAfterFirmware(t, fw4, fw6, true, false, "", "")
 }
 
 // The device moved to 6.x before the 4.x slot was read. Firmware 6.x never
 // reads KoboRoot.tgz, so the next mutating run drops it (dropOldLineStaged).
 // The view shows that outcome and deletes nothing.
 func TestReadOnlyViewDropsOldLineStaging(t *testing.T) {
-	viewAfterFirmware(t, fw4, fw6, false, "", "v1")
+	viewAfterFirmware(t, fw4, fw6, false, true, "", "v1")
 }
 
 // An update inside line 4 keeps the slot, so the view settles as usual.
 func TestReadOnlyViewSettlesSameLineUpdate(t *testing.T) {
-	viewAfterFirmware(t, fw4, "4.41.23145", true, "", "v2")
+	viewAfterFirmware(t, fw4, "4.41.23145", true, true, "", "v2")
 }
 
 // The text of `kpm status` is the summary that the last check or update wrote.

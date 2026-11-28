@@ -350,7 +350,7 @@ func newApp(mutating bool) (*App, error) {
 	}
 	if curFw != "" && curFw != oldFw {
 		if fwChanged {
-			a.forgetWipedInstalls()
+			a.forgetWipedInstalls(false)
 			a.syncForLine()
 			a.removeBuiltin()
 		}
@@ -630,7 +630,9 @@ func (a *App) settleStaged() (promos []state.Promotion, warnings []string, chang
 // writes nothing. After a firmware change it first does in memory what
 // dropOldLineStaged does on disk: if the old line's slot still holds the tgz
 // that kpm staged, the new firmware never reads it, so the staging is rolled
-// back. An error keeps the stored state. It always shows the running binary as
+// back. After the settle step it marks the installs that the firmware removed,
+// as forgetWipedInstalls does. If settleStaged fails, the view stops there and
+// the staging stays as stored. It always shows the running binary as
 // kpm's own version, as seedSelf records it after any firmware change: a
 // manual KoboRoot.tgz install has no staging to settle.
 func (a *App) viewStaged() {
@@ -640,7 +642,8 @@ func (a *App) viewStaged() {
 			a.viewChanged = true
 		}
 	}
-	if old, _, fwChanged := a.detectFirmwareChange(); fwChanged && a.oldLineStaged(old) != "" {
+	old, _, fwChanged := a.detectFirmwareChange()
+	if fwChanged && a.oldLineStaged(old) != "" {
 		a.state.RollbackStaged()
 		a.viewChanged = true
 	}
@@ -650,6 +653,9 @@ func (a *App) viewStaged() {
 		return
 	}
 	a.viewChanged = a.viewChanged || changed
+	if fwChanged && len(a.forgetWipedInstalls(true)) > 0 {
+		a.viewChanged = true
+	}
 }
 
 // reverifyMissing re-runs manifest verification for every package that currently

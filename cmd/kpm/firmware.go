@@ -102,8 +102,9 @@ func (a *App) oldLineStaged(old string) string {
 //   - kpm itself: kpm runs, so it stays installed. Its missing hook files go
 //     into missing_files, and selfRepair makes `update` install kpm again.
 //
-// A package with no rootfs member (app-tree, file) is not checked.
-func (a *App) forgetWipedInstalls() []string {
+// A package with no rootfs member (app-tree, file) is not checked. With quiet,
+// it logs nothing: a read-only command uses it in memory (viewStaged).
+func (a *App) forgetWipedInstalls(quiet bool) []string {
 	var cleared []string
 	for id, ps := range a.state.Packages {
 		if ps.InstalledVersion == "" {
@@ -126,6 +127,9 @@ func (a *App) forgetWipedInstalls() []string {
 		}
 		if id == selfID || len(gone) < len(rootfs) {
 			ps.MissingFiles = verifyManifest(a.paths, ps.Manifest)
+			if quiet {
+				continue
+			}
 			a.paths.Log("WARN", fmt.Sprintf("%s  firmware changed and removed %d of its files", id, len(gone)))
 			continue
 		}
@@ -138,6 +142,9 @@ func (a *App) forgetWipedInstalls() []string {
 		cleared = append(cleared, id)
 	}
 	sort.Strings(cleared)
+	if quiet {
+		return cleared
+	}
 	for _, id := range cleared {
 		a.paths.Log("INFO", fmt.Sprintf("%s  firmware changed and removed its rootfs files; marked not installed", id))
 	}
