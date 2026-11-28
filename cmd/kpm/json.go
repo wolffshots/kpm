@@ -635,7 +635,7 @@ type jsonStatusPkg struct {
 	Staged    *string `json:"staged"`
 	Latest    *string `json:"latest"`
 	Pinned    *string `json:"pinned"`
-	State     string  `json:"state"` // unconfigured|staged|update-available|up-to-date
+	State     string  `json:"state"` // unconfigured|staged|unavailable|update-available|up-to-date
 	// MissingFiles names manifest members absent at the last post-install
 	// verification (A): null when the package verified clean (or was never
 	// verified), a JSON array when files are gone. Same shape as jsonSearchPkg.
@@ -676,6 +676,7 @@ func (a *App) statusJSON() int {
 		return exitError
 	}
 	graph := localConflictGraph(pkgs)
+	line := a.paths.Line()
 	out := make([]jsonStatusPkg, 0, len(pkgs))
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
@@ -687,6 +688,10 @@ func (a *App) statusJSON() int {
 			st = "unconfigured"
 		case ps.StagedVersion != "":
 			st = "staged"
+		case !p.AvailableOn(line):
+			// No build for this firmware line: update skips it, so the
+			// latest_seen of the old line is no update.
+			st = "unavailable"
 		case avail:
 			st = "update-available"
 			latest = ptr(target)
