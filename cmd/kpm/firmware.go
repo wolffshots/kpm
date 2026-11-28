@@ -31,17 +31,23 @@ import (
 // the device was upgraded (emulator finding of 2026-11-18: a user who goes
 // from kpm 0.12.0 on 4.x straight to 6.x).
 func (a *App) firmwareChange() (old, cur string, changed bool) {
+	old, cur, changed = a.detectFirmwareChange()
+	if changed && old == "" {
+		a.paths.Log("INFO", "firmware not recorded: this state comes from firmware 4.x, so the device was upgraded")
+	}
+	return old, cur, changed
+}
+
+// detectFirmwareChange is firmwareChange without the log line. A read-only
+// command uses it, because it writes nothing (viewStaged).
+func (a *App) detectFirmwareChange() (old, cur string, changed bool) {
 	cur, ok := a.paths.Firmware()
 	if !ok {
 		return a.state.Firmware, "", false
 	}
 	old = a.state.Firmware
 	if old == "" {
-		upgraded := device.LineOf(cur) == device.Line6 && len(a.state.Packages) > 0
-		if upgraded {
-			a.paths.Log("INFO", "firmware not recorded: this state comes from firmware 4.x, so the device was upgraded")
-		}
-		return old, cur, upgraded
+		return old, cur, device.LineOf(cur) == device.Line6 && len(a.state.Packages) > 0
 	}
 	return old, cur, old != cur
 }
@@ -51,19 +57,8 @@ func (a *App) firmwareChange() (old, cur string, changed bool) {
 // (section 3f rule 5). kpm deletes the file only when its content is the tgz
 // that kpm staged. A foreign file stays.
 func (a *App) dropOldLineStaged(old string) {
-	oldLine := device.LineOf(old)
-	if old == "" {
-		oldLine = device.Line4 // see firmwareChange
-	}
-	if oldLine == 0 || oldLine == a.paths.Line() {
-		return
-	}
-	path := a.paths.StagedTgzFor(oldLine)
-	if _, err := os.Stat(path); err != nil {
-		return
-	}
-	sum, size, err := sha256AndSize(path)
-	if err != nil || a.state.StagedSHA256 == "" || sum != a.state.StagedSHA256 || size != a.state.StagedSize {
+	path := a.oldLineStaged(old)
+	if path == "" {
 		return
 	}
 	if err := os.Remove(path); err != nil {
@@ -73,6 +68,28 @@ func (a *App) dropOldLineStaged(old string) {
 	device.FsyncDir(filepath.Dir(path))
 	a.state.RollbackStaged()
 	a.paths.Log("INFO", fmt.Sprintf("firmware changed: removed the staged %s, which this firmware does not read", filepath.Base(path)))
+}
+
+// oldLineStaged returns the path of the staged tgz of the old firmware line
+// when the line changed and the file is the tgz that kpm staged. Else it
+// returns "". It writes nothing.
+func (a *App) oldLineStaged(old string) string {
+	oldLine := device.LineOf(old)
+	if old == "" {
+		oldLine = device.Line4 // see firmwareChange
+	}
+	if oldLine == 0 || oldLine == a.paths.Line() {
+		return ""
+	}
+	path := a.paths.StagedTgzFor(oldLine)
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	sum, size, err := sha256AndSize(path)
+	if err != nil || a.state.StagedSHA256 == "" || sum != a.state.StagedSHA256 || size != a.state.StagedSize {
+		return ""
+	}
+	return path
 }
 
 // forgetWipedInstalls checks each installed package after a firmware change
@@ -85,8 +102,9 @@ func (a *App) dropOldLineStaged(old string) {
 //   - kpm itself: kpm runs, so it stays installed. Its missing hook files go
 //     into missing_files, and selfRepair makes `update` install kpm again.
 //
-// A package with no rootfs member (app-tree, file) is not checked.
-func (a *App) forgetWipedInstalls() []string {
+// A package with no rootfs member (app-tree, file) is not checked. With quiet,
+// it logs nothing: a read-only command uses it in memory (viewStaged).
+func (a *App) forgetWipedInstalls(quiet bool) []string {
 	var cleared []string
 	for id, ps := range a.state.Packages {
 		if ps.InstalledVersion == "" {
@@ -109,6 +127,9 @@ func (a *App) forgetWipedInstalls() []string {
 		}
 		if id == selfID || len(gone) < len(rootfs) {
 			ps.MissingFiles = verifyManifest(a.paths, ps.Manifest)
+			if quiet {
+				continue
+			}
 			a.paths.Log("WARN", fmt.Sprintf("%s  firmware changed and removed %d of its files", id, len(gone)))
 			continue
 		}
@@ -121,6 +142,9 @@ func (a *App) forgetWipedInstalls() []string {
 		cleared = append(cleared, id)
 	}
 	sort.Strings(cleared)
+	if quiet {
+		return cleared
+	}
 	for _, id := range cleared {
 		a.paths.Log("INFO", fmt.Sprintf("%s  firmware changed and removed its rootfs files; marked not installed", id))
 	}
