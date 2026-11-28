@@ -314,27 +314,41 @@ func (a *App) refreshCarryover(online bool) error {
 		a.paths.Log("WARN", "carry-over: rcK block: "+err.Error())
 	}
 	leftOut := a.carryoverLeftOut()
-	plan, err := a.planCarryover(online, "")
-	if err != nil {
-		return err
-	}
 	var before map[string]string
 	if a.state.Carryover != nil {
 		before = a.state.Carryover.LeftOut
 	}
-	if plan == nil {
-		// The bundle is up to date. Record a change of the left-out set.
-		if co := a.state.Carryover; co != nil && !sameKeys(co.LeftOut, leftOut) {
-			a.noteLeftOut(before, leftOut)
-			co.LeftOut = leftOut
-			return a.state.Save()
+	built, err := a.buildCarryover(online, leftOut)
+	if built {
+		a.noteLeftOut(before, leftOut)
+		return err
+	}
+	// No new bundle: it is up to date, or the build failed. The warning
+	// matters most when there is no bundle, so record a change of the
+	// left-out set on the old record, or warn each time without one.
+	if co := a.state.Carryover; co == nil {
+		a.noteLeftOut(nil, leftOut)
+	} else if !sameKeys(co.LeftOut, leftOut) {
+		a.noteLeftOut(before, leftOut)
+		co.LeftOut = leftOut
+		if serr := a.state.Save(); err == nil {
+			err = serr
 		}
-		return nil
+	}
+	return err
+}
+
+// buildCarryover is the build of refreshCarryover. built is true when it
+// wrote a new record, with leftOut in it.
+func (a *App) buildCarryover(online bool, leftOut map[string]string) (built bool, err error) {
+	plan, err := a.planCarryover(online, "")
+	if err != nil || plan == nil {
+		return false, err
 	}
 	keys, ids, carried := plan.keys, plan.ids, plan.carried
 	dir := a.paths.CarryoverDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	// The command counted these steps in its plan (carryoverSteps): they are
 	// the last ones.
@@ -343,7 +357,7 @@ func (a *App) refreshCarryover(online bool) error {
 		a.prog.Step("Getting " + id + " for firmware 6")
 		cp, err := a.fetchFw6(plan.defs[id], filepath.Join(dir, id+".tgz"))
 		if err != nil {
-			return fmt.Errorf("%s: %w", id, err)
+			return false, fmt.Errorf("%s: %w", id, err)
 		}
 		carried[id] = cp
 	}
@@ -357,7 +371,7 @@ func (a *App) refreshCarryover(online bool) error {
 	dups, err := tgz.Merge(sources, part)
 	if err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	for _, d := range dups {
 		a.paths.Log("WARN", "carry-over: more than one package writes "+d)
@@ -365,11 +379,11 @@ func (a *App) refreshCarryover(online bool) error {
 	sum, size, err := sha256AndSize(part)
 	if err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	if err := os.Rename(part, a.paths.CarryoverBundle()); err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	device.FsyncDir(dir)
 	a.removeStaleCarried(carried)
@@ -382,16 +396,15 @@ func (a *App) refreshCarryover(online bool) error {
 		Packages: carried,
 		LeftOut:  leftOut,
 	}
-	a.noteLeftOut(before, leftOut)
 	if err := a.state.Save(); err != nil {
-		return err
+		return true, err
 	}
 	var list []string
 	for _, id := range ids {
 		list = append(list, id+" "+carried[id].Version)
 	}
 	a.paths.Log("INFO", "carry-over bundle for firmware 6.x: "+strings.Join(list, ", "))
-	return nil
+	return true, nil
 }
 
 // fetchFw6 downloads the 6.x build of a package, checks it as a Kobo.tgz, and

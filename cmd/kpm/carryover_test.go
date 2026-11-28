@@ -387,3 +387,19 @@ func TestCarryoverPinsInstalledVersion(t *testing.T) {
 		t.Error("pkg must not warn")
 	}
 }
+
+// When there is no bundle, the left-out warning still comes: that is when it
+// matters most.
+func TestCarryoverWarnsLeftOutWithoutBundle(t *testing.T) {
+	a, _ := carryoverSetup(t)
+	a.client = forge.NewClientWithHTTP(&http.Client{Transport: carryFailRT{}})
+	if err := a.refreshCarryover(true); err == nil {
+		t.Fatal("want a failed build offline")
+	}
+	if a.state.Carryover != nil {
+		t.Fatal("a failed build must not write a record")
+	}
+	if !logContains(t, a, "carry-over: old is not in the bundle and does not come back on firmware 6.x") {
+		t.Error("the left-out package must be logged without a bundle")
+	}
+}
