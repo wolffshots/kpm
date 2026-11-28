@@ -27,6 +27,9 @@ func (a *App) loadPackages() ([]*config.Package, error) {
 		return nil, err
 	}
 	a.skipped = skipped
+	for _, p := range pkgs {
+		a.overlaySelfRegistry(p)
+	}
 	report := func(msg string) {
 		if a.readOnly {
 			fmt.Fprintln(os.Stderr, "kpm:", msg)
@@ -50,7 +53,20 @@ func (a *App) loadPackage(id string) (*config.Package, error) {
 	if err != nil {
 		return nil, fmt.Errorf("package %q not registered (%v)", id, err)
 	}
+	a.overlaySelfRegistry(p)
 	return p, nil
+}
+
+// overlaySelfRegistry fills kpm's registry from state.json when kpm.toml has
+// none. A self-update unpacks the shipped kpm.toml, which has no registry key.
+// Without this overlay an adopted kpm reads as hand-added after every
+// self-update: list/search show registry null and sync skips it. It changes
+// nothing for other packages or when kpm.toml already names a registry.
+func (a *App) overlaySelfRegistry(p *config.Package) {
+	if p == nil || p.ID != selfID || p.Registry != "" || a.state == nil {
+		return
+	}
+	p.Registry = a.state.Get(selfID).Registry
 }
 
 // effectivePin returns the pin in force for a package. kpm's pin lives in
@@ -123,6 +139,11 @@ func (a *App) persistDef(id string, pkg *config.Package, ps *state.PackageState)
 	}
 	ps.Source = pkg.Source // durable adoption identity (§10)
 	ps.Forge = pkg.Forge
+	if pkg.Registry != "" {
+		// The registry also survives the clobber. It stays in kpm.toml too,
+		// so an older binary still reads it until the next self-update.
+		ps.Registry = pkg.Registry
+	}
 	pkg.Source = "" // keep kpm.toml sourceless, matching the shipped def
 	pkg.Forge = ""
 	pkg.Pin = "" // kpm's pin also lives in state.json (§10)

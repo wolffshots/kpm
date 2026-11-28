@@ -40,7 +40,7 @@ pin = ""                # empty: track the latest release. Else an exact tag.
 ```
 
 - A pin freezes the package. kpm does not fetch a rolling package again while a pin is set.
-- kpm keeps its own pin and its own source in `state.json`, not in `kpm.toml`. Each kpm release ships `packages.d/kpm.toml`, so a self-update writes that file again.
+- kpm keeps its own pin, source and registry name in `state.json`, not in `kpm.toml`. Each kpm release ships `packages.d/kpm.toml`, so a self-update writes that file again.
 - `kpm pin` and `kpm unpin` write the TOML again. They keep unknown fields but not comments.
 - A def with a bad `[uninstall]` table fails only when `uninstall` runs. It never breaks `add`, `check` or `update`.
 - kpm skips a file with malformed TOML, or with a file name that is not a valid id, and logs a warning. The other packages stay visible.
