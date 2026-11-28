@@ -61,6 +61,7 @@ type PackageDef struct {
 	NhName      string             `toml:"nh_name,omitempty"`      // DOCTOR.md
 	UpdateCheck string             `toml:"update_check,omitempty"` // INTEGRITY.md §3
 	Conflicts   []string           `toml:"conflicts,omitempty"`    // INTEGRITY.md §4
+	Requires    []string           `toml:"requires,omitempty"`     // DEPENDENCIES.md
 	BuiltinFw6  string             `toml:"builtin_fw6,omitempty"`  // QT6-FIRMWARE6.md section 3g
 	Install     *config.Install    `toml:"install,omitempty"`      // APP-TREE.md §2
 	Fw6         *config.Fw6        `toml:"fw6,omitempty"`          // QT6-FIRMWARE6.md section 3c
@@ -168,6 +169,10 @@ func ParseManifest(data []byte) (*Manifest, error) {
 			continue
 		}
 		if err := config.ValidateConflicts(id, def.Conflicts); err != nil {
+			drop(id, err.Error())
+			continue
+		}
+		if err := config.ValidateRequires(id, def.Requires, def.Conflicts); err != nil {
 			drop(id, err.Error())
 			continue
 		}

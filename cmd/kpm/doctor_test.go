@@ -70,7 +70,7 @@ nh_name = "NickelNote"
 
 	out := captureStdout(t, func() { a.cmdDoctor([]string{"--json"}) })
 	got := lastJSON(t, out)
-	want := `{"device_fw":"4.45.23697","packages":[{"id":"nickelnote","verdict":"loaded","detail":"plugin mapped into Nickel (proves it loaded, not that it works)","plugin":"/usr/local/Kobo/imageformats/libnickelnote.so","tested_fw":"4.38.23429","fw_untested":true}],"ssh":null}`
+	want := `{"device_fw":"4.45.23697","packages":[{"id":"nickelnote","verdict":"loaded","detail":"plugin mapped into Nickel (proves it loaded, not that it works)","plugin":"/usr/local/Kobo/imageformats/libnickelnote.so","tested_fw":"4.38.23429","fw_untested":true,"requires_missing":[]}],"ssh":null}`
 	if got != want {
 		t.Errorf("doctor --json\n got: %s\nwant: %s", got, want)
 	}

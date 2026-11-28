@@ -448,6 +448,11 @@ type Package struct {
 	// The relation is treated as symmetric: kpm checks both directions, so a
 	// curator declares it once (INTEGRITY.md §4.2).
 	Conflicts []string `toml:"conflicts,omitempty"`
+	// Requires names package ids that must be installed for this one to work.
+	// The relation is one way: kpm registers and installs each requirement first,
+	// and refuses to uninstall a package that an installed package requires
+	// (DEPENDENCIES.md).
+	Requires []string `toml:"requires,omitempty"`
 	// Checksums maps a release tag to the curator-attested lowercase sha256 of
 	// that release's asset, verified at download time (INTEGRITY.md §5). An
 	// absent tag is simply unverified.
@@ -716,6 +721,29 @@ func ValidateConflicts(id string, conflicts []string) error {
 	return nil
 }
 
+// ValidateRequires checks that every entry is a valid package id, that the
+// package does not require itself, and that no id is both required and listed
+// as a conflict. A package that requires what it conflicts with can never be
+// installed, so that is a curator mistake.
+func ValidateRequires(id string, requires, conflicts []string) error {
+	bad := map[string]bool{}
+	for _, c := range conflicts {
+		bad[c] = true
+	}
+	for _, r := range requires {
+		if r == id {
+			return fmt.Errorf("requires must not list the package's own id %q", id)
+		}
+		if !ValidID(r) {
+			return fmt.Errorf("requires entry %q is not a valid package id", r)
+		}
+		if bad[r] {
+			return fmt.Errorf("requires entry %q is also listed in conflicts", r)
+		}
+	}
+	return nil
+}
+
 // ValidateChecksums checks that every key is a non-empty release tag and every
 // value is a 64-character hex sha256, after NormalizeChecksum strips an optional
 // "sha256:" prefix (the form GitHub publishes and §5.5 points a curator at).
@@ -839,6 +867,7 @@ func Save(path string, p *Package) error {
 	// 0.10.0 and its HashDef is unchanged (INTEGRITY.md §2.2 hazard 2).
 	setOptional(m, "update_check", p.UpdateCheck)
 	setOptionalSlice(m, "conflicts", p.Conflicts)
+	setOptionalSlice(m, "requires", p.Requires)
 	setOptionalMap(m, "checksums", p.Checksums)
 
 	// Merge the [install] table the same way, so a hand-added package never grows
@@ -877,7 +906,7 @@ func Save(path string, p *Package) error {
 // Deleting "install" wholesale via knownTopKeys would have destroyed those
 // unknown keys.
 var (
-	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "checksums", "fw6", "builtin_fw6"}
+	knownTopKeys       = []string{"name", "source", "forge", "asset", "pin", "registry", "min_kpm", "configs", "update_check", "conflicts", "requires", "checksums", "fw6", "builtin_fw6"}
 	knownUninstallKeys = []string{"method", "extra_paths", "purge_paths", "keep_paths", "allow_paths", "marker_file", "needs_reboot", "run_before", "run_after"}
 	knownInstallKeys   = []string{"method", "root", "dest", "launcher"}
 )
@@ -909,6 +938,7 @@ func SaveReplace(path string, p *Package) error {
 	setOptional(m, "min_kpm", p.MinKpm)
 	setOptional(m, "update_check", p.UpdateCheck)
 	setOptionalSlice(m, "conflicts", p.Conflicts)
+	setOptionalSlice(m, "requires", p.Requires)
 	setOptionalMap(m, "checksums", p.Checksums)
 	if p.Fw6 != nil {
 		m["fw6"] = p.Fw6

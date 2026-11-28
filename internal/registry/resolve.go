@@ -103,6 +103,7 @@ func HashDef(def *PackageDef) (string, error) {
 	// identically to omitting the key (§2.2 hazard 3). UpdateCheck needs no
 	// normalization: its zero value is "" everywhere and omitempty drops it.
 	norm.Conflicts = nilIfEmpty(norm.Conflicts)
+	norm.Requires = nilIfEmpty(norm.Requires)
 	norm.Checksums = nilIfEmptyMap(norm.Checksums)
 	// [install] is functional — it decides where kpm writes files as root — so a
 	// registry fix to root/dest MUST propagate to installed devices via sync
@@ -206,6 +207,7 @@ func DefFromPackage(p *config.Package) *PackageDef {
 		MinKpm:      p.MinKpm,
 		UpdateCheck: p.UpdateCheck,
 		Conflicts:   p.Conflicts,
+		Requires:    p.Requires,
 		Checksums:   p.Checksums,
 		Install:     p.Install.Clone(),
 		Fw6:         localFw6(p.Fw6),
@@ -236,6 +238,7 @@ func (d *PackageDef) ToPackage(id, registry, pin string) *config.Package {
 		Pin:         pin,
 		UpdateCheck: d.UpdateCheck,
 		Conflicts:   d.Conflicts,
+		Requires:    d.Requires,
 		Checksums:   d.Checksums,
 		Install:     d.Install.Clone(), // deep copy — never share the pointer (§12.2)
 		Fw6:         localFw6(d.Fw6),
@@ -261,6 +264,7 @@ func FieldDiffs(local, remote *PackageDef) []string {
 	add("min_kpm", local.MinKpm, remote.MinKpm)
 	add("update_check", local.UpdateCheck, remote.UpdateCheck)
 	add("conflicts", quoteList(local.Conflicts), quoteList(remote.Conflicts))
+	add("requires", quoteList(local.Requires), quoteList(remote.Requires))
 	add("builtin_fw6", local.BuiltinFw6, remote.BuiltinFw6)
 	lc0, _ := HashDef(&PackageDef{Checksums: local.Checksums})
 	rc0, _ := HashDef(&PackageDef{Checksums: remote.Checksums})

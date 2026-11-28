@@ -154,6 +154,17 @@ func (a *App) cmdInstall(args []string) int {
 		return exitError
 	}
 
+	// Requires: find each requirement that has no def yet, and check that kpm
+	// can register it. A refusal here, like a conflict, is hard: --yes does not
+	// override it (docs/dependencies.md).
+	extra, rerr := a.requirementPlan(id, entry.Def, entries)
+	if rerr != nil {
+		msg := fmt.Sprintf("%q %v", id, rerr)
+		failJSON(msg)
+		fmt.Fprintln(os.Stderr, "kpm install:", msg)
+		return exitError
+	}
+
 	// Disclose a provenance change: adopting an already-registry-managed id
 	// whose winning registry differs from the recorded one (C5).
 	provenanceChange := ""
@@ -174,6 +185,9 @@ func (a *App) cmdInstall(args []string) int {
 	// advisory, so a missing/unreadable value simply omits the line.
 	deviceFw, _ := a.paths.Firmware()
 	printInstallDef(os.Stdout, id, entry.Registry, pkg, provenanceChange, deviceFw, entry.Def.TestedFwFor(line))
+	if len(extra) > 0 {
+		fmt.Printf("  also installs %s (required by %s)\n", strings.Join(extra, ", "), id)
+	}
 	if !*yes {
 		// Human line before the emit: BEGIN_JSON must be the final stdout
 		// line on every branch (JSON-OUTPUT.md §1).
@@ -185,6 +199,18 @@ func (a *App) cmdInstall(args []string) int {
 	// kpm's own source/forge/pin live in state.json (so a self-update that
 	// overwrites kpm.toml can't drop them, §10); persistDef moves them there and
 	// blanks them in the def before it is written (SELF-SOURCE §5).
+	// Write the requirement defs first, in install order. If one fails, the
+	// package that needs it is not written, so no def ever points at a
+	// requirement kpm could not register.
+	for _, r := range extra {
+		if err := a.writeRegistryDef(r, entries[r], ""); err != nil {
+			fmt.Fprintln(os.Stderr, "kpm install:", err)
+			failJSON(err.Error())
+			return exitError
+		}
+		a.paths.Log("INSTALL", fmt.Sprintf("%s  from %s (%s), required by %s", r, entries[r].Registry, entries[r].Def.Source, id))
+		fmt.Printf("installed def for %s from registry %s (required by %s)\n", r, entries[r].Registry, id)
+	}
 	logSource := entry.Def.Source // record the real source for the INSTALL log, pre-blank
 	ps := a.state.Get(id)
 	if id == selfID {
@@ -195,19 +221,9 @@ func (a *App) cmdInstall(args []string) int {
 			fmt.Fprintln(os.Stderr, "kpm install:", err)
 			return exitError
 		}
-	} else {
-		a.persistDef(id, pkg, ps)
-		if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
-			fmt.Fprintln(os.Stderr, "kpm install:", err)
-			return exitError
-		}
-		// Record the synced def hash for later drift/up-to-date checks (§9.7).
-		hash, err := registry.HashDef(entry.Def)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "kpm install:", err)
-			return exitError
-		}
-		ps.SyncedDefSHA256 = hash
+	} else if err := a.writeDef(id, entry, pkg, ps); err != nil {
+		fmt.Fprintln(os.Stderr, "kpm install:", err)
+		return exitError
 	}
 	if *installed != "" {
 		ps.InstalledVersion = *installed
@@ -232,7 +248,7 @@ func (a *App) cmdInstall(args []string) int {
 	// install only writes the def (it does not fetch/stage the software), so
 	// nothing is staged and no reboot is required (JSON-OUTPUT.md §2.3).
 	if jsonMode {
-		emitMutation([]string{id}, nil, false, false, "")
+		emitMutation(sortedUnion(extra, []string{id}), nil, false, false, "")
 	}
 	return exitOK
 }
@@ -260,6 +276,96 @@ func (a *App) installBlockers(id string, def *registry.PackageDef, entries map[s
 	graph := conflictGraphFor(entries, pkgs)
 	graph[id] = normalizeConflicts(def.Conflicts, id)
 	return a.blockingConflicts(id, graph, nil), nil
+}
+
+// writeDef writes the def of a registry package to packages.d and records its
+// synced def hash in ps (§9.7). kpm itself never comes here: its identity goes
+// to state.json through adoptSelfFromEntry.
+func (a *App) writeDef(id string, entry *registry.Entry, pkg *config.Package, ps *state.PackageState) error {
+	a.persistDef(id, pkg, ps)
+	if err := config.SaveReplace(a.paths.PackageFile(id), pkg); err != nil {
+		return err
+	}
+	hash, err := registry.HashDef(entry.Def)
+	if err != nil {
+		return err
+	}
+	ps.SyncedDefSHA256 = hash
+	return nil
+}
+
+// writeRegistryDef registers a requirement from its registry entry, with no
+// pin. The caller saves state.
+func (a *App) writeRegistryDef(id string, entry *registry.Entry, pin string) error {
+	return a.writeDef(id, entry, entry.Def.ToPackage(id, entry.Registry, pin), a.state.Get(id))
+}
+
+// requirementPlan returns the requirements of id, directly or not, that kpm must
+// register with it, in install order. A requirement that is already met, or
+// that already has a def in packages.d, is left out: `kpm update` installs a
+// registered one. An error says why kpm cannot install id with its
+// requirements: a loop, a requirement that no registry offers, one that kpm
+// cannot install here, or one that conflicts with the device or with the
+// packages in the same install.
+func (a *App) requirementPlan(id string, def *registry.PackageDef, entries map[string]*registry.Entry) ([]string, error) {
+	pkgs, err := a.loadPackages()
+	if err != nil {
+		return nil, fmt.Errorf("cannot check requires: %v", err)
+	}
+	line := a.paths.Line()
+	g := requiresGraphFor(entries, pkgs, line)
+	g.req[id] = normalizeRequires(def.Requires, id)
+	closure, err := requirementClosure(id, g)
+	if err != nil {
+		return nil, err
+	}
+	local := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		local[p.ID] = true
+	}
+	conflicts := conflictGraphFor(entries, pkgs)
+	conflicts[id] = normalizeConflicts(def.Conflicts, id)
+	set := []string{id}
+	var extra []string
+	for _, r := range closure {
+		if a.requirementMet(r, g, nil) || local[r] {
+			continue
+		}
+		e := entries[r]
+		if e == nil || e.Def == nil {
+			return nil, fmt.Errorf("requires package %q, which no registry offers — add a registry that has it, or \"kpm add <url>\" it by hand", r)
+		}
+		if missing := missingDefFields(e.Def); len(missing) > 0 {
+			return nil, fmt.Errorf("requires package %q, whose def in registry %q is missing required field(s): %s", r, e.Registry, strings.Join(missing, ", "))
+		}
+		if !registry.MinKpmSatisfied(version.Version, e.Def.MinKpm) && version.Version != "dev" {
+			return nil, fmt.Errorf("requires package %q, which needs kpm >= %s (running %s)", r, e.Def.MinKpm, version.Version)
+		}
+		if why := e.Def.ToPackage(r, e.Registry, "").UnavailableReason(line); why != "" {
+			return nil, fmt.Errorf("requires package %q, which cannot install here: %s", r, why)
+		}
+		if blockers := a.blockingConflicts(r, conflicts, nil); len(blockers) > 0 {
+			return nil, fmt.Errorf("requires package %q, which %s", r, a.conflictRefusal(blockers))
+		}
+		for _, other := range set {
+			if listHas(conflicts[r], other) || listHas(conflicts[other], r) {
+				return nil, fmt.Errorf("requires package %q, which conflicts with %q", r, other)
+			}
+		}
+		set = append(set, r)
+		extra = append(extra, r)
+	}
+	return extra, nil
+}
+
+// listHas reports whether list holds s.
+func listHas(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // missingDefFields returns the required def fields (source, forge, asset) that
@@ -305,6 +411,9 @@ func printInstallDef(w io.Writer, id, regName string, p *config.Package, provena
 	// user reviewing the def sees the constraint before agreeing to it (§4.6).
 	for _, c := range normalizeConflicts(p.Conflicts, id) {
 		fmt.Fprintf(w, "  conflicts %s\n", c)
+	}
+	for _, r := range normalizeRequires(p.Requires, id) {
+		fmt.Fprintf(w, "  requires %s\n", r)
 	}
 	// The destination is the most safety-relevant thing in the whole def — it is
 	// where kpm will write bulk payload as root — so it goes ABOVE the uninstall

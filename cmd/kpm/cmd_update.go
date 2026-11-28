@@ -108,6 +108,30 @@ func (a *App) cmdUpdate(args []string) int {
 		return exitError
 	}
 
+	// B: the conflict graph, built once for the run — the reverse direction needs
+	// packages that were not selected (§4.2), and it must be the SAME graph
+	// `search --json` reports on or the UI and the CLI disagree (§4.3). The
+	// requires graph comes from the same snapshot. Both read caches only, so
+	// they are built before the network wait.
+	conflicts, deps, registered, cerr := a.updateConflictGraph()
+	if cerr != nil {
+		if jsonMode {
+			jsonError(cerr.Error())
+		}
+		fmt.Fprintln(os.Stderr, "kpm update:", cerr)
+		a.paths.Log("ERROR", cerr.Error())
+		return exitError
+	}
+	// Requires: a named package brings its registered requirements that are not
+	// installed yet into the same run, and every requirement is handled before
+	// the package that needs it (docs/dependencies.md).
+	if !*all {
+		if allPkgs, err := a.loadPackages(); err == nil {
+			pkgs = a.addRequirements(pkgs, allPkgs, deps)
+		}
+	}
+	pkgs = orderByRequires(pkgs, deps)
+
 	// failures accumulates per-package resolve/download errors for the §2.3
 	// mutation payload; changed is filled from the staged targets at the end.
 	// skips accumulates the deliberate, non-error no-ops (§4.3 conflict
@@ -144,19 +168,6 @@ func (a *App) cmdUpdate(args []string) int {
 		}
 	}
 
-	// B: the conflict graph, built once for the run — the reverse direction needs
-	// packages that were not selected (§4.2), and it must be the SAME graph
-	// `search --json` reports on or the UI and the CLI disagree (§4.3).
-	conflicts, cerr := a.updateConflictGraph()
-	if cerr != nil {
-		if jsonMode {
-			jsonError(cerr.Error())
-		}
-		fmt.Fprintln(os.Stderr, "kpm update:", cerr)
-		a.paths.Log("ERROR", cerr.Error())
-		return exitError
-	}
-
 	// 1+2. Resolve targets and download+verify each asset. App-tree packages go
 	// into their own slice: they never enter the merge, never set a staged
 	// version, and are installed outright further down (APP-TREE.md §6.1).
@@ -185,7 +196,19 @@ func (a *App) cmdUpdate(args []string) int {
 	a.prog.AddSteps(len(pkgs) + installStep + stageStep + a.carryoverSteps("update", ""))
 	for _, p := range pkgs {
 		a.prog.Step("Checking " + p.ID)
-		r, app, skip, blocked, err := a.resolveAndDownload(p, conflicts, staging)
+		var r resolved
+		var app *resolvedApp
+		var skip bool
+		var blocked string
+		var err error
+		// Requires: a package that is not on the device yet waits for its
+		// requirements. One that is already installed may still update: the
+		// update does not make a missing requirement worse.
+		if unmet := a.unmetRequirements(p.ID, deps, staging); len(unmet) > 0 && !a.installedOrStaged(p.ID, nil) {
+			blocked = requiresRefusal(unmet, registered)
+		} else {
+			r, app, skip, blocked, err = a.resolveAndDownload(p, conflicts, staging)
+		}
 		if err != nil {
 			failed++
 			failures = append(failures, jsonFailure{ID: p.ID, Error: err.Error()})
@@ -528,25 +551,16 @@ func (a *App) cmdUpdate(args []string) int {
 //
 // The unreadable-def refusal (M5) is NOT here: cmdUpdate makes it before the
 // network wait, off a.unreadable, so it costs nothing when it fires.
-func (a *App) updateConflictGraph() (map[string][]string, error) {
-	locals, err := a.loadPackages()
+func (a *App) updateConflictGraph() (map[string][]string, depGraph, map[string]bool, error) {
+	locals, entries, err := a.runEntries()
 	if err != nil {
-		return nil, fmt.Errorf("cannot check conflicts: %v", err)
+		return nil, depGraph{}, nil, fmt.Errorf("cannot check conflicts: %v", err)
 	}
-	var entries map[string]*registry.Entry
-	cfg, cerr := a.loadRegistryConfig()
-	if cerr != nil {
-		a.paths.Log("WARN", "registry config unreadable ("+cerr.Error()+") — checking conflicts against packages.d only")
-	} else {
-		mans, missing := a.cachedManifests(cfg)
-		if len(missing) > 0 {
-			a.paths.Log("WARN", fmt.Sprintf(
-				"no cached data for registry %s — checking conflicts against packages.d only for ids it offers; run: kpm registry refresh",
-				strings.Join(missing, ", ")))
-		}
-		entries, _ = registry.Merge(mans)
+	registered := make(map[string]bool, len(locals))
+	for _, p := range locals {
+		registered[p.ID] = true
 	}
-	return conflictGraphFor(entries, locals), nil
+	return conflictGraphFor(entries, locals), requiresGraphFor(entries, locals, a.paths.Line()), registered, nil
 }
 
 // firstConfiguredHost returns the forge host of the first configured package,
