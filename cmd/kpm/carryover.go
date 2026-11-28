@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"kpm/internal/config"
 	"kpm/internal/device"
 	"kpm/internal/forge"
+	"kpm/internal/registry"
 	"kpm/internal/state"
 	"kpm/internal/tgz"
 )
@@ -94,6 +96,12 @@ func (a *App) cmdCarryover(args []string) int {
 	for _, id := range sortedKeys(co.Packages) {
 		fmt.Printf("  %s %s\n", id, co.Packages[id].Version)
 	}
+	if len(co.LeftOut) > 0 {
+		fmt.Println("left out (these packages do not come back on firmware 6.x):")
+		for _, id := range sortedKeys(co.LeftOut) {
+			fmt.Printf("  %s: %s\n", id, co.LeftOut[id])
+		}
+	}
 	if ok, err := a.rcKHasBlock(); err == nil && ok {
 		fmt.Println("rcK block: present")
 	} else {
@@ -115,17 +123,99 @@ func (a *App) carryoverWant() (map[string]*config.Package, map[string]string, er
 	keys := map[string]string{}
 	for _, p := range pkgs {
 		ps := a.state.Packages[p.ID]
-		if ps == nil || ps.InstalledVersion == "" || p.InstallsLive() || !p.AvailableOn(device.Line6) {
+		if ps == nil || ps.InstalledVersion == "" || a.carryoverSkip(p, nil) != "" {
 			continue
 		}
-		src, pin := a.fw6SourcePin(p)
-		if !config.SourceConfigured(src) {
-			continue
-		}
+		src, tag, _ := a.fw6Tag(p)
 		defs[p.ID] = p
-		keys[p.ID] = strings.Join([]string{ps.InstalledVersion, src, p.ForLine(device.Line6).Asset, pin}, "|")
+		keys[p.ID] = strings.Join([]string{ps.InstalledVersion, src, p.ForLine(device.Line6).Asset, tag}, "|")
 	}
 	return defs, keys, nil
+}
+
+// The reasons of carryoverSkip that are not a loss: the package stays, or
+// firmware 6.x replaces it.
+const (
+	skipLive    = "installs on the user partition, which the upgrade keeps"
+	skipBuiltin = "built into firmware 6.x"
+)
+
+// carryoverSkip returns why an installed package does not go into the bundle,
+// or "" when it goes in. entry is the registry entry of the package, or nil:
+// with it, a local def without the [fw6] table that the registry def has gets
+// a reason that names the fix.
+func (a *App) carryoverSkip(p *config.Package, entry *registry.Entry) string {
+	src, _ := a.fw6SourcePin(p)
+	switch {
+	case p.InstallsLive():
+		return skipLive
+	case p.BuiltinFw6 != "":
+		return skipBuiltin
+	case p.Fw6 == nil && entry != nil && entry.Def.Fw6 != nil:
+		return "the local def has no [fw6] table: sync updates it"
+	case p.Fw6 == nil:
+		return config.Unavailable6
+	case !config.SourceConfigured(src):
+		return "no source for the 6.x build"
+	}
+	return ""
+}
+
+// carryoverLeftOut returns, for each installed package that the bundle leaves
+// out and that firmware 6.x does not keep or replace, why it is left out. The
+// upgrade removes these packages. A missing registry cache only loses the
+// sync hint.
+func (a *App) carryoverLeftOut() map[string]string {
+	pkgs, err := a.loadPackages()
+	if err != nil {
+		return nil
+	}
+	entries := map[string]*registry.Entry{}
+	if cfg, err := a.loadRegistryConfig(); err == nil {
+		mans, _ := a.cachedManifests(cfg)
+		entries, _ = registry.Merge(mans)
+	}
+	out := map[string]string{}
+	for _, p := range pkgs {
+		ps := a.state.Packages[p.ID]
+		if ps == nil || ps.InstalledVersion == "" {
+			continue
+		}
+		switch reason := a.carryoverSkip(p, entries[p.ID]); reason {
+		case "", skipLive, skipBuiltin:
+		default:
+			out[p.ID] = reason
+		}
+	}
+	return out
+}
+
+// noteLeftOut logs a warning for each package of now that was not left out
+// for the same reason in before.
+func (a *App) noteLeftOut(before, now map[string]string) {
+	for _, id := range sortedKeys(now) {
+		if r, ok := before[id]; ok && r == now[id] {
+			continue
+		}
+		a.paths.Log("WARN", fmt.Sprintf("carry-over: %s is not in the bundle and does not come back on firmware 6.x: %s", id, now[id]))
+	}
+}
+
+// fw6Tag returns the source of the 6.x build and the release tag to take it
+// from. exact is true for a pin: then only that tag will do. Without a pin,
+// the tag is the installed 4.x version, so the bundle carries the same
+// version to 6.x. That works only when the 6.x build comes from the base
+// source: another repository has other tags. With tag "", the bundle takes
+// the latest release.
+func (a *App) fw6Tag(p *config.Package) (src, tag string, exact bool) {
+	src, pin := a.fw6SourcePin(p)
+	if pin != "" {
+		return src, pin, true
+	}
+	if p.Fw6 != nil && p.Fw6.Source != "" && p.Fw6.Source != a.effectiveSource(p) {
+		return src, "", false
+	}
+	return src, a.state.Get(p.ID).InstalledVersion, false
 }
 
 // fw6SourcePin returns the source and the pin of the 6.x build. A pin and
@@ -223,14 +313,42 @@ func (a *App) refreshCarryover(online bool) error {
 	if err := a.ensureRcKBlock(); err != nil {
 		a.paths.Log("WARN", "carry-over: rcK block: "+err.Error())
 	}
+	leftOut := a.carryoverLeftOut()
+	var before map[string]string
+	if a.state.Carryover != nil {
+		before = a.state.Carryover.LeftOut
+	}
+	built, err := a.buildCarryover(online, leftOut)
+	if built {
+		a.noteLeftOut(before, leftOut)
+		return err
+	}
+	// No new bundle: it is up to date, or the build failed. The warning
+	// matters most when there is no bundle, so record a change of the
+	// left-out set on the old record, or warn each time without one.
+	if co := a.state.Carryover; co == nil {
+		a.noteLeftOut(nil, leftOut)
+	} else if !sameKeys(co.LeftOut, leftOut) {
+		a.noteLeftOut(before, leftOut)
+		co.LeftOut = leftOut
+		if serr := a.state.Save(); err == nil {
+			err = serr
+		}
+	}
+	return err
+}
+
+// buildCarryover is the build of refreshCarryover. built is true when it
+// wrote a new record, with leftOut in it.
+func (a *App) buildCarryover(online bool, leftOut map[string]string) (built bool, err error) {
 	plan, err := a.planCarryover(online, "")
 	if err != nil || plan == nil {
-		return err
+		return false, err
 	}
 	keys, ids, carried := plan.keys, plan.ids, plan.carried
 	dir := a.paths.CarryoverDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	// The command counted these steps in its plan (carryoverSteps): they are
 	// the last ones.
@@ -239,7 +357,7 @@ func (a *App) refreshCarryover(online bool) error {
 		a.prog.Step("Getting " + id + " for firmware 6")
 		cp, err := a.fetchFw6(plan.defs[id], filepath.Join(dir, id+".tgz"))
 		if err != nil {
-			return fmt.Errorf("%s: %w", id, err)
+			return false, fmt.Errorf("%s: %w", id, err)
 		}
 		carried[id] = cp
 	}
@@ -253,7 +371,7 @@ func (a *App) refreshCarryover(online bool) error {
 	dups, err := tgz.Merge(sources, part)
 	if err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	for _, d := range dups {
 		a.paths.Log("WARN", "carry-over: more than one package writes "+d)
@@ -261,11 +379,11 @@ func (a *App) refreshCarryover(online bool) error {
 	sum, size, err := sha256AndSize(part)
 	if err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	if err := os.Rename(part, a.paths.CarryoverBundle()); err != nil {
 		os.Remove(part)
-		return err
+		return false, err
 	}
 	device.FsyncDir(dir)
 	a.removeStaleCarried(carried)
@@ -276,43 +394,24 @@ func (a *App) refreshCarryover(online bool) error {
 		BuiltAt:  time.Now().UTC().Format(state.TimeFormat),
 		From:     keys,
 		Packages: carried,
+		LeftOut:  leftOut,
 	}
 	if err := a.state.Save(); err != nil {
-		return err
+		return true, err
 	}
 	var list []string
 	for _, id := range ids {
 		list = append(list, id+" "+carried[id].Version)
 	}
 	a.paths.Log("INFO", "carry-over bundle for firmware 6.x: "+strings.Join(list, ", "))
-	return nil
+	return true, nil
 }
 
 // fetchFw6 downloads the 6.x build of a package, checks it as a Kobo.tgz, and
 // moves it to dst.
 func (a *App) fetchFw6(p *config.Package, dst string) (state.CarriedPackage, error) {
 	lp := p.ForLine(device.Line6)
-	src, pin := a.fw6SourcePin(p)
-	f, err := a.forgeFor(&lp)
-	if err != nil {
-		return state.CarriedPackage{}, err
-	}
-	host, owner, repo := config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	var rel forge.Release
-	if pin != "" {
-		rel, err = f.ReleaseByTag(ctx, host, owner, repo, pin)
-	} else {
-		rel, err = f.LatestRelease(ctx, host, owner, repo)
-	}
-	cancel()
-	if err != nil {
-		return state.CarriedPackage{}, err
-	}
-	if rel.Tag == "" {
-		return state.CarriedPackage{}, fmt.Errorf("forge returned a release with an empty tag")
-	}
-	asset, err := rel.MatchAsset(lp.Asset)
+	rel, asset, err := a.fw6Release(p, &lp)
 	if err != nil {
 		return state.CarriedPackage{}, err
 	}
@@ -330,6 +429,71 @@ func (a *App) fetchFw6(p *config.Package, dst string) (state.CarriedPackage, err
 		return state.CarriedPackage{}, err
 	}
 	return state.CarriedPackage{Version: rel.Tag, Fingerprint: rel.Fingerprint(&asset), SHA256: sum, Manifest: manifest}, nil
+}
+
+// fw6Release finds the release and the asset of the 6.x build (fw6Tag). When
+// the release of the installed version is not there, or has no 6.x build, it
+// takes the latest release and logs a warning. A network failure is an error:
+// the next refresh tries again.
+func (a *App) fw6Release(p *config.Package, lp *config.Package) (forge.Release, forge.Asset, error) {
+	src, tag, exact := a.fw6Tag(p)
+	f, err := a.forgeFor(lp)
+	if err != nil {
+		return forge.Release{}, forge.Asset{}, err
+	}
+	host, owner, repo := config.SourceHost(src), config.SourceOwner(src), config.SourceRepo(src)
+	get := func(tag string) (forge.Release, forge.Asset, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var rel forge.Release
+		var err error
+		if tag != "" {
+			rel, err = f.ReleaseByTag(ctx, host, owner, repo, tag)
+		} else {
+			rel, err = f.LatestRelease(ctx, host, owner, repo)
+		}
+		if err != nil {
+			return forge.Release{}, forge.Asset{}, err
+		}
+		if rel.Tag == "" {
+			return forge.Release{}, forge.Asset{}, fmt.Errorf("forge returned a release with an empty tag")
+		}
+		asset, err := rel.MatchAsset(lp.Asset)
+		return rel, asset, err
+	}
+	if exact || tag == "" {
+		return get(tag)
+	}
+	// The installed version, as recorded or with the other "v" form: kpm
+	// records its own version as 0.16.0, and its release tag is v0.16.0.
+	for _, t := range tagForms(tag) {
+		rel, asset, err := get(t)
+		if err == nil {
+			return rel, asset, nil
+		}
+		if errors.Is(err, forge.ErrNotFound) {
+			continue
+		}
+		if rel.Tag != "" {
+			break // the release is there, but it has no 6.x build
+		}
+		return forge.Release{}, forge.Asset{}, err
+	}
+	rel, asset, err := get("")
+	if err != nil {
+		return forge.Release{}, forge.Asset{}, err
+	}
+	a.paths.Log("WARN", fmt.Sprintf("carry-over: %s %s has no 6.x build, so the bundle carries %s", p.ID, tag, rel.Tag))
+	return rel, asset, nil
+}
+
+// tagForms returns the tag, and then the same tag with the "v" prefix added
+// or removed.
+func tagForms(tag string) []string {
+	if strings.HasPrefix(tag, "v") {
+		return []string{tag, strings.TrimPrefix(tag, "v")}
+	}
+	return []string{tag, "v" + tag}
 }
 
 // removeStaleCarried deletes the 6.x build of each package that left the bundle.

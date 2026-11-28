@@ -247,24 +247,12 @@ func (a *App) carryoverInfo(id string, local *config.Package, entry *registry.En
 			return &jsonInfoCarryover{State: carryInBundle, Version: ptr(cp.Version)}
 		}
 	}
-	reason := "not in the bundle yet: kpm builds it after the next check"
-	src := ""
+	reason := "not registered with kpm"
 	if local != nil {
-		src, _ = a.fw6SourcePin(local)
+		reason = a.carryoverSkip(local, entry)
 	}
-	switch {
-	case local == nil:
-		reason = "not registered with kpm"
-	case local.InstallsLive():
-		reason = "installs on the user partition, which the upgrade keeps"
-	case local.BuiltinFw6 != "":
-		reason = "built into firmware 6.x"
-	case local.Fw6 == nil && entry != nil && entry.Def.Fw6 != nil:
-		reason = "the local def has no [fw6] table: sync updates it"
-	case local.Fw6 == nil:
-		reason = config.Unavailable6
-	case !config.SourceConfigured(src):
-		reason = "no source for the 6.x build"
+	if reason == "" {
+		reason = "not in the bundle yet: kpm builds it after the next check"
 	}
 	return &jsonInfoCarryover{State: carryNotInBundle, Reason: ptr(reason)}
 }

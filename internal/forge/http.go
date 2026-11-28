@@ -167,13 +167,21 @@ var (
 func wrapReleaseErr(err error, host, owner, repo string) error {
 	switch {
 	case errors.Is(err, errNotFound):
-		return fmt.Errorf("repository not found, or it has no releases yet (checked %s/%s/%s)", host, owner, repo)
+		return notFoundError{fmt.Sprintf("repository not found, or it has no releases yet (checked %s/%s/%s)", host, owner, repo)}
 	case errors.Is(err, errRateLimited):
 		return errors.New("GitHub API rate limit exceeded; try again later")
 	default:
 		return err
 	}
 }
+
+// notFoundError keeps the user-facing text of a 404 and still matches
+// ErrNotFound with errors.Is, so a caller can tell a missing release from a
+// network failure.
+type notFoundError struct{ msg string }
+
+func (e notFoundError) Error() string { return e.msg }
+func (e notFoundError) Unwrap() error { return errNotFound }
 
 // getJSON fetches url with the given Accept header and returns the body,
 // retrying twice on transient network errors. Non-2xx is a permanent error (no
