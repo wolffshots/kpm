@@ -438,6 +438,42 @@ func main() {
 		}
 		appendRaw(p.RegistryCache("main"), extra)
 	}
+	// SEED_REQUIRES=1 adds the requires fixture (docs/dependencies.md) for
+	// --exercise-requires: noteplus is installed and requires nickelnote and
+	// samplemod, so nickelnote has required_by=[noteplus] and no Uninstall
+	// button. lookup is not installed and requires lookupdb, which is not
+	// installed either, so its page says what Install brings along.
+	seedRequires := os.Getenv("SEED_REQUIRES") == "1"
+	if seedRequires {
+		appendRaw(p.RegistryCache("main"), `
+[packages.noteplus]
+name = "NotePlus"
+source = "github.com/o/noteplus"
+forge = "github"
+asset = "KoboRoot.tgz"
+description = "Extra templates for NickelNote."
+requires = ["nickelnote", "samplemod"]
+
+[packages.lookup]
+name = "Lookup"
+source = "github.com/o/lookup"
+forge = "github"
+asset = "KoboRoot.tgz"
+description = "Look up words in cloud notes."
+requires = ["lookupdb"]
+
+[packages.lookupdb]
+name = "Lookup data"
+source = "github.com/o/lookupdb"
+forge = "github"
+asset = "KoboRoot.tgz"
+description = "Word data for Lookup."
+`)
+		must(config.Save(p.PackageFile("noteplus"), &config.Package{
+			Name: "NotePlus", Source: "github.com/o/noteplus", Forge: config.ForgeGitHub,
+			Asset: "KoboRoot.tgz", Registry: "main", Requires: []string{"nickelnote", "samplemod"},
+		}))
+	}
 
 	// samplemod: an installed, manifest-uninstallable package (the uninstall
 	// target). Written as a packages.d def + state manifest + a real file under
@@ -606,6 +642,10 @@ func main() {
 	must(err)
 	st.Get("nickelclock").InstalledVersion = "v0.4.0"
 	st.Get("nickelnote").InstalledVersion = "v1.2.0"
+	if seedRequires {
+		st.Get("noteplus").InstalledVersion = "v1.0.0"
+		st.Get("noteplus").Manifest = []string{"/mnt/onboard/.adds/noteplus/templates.txt"}
+	}
 	// kobocloud's tag never moves — that is what update_check = "rolling" is for.
 	st.Get("kobocloud").InstalledVersion = "latest"
 	// ghostmod exists ONLY here: no registry entry, no packages.d def. It is

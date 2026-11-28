@@ -68,6 +68,18 @@ func (a *App) cmdUninstall(args []string) int {
 		return exitError
 	}
 
+	// Requires: refuse while an installed or staged package needs this one. The
+	// refusal is hard, like a conflict: --yes and --force do not override it,
+	// because the hook always passes --yes (docs/dependencies.md).
+	if locals, entries, err := a.runEntries(); err == nil {
+		if deps := a.dependents(id, requiresGraphFor(entries, locals, a.paths.Line())); len(deps) > 0 {
+			msg := requiredByRefusal(id, deps)
+			failJSON(msg)
+			fmt.Fprintln(os.Stderr, "kpm uninstall:", msg)
+			return exitError
+		}
+	}
+
 	// A pending staged update would reinstall the package on the next reboot.
 	ps := a.state.Get(id)
 	if ps.StagedVersion != "" {

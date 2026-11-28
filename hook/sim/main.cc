@@ -2306,6 +2306,73 @@ static void runExerciseDetails(const QString &dir) {
       []() { detailsFail(3, "timed out waiting for packages"); });
 }
 
+// ---- --exercise-requires <dir> (docs/dependencies.md) --------------------
+//
+// Runs with SEED_REQUIRES=1 (run.sh). Opens three detail pages and asserts the
+// requires copy: noteplus keeps its Uninstall button, nickelnote (required by the
+// installed noteplus) says so and has no Uninstall button, and lookup (its
+// requirement lookupdb is not installed) says what Install brings along.
+// Screenshots: requires-noteplus.png, requires-nickelnote.png,
+// requires-lookup.png. Exit 0 = PASS.
+static void requiresFail(int code, const QString &why) {
+  std::fprintf(stderr, "sim requires: FAIL (%d): %s\n", code, qPrintable(why));
+  qApp->exit(code);
+}
+
+static void openAndCheck(const QString &dir, const QStringList &ids, int i) {
+  if (i >= ids.size()) {
+    std::fprintf(stderr, "sim requires: PASS\n");
+    qApp->exit(0);
+    return;
+  }
+  const QString id = ids.at(i);
+  BrowseDialog *browse = nickelstub_mainWindow()->findChild<BrowseDialog *>();
+  QMetaObject::invokeMethod(browse, "openDetail", Q_ARG(QString, id));
+  waitUntil([]() { return currentDetail() != nullptr && labelContaining(currentDetail(), "On this device"); }, 10000,
+            [dir, ids, i, id]() {
+              DetailDialog *d = currentDetail();
+              QStringList want;
+              bool wantUninstall = true;
+              // The "Requires: ..." line of the info group is an ElidedLabel,
+              // which findChildren<QLabel> cannot read. The screenshot shows it.
+              if (id == QStringLiteral("noteplus")) {
+                // Its requirements are met, so only the info line shows.
+              } else if (id == QStringLiteral("nickelnote")) {
+                want << "Needed by NotePlus. Uninstall it first to uninstall this.";
+                wantUninstall = false;
+              } else if (id == QStringLiteral("lookup")) {
+                want << "Install also installs Lookup data, which this package needs.";
+                wantUninstall = false;
+              }
+              for (const QString &w : want) {
+                if (!labelContaining(d, w)) {
+                  requiresFail(5, id + ": no line with '" + w + "'");
+                  return;
+                }
+              }
+              bool hasUninstall = false;
+              for (QLabel *l : d->findChildren<QLabel *>()) {
+                if (l->text() == QStringLiteral("Uninstall")) {
+                  hasUninstall = true;
+                }
+              }
+              if (hasUninstall != wantUninstall) {
+                requiresFail(6, id + ": Uninstall button " + (hasUninstall ? "shown" : "missing"));
+                return;
+              }
+              std::fprintf(stderr, "sim requires: PASS — %s\n", qPrintable(id));
+              saveGrab(dir + "/requires-" + id + ".png");
+              openAndCheck(dir, ids, i + 1);
+            },
+            [id]() { requiresFail(4, id + ": detail page did not open"); });
+}
+
+static void runExerciseRequires(const QString &dir) {
+  QDir().mkpath(dir);
+  waitForRows([dir]() { openAndCheck(dir, {"noteplus", "nickelnote", "lookup"}, 0); },
+              []() { requiresFail(3, "timed out waiting for packages"); });
+}
+
 // ---- --exercise-detailcarry <dir> (round 2, test note 1) -----------------
 //
 // Combined test note 1: after Check for update the details page still said
@@ -3353,6 +3420,7 @@ int main(int argc, char **argv) {
   QString settingsDirArg;
   QString pageSizeDir;
   QString detailCarryDir;
+  QString requiresDir;
   bool exerciseSync = false;
   bool exerciseStaged = false;
   bool exerciseWake = false;
@@ -3400,6 +3468,8 @@ int main(int argc, char **argv) {
       settingsDirArg = args.at(++i);
     } else if (a == "--exercise-details" && i + 1 < args.size()) {
       detailsDir = args.at(++i);
+    } else if (a == "--exercise-requires" && i + 1 < args.size()) {
+      requiresDir = args.at(++i);
     } else if (a == "--exercise-detailcarry" && i + 1 < args.size()) {
       detailCarryDir = args.at(++i);
     } else if (a == "--exercise-pagesize" && i + 1 < args.size()) {
@@ -3462,6 +3532,8 @@ int main(int argc, char **argv) {
     runExerciseSettings(settingsDirArg);
   } else if (!detailsDir.isEmpty()) {
     runExerciseDetails(detailsDir);
+  } else if (!requiresDir.isEmpty()) {
+    runExerciseRequires(requiresDir);
   } else if (!progressDir.isEmpty()) {
     runExerciseProgress(progressDir);
   } else if (!detailCarryDir.isEmpty()) {

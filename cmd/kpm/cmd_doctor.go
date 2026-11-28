@@ -42,6 +42,8 @@ type doctorResult struct {
 	plugin     string // diagnosed plugin .so device path ("" when non-diagnosable)
 	testedFw   string
 	fwUntested bool
+	// requiresMissing names the requirements of the package that are not met.
+	requiresMissing []string
 }
 
 // cmdDoctor diagnoses one package (by id) or every installed NickelHook plugin
@@ -108,8 +110,22 @@ func (a *App) cmdDoctor(args []string) int {
 
 	deviceFw, _ := a.paths.Firmware()
 	results := make([]doctorResult, 0, len(targets))
+	deps := requiresGraphFor(entries, pkgs, a.paths.Line())
 	for _, p := range targets {
-		results = append(results, a.diagnose(p, entries, deviceFw))
+		res := a.diagnose(p, entries, deviceFw)
+		// Requires: a package whose requirement is not on the device may load
+		// and still not work, so say so after the load verdict
+		// (docs/dependencies.md).
+		res.requiresMissing = a.unmetRequirements(p.ID, deps, nil)
+		if len(res.requiresMissing) > 0 {
+			note := "requires " + strings.Join(res.requiresMissing, ", ") + ", which is not installed"
+			if res.detail == "" {
+				res.detail = note
+			} else {
+				res.detail += "; " + note
+			}
+		}
+		results = append(results, res)
 	}
 
 	// The ssh row is about the device, not a package: only a run for all
@@ -129,6 +145,8 @@ func (a *App) cmdDoctor(args []string) int {
 				Plugin:     ptr(r.plugin),
 				TestedFw:   ptr(r.testedFw),
 				FwUntested: r.fwUntested,
+
+				RequiresMissing: reqList(r.requiresMissing),
 			})
 		}
 		jsonLine(jsonDoctorPayload{DeviceFw: ptr(deviceFw), Packages: out, SSH: sshRow})

@@ -98,6 +98,7 @@ These three fields (kpm 0.10.0) change what install and update do. `kpm sync` co
 |---|---|---|
 | `update_check = "rolling"` | Finds a changed release when the tag does not move. kpm compares `published_at` and the asset size. | Yes |
 | `conflicts = ["<id>", ...]` | Refuses an install next to a named package. | Yes |
+| `requires = ["<id>", ...]` | Installs the named packages first, and keeps them while this package is installed. See [dependencies.md](dependencies.md). | Yes, `0.17.0` |
 | `checksums` (tag to sha256) | Checks the downloaded asset against a hash from the curator. | No |
 
 ```toml
@@ -127,6 +128,7 @@ min_kpm   = "0.10.0"
 Notes for curators:
 
 - Declare `conflicts` on one side only. kpm checks both directions.
+- Declare `requires` on the package that needs the other one. Set `min_kpm = "0.17.0"` on that package: an older kpm ignores `requires` and installs the package alone. A def that requires itself, or requires an id that it also lists in `conflicts`, is a parse error.
 - Get a hash with `curl -sL <browser_download_url> | sha256sum`. Each download also logs a `CHECKSUM` line with the hash in `kpm log`. Hash the asset as it is published: for a zip asset, the zip, not the tgz in it. You can paste a GitHub `sha256:` digest. kpm removes the prefix and white space.
 - Never put `checksums` on a `rolling` def. A rolling asset changes with no registry edit. kpm drops such a registry def as a parse error. A local def with both falls back to no check, with a `WARN`.
 - `update_check = "rolling"` without `min_kpm` is a parse error. An older kpm ignores the key and shows the package as up to date forever.

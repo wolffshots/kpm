@@ -876,3 +876,27 @@ func TestLauncherValidateRejectsMisSplitEntry(t *testing.T) {
 		t.Error("a menu_item whose label contains ':' must be refused")
 	}
 }
+
+// requires round-trips through SaveReplace, and a dropped list leaves the file.
+func TestRequiresRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.toml")
+	p := &Package{Name: "a", Source: "github.com/o/a", Forge: ForgeGitHub, Asset: "KoboRoot.tgz", Requires: []string{"b"}}
+	if err := SaveReplace(path, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Requires) != 1 || got.Requires[0] != "b" {
+		t.Fatalf("requires lost: %+v", got.Requires)
+	}
+	p.Requires = nil
+	if err := SaveReplace(path, p); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "requires") {
+		t.Errorf("SaveReplace must clear a dropped requires:\n%s", b)
+	}
+}

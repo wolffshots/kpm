@@ -49,6 +49,7 @@ type jsonInfoDef struct {
 	UpdateCheck   string       `json:"update_check"`
 	MinKpm        *string      `json:"min_kpm"`
 	Conflicts     []string     `json:"conflicts"`
+	Requires      []string     `json:"requires"`
 	TestedFw      *string      `json:"tested_fw"`
 	Fw6           *jsonInfoFw6 `json:"fw6"`
 	BuiltinFw6    *string      `json:"builtin_fw6"`
@@ -184,6 +185,7 @@ func (a *App) packageInfo(id string, entry *registry.Entry, local *config.Packag
 	if out.Def.Conflicts == nil {
 		out.Def.Conflicts = []string{}
 	}
+	out.Def.Requires = normalizeRequires(def.Requires, id)
 	out.Def.TestedFw = ptr(testedFw)
 	if def.Fw6 != nil {
 		out.Def.Fw6 = &jsonInfoFw6{
@@ -282,6 +284,9 @@ func printInfo(in jsonInfoPayload) {
 		line("tested_fw 6.x", in.Def.Fw6.TestedFw)
 	}
 	line("builtin_fw6", in.Def.BuiltinFw6)
+	if len(in.Def.Requires) > 0 {
+		fmt.Printf("%-14s %s\n", "requires:", strings.Join(in.Def.Requires, ", "))
+	}
 	if in.DefDiffers {
 		fmt.Println("def:           the local def differs from the registry (kpm sync)")
 	}

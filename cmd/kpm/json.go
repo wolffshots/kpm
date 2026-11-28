@@ -166,6 +166,14 @@ type jsonSearchPkg struct {
 	// a confusing latest -> latest.
 	Conflicts       []string `json:"conflicts"`
 	ConflictsActive []string `json:"conflicts_active"`
+	// Requires is what this package's effective def requires (sorted, deduped,
+	// self-reference removed). RequiresMissing is the subset that is not met on
+	// this device. RequiredBy names the installed or staged packages that
+	// require this one: non-empty means uninstall is refused
+	// (docs/dependencies.md). All three are never null.
+	Requires        []string `json:"requires"`
+	RequiresMissing []string `json:"requires_missing"`
+	RequiredBy      []string `json:"required_by"`
 	Rolling         bool     `json:"rolling"`
 	// InstallMethod is "tgz" or "app-tree": how this package installs. The hook
 	// uses it to label the Install/Update action and to suppress reboot copy for a
@@ -298,6 +306,7 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 	// over every id BEFORE the term filter, because a filtered-out package can
 	// still be an active blocker.
 	graph := conflictGraphFor(entries, localPkgs)
+	deps := requiresGraphFor(entries, localPkgs, line)
 
 	tl := strings.ToLower(term)
 	pkgs := make([]jsonSearchPkg, 0, len(ids))
@@ -411,6 +420,9 @@ func (a *App) searchJSON(cfg *registry.Config, entries map[string]*registry.Entr
 
 			Conflicts:       graph[id],
 			ConflictsActive: a.activeConflicts(id, graph, nil),
+			Requires:        reqList(deps.req[id]),
+			RequiresMissing: a.unmetRequirements(id, deps, nil),
+			RequiredBy:      a.dependents(id, deps),
 			Rolling:         rolling,
 			InstallMethod:   installMethodOf(inst),
 			Kind:            kindOf(inst),
@@ -445,6 +457,9 @@ type jsonDoctorPkg struct {
 	// likely-cause clause appended to a bad verdict's detail.
 	TestedFw   *string `json:"tested_fw"`
 	FwUntested bool    `json:"fw_untested"`
+	// RequiresMissing names the requirements of the package that are not met
+	// on this device (docs/dependencies.md). Never null.
+	RequiresMissing []string `json:"requires_missing"`
 }
 
 type jsonDoctorPayload struct {
@@ -645,6 +660,11 @@ type jsonStatusPkg struct {
 	// caches, mirroring the existing local-only rule for uninstallable and
 	// has_config (INTEGRITY.md §6.2). Never null.
 	ConflictsActive []string `json:"conflicts_active"`
+	// Requires, RequiresMissing and RequiredBy mirror jsonSearchPkg's, from the
+	// local packages.d snapshot only. Never null.
+	Requires        []string `json:"requires"`
+	RequiresMissing []string `json:"requires_missing"`
+	RequiredBy      []string `json:"required_by"`
 	// InstallMethod mirrors jsonSearchPkg's: "tgz" | "app-tree", a string, never
 	// null. statusJSON reads only the local snapshot, which is the right source
 	// for an installed package anyway (APP-TREE.md §11.1).
@@ -677,6 +697,7 @@ func (a *App) statusJSON() int {
 	}
 	graph := localConflictGraph(pkgs)
 	line := a.paths.Line()
+	deps := requiresGraphFor(nil, pkgs, line)
 	out := make([]jsonStatusPkg, 0, len(pkgs))
 	for _, p := range pkgs {
 		ps := a.state.Get(p.ID)
@@ -708,6 +729,9 @@ func (a *App) statusJSON() int {
 			State:           st,
 			MissingFiles:    ps.MissingFiles,
 			ConflictsActive: a.activeConflicts(p.ID, graph, nil),
+			Requires:        reqList(deps.req[p.ID]),
+			RequiresMissing: a.unmetRequirements(p.ID, deps, nil),
+			RequiredBy:      a.dependents(p.ID, deps),
 			InstallMethod:   p.EffectiveInstallMethod(),
 		})
 	}
@@ -719,4 +743,13 @@ func (a *App) statusJSON() int {
 		FirmwareLine: a.paths.Line(),
 	})
 	return exitOK
+}
+
+// reqList returns list, or an empty slice for nil, so a JSON array never
+// marshals null.
+func reqList(list []string) []string {
+	if list == nil {
+		return []string{}
+	}
+	return list
 }

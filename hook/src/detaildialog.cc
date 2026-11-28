@@ -126,6 +126,15 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   // NOT itself installed or staged and something it conflicts with is. So this is
   // precisely the state in which offering Install would guarantee a hard failure.
   bool blockedFromInstall = !activeConflicts.isEmpty() && installed.isEmpty() && !staged;
+  // Requires (docs/dependencies.md). `requires` is what the def requires,
+  // `requires_missing` the subset not on the device, `required_by` the installed
+  // or staged packages that need this one. kpm refuses to uninstall a package
+  // with a non-empty required_by, so the Uninstall button is left out then. All
+  // three are absent (so empty) on an older kpm.
+  QStringList requiresList = jsonStrings(pkg.value("requires").toArray());
+  QStringList requiresMissing = jsonStrings(pkg.value("requires_missing").toArray());
+  QStringList requiredBy = jsonStrings(pkg.value("required_by").toArray());
+  bool canUninstall = uninstallable && !isKpm && requiredBy.isEmpty();
 
   QVBoxLayout *layout = new QVBoxLayout(this);
   // 30px padding, plus the home-screen chrome insets on top/bottom (base Dialog).
@@ -161,6 +170,7 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
     // `kpm install`'s def review, so a user reading this page sees the declaration
     // even when nothing on the device is currently blocking.
     addInfo("Conflicts", declaredConflicts.join(", "));
+    addInfo("Requires", requiresList.join(", "));
   } else {
     addInfoGroups(layout); // the same facts and more, from `kpm info` (kpm-pkg-details)
   }
@@ -288,6 +298,36 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
     layout->addWidget(conflictDetail);
   }
 
+  // Requires: say what an install brings along, what an installed package still
+  // needs, and why Uninstall is missing. Names, not ids, like the conflict text.
+  if (!requiresMissing.isEmpty() || !requiredBy.isEmpty()) {
+    QStringList missingNames, neededByNames;
+    for (const QString &r : requiresMissing) {
+      missingNames.append(displayName(r));
+    }
+    for (const QString &d : requiredBy) {
+      neededByNames.append(displayName(d));
+    }
+    QString text;
+    if (!requiresMissing.isEmpty() && installed.isEmpty() && !staged) {
+      text = "Install also installs " + missingNames.join(", ") + ", which this package needs.";
+    } else if (!requiresMissing.isEmpty()) {
+      text = "Needs " + missingNames.join(", ") + ", which is not installed. Install it to use this package.";
+    }
+    if (!requiredBy.isEmpty() && !installed.isEmpty()) {
+      if (!text.isEmpty()) {
+        text += " ";
+      }
+      text += "Needed by " + neededByNames.join(", ") + ". Uninstall " +
+              (requiredBy.size() == 1 ? "it" : "them") + " first to uninstall this.";
+    }
+    if (!text.isEmpty()) {
+      Label *reqLabel = new Label(Label::Small, text);
+      reqLabel->setWordWrap(true);
+      layout->addWidget(reqLabel);
+    }
+  }
+
   // §D (firmware-compat): fw_untested is server-computed and true only when both
   // the def's tested_fw and the device firmware are known and the device is newer
   // by major.minor. The copy says "untested", never "broken" — advisory only.
@@ -365,13 +405,13 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
   } else if (!minKpmOk) {
     layout->addWidget(
         new Label(Label::Medium, "Requires kpm >= " + pkg.value("min_kpm").toString() + " — update kpm first."));
-    if (!installed.isEmpty() && uninstallable && !isKpm) {
+    if (!installed.isEmpty() && canUninstall) {
       addActionButton("Uninstall", SLOT(uninstall()));
     }
   } else if (!available) {
     layout->addWidget(
         new Label(Label::Medium, "Not available: " + pkg.value("unavailable_reason").toString() + "."));
-    if (!installed.isEmpty() && uninstallable && !isKpm) {
+    if (!installed.isEmpty() && canUninstall) {
       addActionButton("Uninstall", SLOT(uninstall()));
     }
   } else if (blockedFromInstall) {
@@ -408,7 +448,7 @@ DetailDialog::DetailDialog(QJsonObject package, const QHash<QString, QJsonObject
     if (selfUnenrolled) {
       addActionButton("Enable self-update", SLOT(enableSelfUpdate()));
     }
-    if (uninstallable && !isKpm) {
+    if (canUninstall) {
       addActionButton("Uninstall", SLOT(uninstall()));
     }
   }
@@ -869,6 +909,10 @@ void DetailDialog::addInfoGroups(QVBoxLayout *layout) {
   QStringList conflicts = jsonStrings(def.value("conflicts").toArray());
   if (!conflicts.isEmpty()) {
     extra << "Conflicts: " + conflicts.join(", ");
+  }
+  QStringList requiresDef = jsonStrings(def.value("requires").toArray());
+  if (!requiresDef.isEmpty()) {
+    extra << "Requires: " + requiresDef.join(", ");
   }
   if (!str(def, "min_kpm").isEmpty()) {
     extra << "Min kpm: " + str(def, "min_kpm");
