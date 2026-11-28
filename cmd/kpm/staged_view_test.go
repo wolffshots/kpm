@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"kpm/internal/config"
+	"kpm/internal/device"
 )
 
 // stageOnDisk stages nh v2 over v1 through the real merge and commit path and
@@ -87,19 +88,59 @@ func TestReadOnlyViewKeepsPendingStaging(t *testing.T) {
 	}
 }
 
-// After a firmware line change the staged slot moves (QT6-FIRMWARE6.md section
-// 3f), so a missing new-line tgz says nothing about the old one. The view must
-// not promote: only a mutating run (dropOldLineStaged) settles it.
-func TestReadOnlyViewSkipsFirmwareChange(t *testing.T) {
-	a := stageOnDisk(t, fw4) // KoboRoot.tgz, the 4.x slot, stays in place
-	writeFirmware(t, a, fw6) // the 6.x slot Kobo.tgz is absent
+// viewAfterFirmware stages nh on firmware from, applies the boot (consumed
+// removes the staged tgz), and moves the device to firmware to. It checks that
+// the read-only view writes nothing and shows what the next mutating run
+// records, and that the mutating run records want.
+func viewAfterFirmware(t *testing.T, from, to string, consumed bool, wantStaged, wantInstalled string) {
+	t.Helper()
+	a := stageOnDisk(t, from)
+	if consumed {
+		os.Remove(a.paths.StagedTgz()) // the boot installer of the old firmware ran
+	}
+	writeFirmware(t, a, to)
+	before, _ := os.ReadFile(a.paths.StateFile())
+
 	b, err := newApp(false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ps := b.state.Get("nh"); ps.StagedVersion != "v2" || ps.InstalledVersion != "v1" {
-		t.Errorf("after a line change: staged %q installed %q, want v2 and v1 (not promoted)", ps.StagedVersion, ps.InstalledVersion)
+	if ps := b.state.Get("nh"); ps.StagedVersion != wantStaged || ps.InstalledVersion != wantInstalled {
+		t.Errorf("view %s to %s: staged %q installed %q, want %q and %q", from, to, ps.StagedVersion, ps.InstalledVersion, wantStaged, wantInstalled)
 	}
+	if after, _ := os.ReadFile(a.paths.StateFile()); !bytes.Equal(before, after) {
+		t.Error("a read-only command wrote state.json")
+	}
+	if _, err := os.Stat(a.paths.StagedTgzFor(device.LineOf(from))); !consumed && err != nil {
+		t.Errorf("a read-only command removed the staged tgz: %v", err)
+	}
+
+	c, err := newApp(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.releaseLock()
+	if ps := c.state.Get("nh"); ps.StagedVersion != wantStaged {
+		t.Errorf("mutating run %s to %s: staged %q, want %q", from, to, ps.StagedVersion, wantStaged)
+	}
+}
+
+// The 4.x boot installed the tgz, and the next boot moved to 6.x. The view
+// must not show "reboot pending" on 6.x.
+func TestReadOnlyViewPromotesBeforeLineChange(t *testing.T) {
+	viewAfterFirmware(t, fw4, fw6, true, "", "v2")
+}
+
+// The device moved to 6.x before the 4.x slot was read. Firmware 6.x never
+// reads KoboRoot.tgz, so the next mutating run drops it (dropOldLineStaged).
+// The view shows that outcome and deletes nothing.
+func TestReadOnlyViewDropsOldLineStaging(t *testing.T) {
+	viewAfterFirmware(t, fw4, fw6, false, "", "v1")
+}
+
+// An update inside line 4 keeps the slot, so the view settles as usual.
+func TestReadOnlyViewSettlesSameLineUpdate(t *testing.T) {
+	viewAfterFirmware(t, fw4, "4.41.23145", true, "", "v2")
 }
 
 // The text of `kpm status` is the summary that the last check or update wrote.

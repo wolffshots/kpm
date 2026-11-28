@@ -627,11 +627,12 @@ func (a *App) settleStaged() (promos []state.Promotion, warnings []string, chang
 // will record. Read-only commands skip reconcile (B1), but the UI opens with
 // `kpm search --json`: without this view it showed "reboot pending" after the
 // boot that installed the package. It runs settleStaged in memory only and
-// writes nothing. After a firmware change it does not settle the staging,
-// because the staged slot can move with the firmware line (firmware.go). An
-// error keeps the stored state. It always shows the running binary as kpm's
-// own version, as seedSelf records it after any firmware change: a manual
-// KoboRoot.tgz install has no staging to settle.
+// writes nothing. After a firmware change it first does in memory what
+// dropOldLineStaged does on disk: if the old line's slot still holds the tgz
+// that kpm staged, the new firmware never reads it, so the staging is rolled
+// back. An error keeps the stored state. It always shows the running binary as
+// kpm's own version, as seedSelf records it after any firmware change: a
+// manual KoboRoot.tgz install has no staging to settle.
 func (a *App) viewStaged() {
 	if _, err := os.Stat(a.paths.PackageFile(selfID)); err == nil && version.Version != "dev" {
 		if ps := a.state.Get(selfID); ps.InstalledVersion != "" && !tagsEqual(ps.InstalledVersion, version.Version) {
@@ -639,9 +640,9 @@ func (a *App) viewStaged() {
 			a.viewChanged = true
 		}
 	}
-	cur, ok := a.paths.Firmware()
-	if ok && cur != a.state.Firmware && (a.state.Firmware != "" || device.LineOf(cur) == device.Line6) {
-		return
+	if old, _, fwChanged := a.detectFirmwareChange(); fwChanged && a.oldLineStaged(old) != "" {
+		a.state.RollbackStaged()
+		a.viewChanged = true
 	}
 	_, _, changed, err := a.settleStaged()
 	if err != nil {
