@@ -65,7 +65,7 @@ type tgzFile struct {
 func main() {
 	version := os.Getenv("KPM_VERSION")
 	if version == "" {
-		version = "0.16.0"
+		version = "0.16.1"
 	}
 
 	root, err := repoRoot()
