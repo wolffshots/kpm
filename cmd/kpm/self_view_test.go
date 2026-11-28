@@ -79,7 +79,7 @@ func TestReadOnlyViewSelfAfterFirmwareChange(t *testing.T) {
 func TestReadOnlyViewSelfKeepsRecord(t *testing.T) {
 	for _, c := range []struct{ stored, running string }{
 		{"0.15.0", "dev"},
-		{"v0.16.0", "0.16.0"},
+		{"0.16.0", "0.16.0"},
 	} {
 		selfAt(t, c.stored)
 		setVersion(t, c.running)
@@ -90,6 +90,24 @@ func TestReadOnlyViewSelfKeepsRecord(t *testing.T) {
 		if got := b.state.Get(selfID).InstalledVersion; got != c.stored || b.viewChanged {
 			t.Errorf("running %s over %s: installed %q changed %v, want %q unchanged", c.running, c.stored, got, b.viewChanged, c.stored)
 		}
+	}
+}
+
+// A self-update records the tag form "v0.16.0". The view shows the running
+// version "0.16.0", as seedSelf records it, and writes nothing.
+func TestReadOnlyViewSelfDropsTagPrefix(t *testing.T) {
+	a := selfAt(t, "v0.16.0")
+	setVersion(t, "0.16.0")
+	before, _ := os.ReadFile(a.paths.StateFile())
+	b, err := newApp(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.state.Get(selfID).InstalledVersion; got != "0.16.0" {
+		t.Errorf("installed %q, want 0.16.0", got)
+	}
+	if after, _ := os.ReadFile(a.paths.StateFile()); string(before) != string(after) {
+		t.Error("read-only view wrote state.json")
 	}
 }
 
